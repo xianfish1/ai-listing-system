@@ -1,0 +1,69 @@
+{
+  "source": "mabang_current_page",
+  "listing_mode": "cnsc_global",
+  "listing_mode_evidence": {
+    "global_param": true,
+    "matched_headers": ["全球商品价格", "泰国仓库存", "广州仓库存", "菲律宾仓库存"]
+  },
+  "page": {
+    "url": "https://publish.mabangerp.com/publish-ui/#/productDetailShopee?platformId=17&cKey=secret-token&global=4",
+    "platform": "shopee",
+    "country": ""
+  },
+  "store_category_state": {
+    "store": {
+      "id": "cnsc-store-1",
+      "name": "广州小苗服饰有限公司"
+    },
+    "category": {
+      "id": "100244",
+      "path": "男装(Men Clothes)>上衣(Tops)>T恤(T-Shirts)",
+      "id_path": ["100011", "100054", "100244"],
+      "is_leaf": true
+    }
+  },
+  "category_attributes": [],
+  "target_site_stores_loaded": false,
+  "target_site_stores": [],
+  "sku_rows": [
+    {"seller_sku": "11991_A||XS", "color": "A", "size": "XS", "global_price_cny": 19.2, "warehouse_stocks": {"TH": 300, "CN_GZ": 0, "PH": 0}},
+    {"seller_sku": "11991_A||S", "color": "A", "size": "S", "global_price_cny": 19.2, "warehouse_stocks": {"TH": 300, "CN_GZ": 0, "PH": 0}},
+    {"seller_sku": "11991_A||M", "color": "A", "size": "M", "global_price_cny": 19.2, "warehouse_stocks": {"TH": 300, "CN_GZ": 0, "PH": 0}},
+    {"seller_sku": "11991_A||L", "color": "A", "size": "L", "global_price_cny": 19.2, "warehouse_stocks": {"TH": 300, "CN_GZ": 0, "PH": 0}},
+    {"seller_sku": "11991_A||XL", "color": "A", "size": "XL", "global_price_cny": 22.2, "warehouse_stocks": {"TH": 300, "CN_GZ": 0, "PH": 0}},
+    {"seller_sku": "11991_A||XXL", "color": "A", "size": "XXL", "global_price_cny": 22.2, "warehouse_stocks": {"TH": 300, "CN_GZ": 0, "PH": 0}},
+    {"seller_sku": "11991_A||XXXL", "color": "A", "size": "XXXL", "global_price_cny": 22.2, "warehouse_stocks": {"TH": 300, "CN_GZ": 0, "PH": 0}},
+    {"seller_sku": "11991_B||XS", "color": "B", "size": "XS", "global_price_cny": 19.2, "warehouse_stocks": {"TH": 300, "CN_GZ": 0, "PH": 0}},
+    {"seller_sku": "11991_B||S", "color": "B", "size": "S", "global_price_cny": 19.2, "warehouse_stocks": {"TH": 300, "CN_GZ": 0, "PH": 0}},
+    {"seller_sku": "11991_B||M", "color": "B", "size": "M", "global_price_cny": 19.2, "warehouse_stocks": {"TH": 300, "CN_GZ": 0, "PH": 0}},
+    {"seller_sku": "11991_B||L", "color": "B", "size": "L", "global_price_cny": 19.2, "warehouse_stocks": {"TH": 300, "CN_GZ": 0, "PH": 0}},
+    {"seller_sku": "11991_B||XL", "color": "B", "size": "XL", "global_price_cny": 22.2, "warehouse_stocks": {"TH": 300, "CN_GZ": 0, "PH": 0}},
+    {"seller_sku": "11991_B||XXL", "color": "B", "size": "XXL", "global_price_cny": 22.2, "warehouse_stocks": {"TH": 300, "CN_GZ": 0, "PH": 0}},
+    {"seller_sku": "11991_B||XXXL", "color": "B", "size": "XXXL", "global_price_cny": 22.2, "warehouse_stocks": {"TH": 300, "CN_GZ": 0, "PH": 0}},
+    {"seller_sku": "11991_C||XS", "color": "C", "size": "XS", "global_price_cny": 19.2, "warehouse_stocks": {"TH": 300, "CN_GZ": 0, "PH": 0}},
+    {"seller_sku": "11991_C||S", "color": "C", "size": "S", "global_price_cny": 19.2, "warehouse_stocks": {"TH": 300, "CN_GZ": 0, "PH": 0}},
+    {"seller_sku": "11991_C||M", "color": "C", "size": "M", "global_price_cny": 19.2, "warehouse_stocks": {"TH": 300, "CN_GZ": 0, "PH": 0}},
+    {"seller_sku": "11991_C||L", "color": "C", "size": "L", "global_price_cny": 19.2, "warehouse_stocks": {"TH": 300, "CN_GZ": 0, "PH": 0}},
+    {"seller_sku": "11991_C||XL", "color": "C", "size": "XL", "global_price_cny": 22.2, "warehouse_stocks": {"TH": 300, "CN_GZ": 0, "PH": 0}},
+    {"seller_sku": "11991_C||XXL", "color": "C", "size": "XXL", "global_price_cny": 22.2, "warehouse_stocks": {"TH": 300, "CN_GZ": 0, "PH": 0}},
+    {"seller_sku": "11991_C||XXXL", "color": "C", "size": "XXXL", "global_price_cny": 22.2, "warehouse_stocks": {"TH": 300, "CN_GZ": 0, "PH": 0}},
+    {"seller_sku": "11991_D||XS", "color": "D", "size": "XS", "global_price_cny": 19.2, "warehouse_stocks": {"TH": 300, "CN_GZ": 0, "PH": 0}},
+    {"seller_sku": "11991_D||S", "color": "D", "size": "S", "global_price_cny": 19.2, "warehouse_stocks": {"TH": 300, "CN_GZ": 0, "PH": 0}},
+    {"seller_sku": "11991_D||M", "color": "D", "size": "M", "global_price_cny": 19.2, "warehouse_stocks": {"TH": 300, "CN_GZ": 0, "PH": 0}},
+    {"seller_sku": "11991_D||L", "color": "D", "size": "L", "global_price_cny": 19.2, "warehouse_stocks": {"TH": 300, "CN_GZ": 0, "PH": 0}},
+    {"seller_sku": "11991_D||XL", "color": "D", "size": "XL", "global_price_cny": 22.2, "warehouse_stocks": {"TH": 300, "CN_GZ": 0, "PH": 0}},
+    {"seller_sku": "11991_D||XXL", "color": "D", "size": "XXL", "global_price_cny": 22.2, "warehouse_stocks": {"TH": 300, "CN_GZ": 0, "PH": 0}},
+    {"seller_sku": "11991_D||XXXL", "color": "D", "size": "XXXL", "global_price_cny": 22.2, "warehouse_stocks": {"TH": 300, "CN_GZ": 0, "PH": 0}}
+  ],
+  "transaction_information": {
+    "weight_kg": 0.3,
+    "package_length_cm": 20,
+    "package_width_cm": 15,
+    "package_height_cm": 2
+  },
+  "promotion_options": [],
+  "provenance": {
+    "listing_mode": "url+vxe-headers",
+    "sku_rows": "vue:vxe-table.tableData"
+  }
+}

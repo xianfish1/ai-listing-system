@@ -1,0 +1,33 @@
+# 本机密钥与运行数据 —— 永不进仓库、永不进安装包
+.env
+data/
+storage/
+dist/
+tmp_upload/
+
+# Python / Node 产物
+__pycache__/
+*.py[cod]
+.pytest_cache/
+node_modules/
+.venv-browser-use/
+vendor/chrome/
+
+# 日志与临时文件
+*.log
+*.tmp
+*.broken.json
+*.inspect.ndjson
+tmp-*.xlsx
+.playwright-cli/
+output/playwright/
+outputs/
+
+# agent / 本机临时产物
+.scratch/
+.claude/
+.codex/
+%SystemDrive%/
+findings.md
+progress.md
+task_plan.md

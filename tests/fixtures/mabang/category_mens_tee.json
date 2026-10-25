@@ -1,0 +1,29 @@
+{
+  "platform": "shopee",
+  "country": "PH",
+  "marketplace_category_id": "100244",
+  "marketplace_category_path": "Men Clothes > Tops > T-Shirts",
+  "display_name": "Shopee PH Mens T-Shirts",
+  "page_url": "https://www.mabangerp.com/index.php?category=100244",
+  "fields": [
+    {
+      "field_id": "brand",
+      "label": "Brand",
+      "type": "single_select",
+      "required": true,
+      "options": [{"value": "NoBrand", "label": "No Brand"}],
+      "default_value": "NoBrand",
+      "automation": {"page_field_id": "brand"}
+    },
+    {
+      "field_id": "material",
+      "label": "Material",
+      "type": "single_select",
+      "required": true,
+      "options": [{"value": "Cotton", "label": "Cotton"}],
+      "default_value": "Cotton",
+      "automation": {"page_field_id": "material"}
+    }
+  ],
+  "variation": {"required": true, "axes": ["color", "size"]}
+}

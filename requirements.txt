@@ -1,0 +1,14 @@
+openpyxl
+pytest
+cryptography>=44
+
+# 视觉识别前把超大商品图缩小（services/api/vision_listing.py）。缺少 Pillow 时
+# 仍可运行：只发送不超过硬上限的原图，超出上限的图片会被跳过。
+Pillow>=10
+
+# Runtime requirement for MP4 metadata validation: ffprobe must be available on PATH.
+# The system never invokes ffmpeg or transcodes videos.
+
+# Optional PostgreSQL storage drivers. Install one when using STORAGE_BACKEND=postgres.
+# psycopg
+# psycopg2-binary

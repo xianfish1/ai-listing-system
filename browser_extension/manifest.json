@@ -1,0 +1,30 @@
+{
+  "manifest_version": 3,
+  "name": "AI Listing · 马帮采集器",
+  "version": "0.2.0",
+  "description": "采集马帮站点商品与 CNSC 全球商品配置，推送到内网 AI Listing 服务。",
+  "permissions": ["storage", "activeTab"],
+  "host_permissions": [
+    "https://*.mabangerp.com/*",
+    "http://*/*",
+    "https://*/*"
+  ],
+  "content_scripts": [
+    {
+      "matches": ["https://*.mabangerp.com/*"],
+      "js": ["content.js"],
+      "run_at": "document_idle",
+      "all_frames": true
+    }
+  ],
+  "web_accessible_resources": [
+    {
+      "resources": ["page_capture.js"],
+      "matches": ["https://*.mabangerp.com/*"]
+    }
+  ],
+  "action": {
+    "default_title": "AI Listing 采集器",
+    "default_popup": "popup.html"
+  }
+}

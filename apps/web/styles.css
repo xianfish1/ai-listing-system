@@ -1,0 +1,7197 @@
+/* ============================================================
+   马帮导出工作台 — 操控台设计系统
+   Design tokens
+   ============================================================ */
+:root {
+  color-scheme: light;
+
+  /* Surfaces */
+  --bg: #f2f4f7;
+  --panel: #ffffff;
+  --panel-soft: #f8fafc;
+  --rail: #16181d;
+  --rail-hover: #23262e;
+  --rail-active: #2a2e39;
+
+  /* Ink */
+  --text: #1a1d23;
+  --text-soft: #4a5261;
+  --muted: #7c8598;
+  --on-rail: #9aa3b2;
+  --on-rail-active: #ffffff;
+
+  /* Lines */
+  --line: #e3e7ec;
+  --line-soft: #edf0f4;
+
+  /* Brand + status */
+  --indigo: #4f46e5;
+  --indigo-soft: #eef0fe;
+  --indigo-ink: #3730a3;
+  --green: #059669;
+  --green-soft: #e7f6ef;
+  --amber: #d97706;
+  --amber-soft: #fdf3e3;
+  --red: #dc2626;
+  --red-soft: #fdecec;
+
+  /* Legacy aliases kept so existing markup/JS keep working */
+  --blue: var(--indigo);
+  --primary: var(--indigo);
+  --warning: var(--amber);
+  --danger: var(--red);
+  --surface: var(--panel);
+  --workspace-bg: var(--bg);
+  --soft: var(--panel-soft);
+  --border: var(--line);
+  --accent: var(--indigo);
+
+  /* Elevation */
+  --shadow-sm: 0 1px 2px rgba(21, 26, 38, 0.06), 0 1px 3px rgba(21, 26, 38, 0.05);
+  --shadow-md: 0 4px 12px rgba(21, 26, 38, 0.08), 0 2px 4px rgba(21, 26, 38, 0.04);
+  --shadow-lg: 0 20px 48px rgba(21, 26, 38, 0.18);
+
+  /* Type */
+  --font-sans: "Inter", "Microsoft YaHei", "PingFang SC", system-ui, sans-serif;
+  --font-mono: "JetBrains Mono", "Cascadia Code", Consolas, monospace;
+
+  --radius-sm: 8px;
+  --radius-md: 12px;
+  --radius-lg: 16px;
+
+  /* Automation status glyph system — a single palette that reads across cards,
+     table rows, modal headers, and dashboard tiles. Aligned to the four states
+     the operator monitors: not started · in flight · attention · done. */
+  --glyph-idle: #9ca3af;
+  --glyph-watch: var(--amber);
+  --glyph-alert: var(--red);
+  --glyph-done: var(--green);
+
+  /* Kraft brown — brand-only accent (rail brand mark, hover underline).
+     Deliberately not a UI action color; do not use for buttons or focus rings. */
+  --kraft: #8b7355;
+
+  /* Kraft family — the spec-sheet / tech-pack identity for the maintenance and
+     editor surfaces (商品维护 · 模板维护 · 副本检查). Structural accent only:
+     field codes, seam rules, document bands. Never a button or focus color. */
+  --kraft-deep: #6f5a41;
+  --kraft-soft: #f5f1e8;
+  --kraft-wash: #faf7f1;
+  --kraft-line: #e6dcc9;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  font-family: var(--font-sans);
+  font-size: 14px;
+  line-height: 1.5;
+  background: var(--bg);
+  color: var(--text);
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+
+/* Mono for the data that matters: SKUs, IDs, prices, counts */
+code,
+.mono,
+td code,
+.pipeline-count,
+.metric strong {
+  font-family: var(--font-mono);
+  font-feature-settings: "tnum" 1;
+}
+
+/* ============================================================
+   Controls
+   ============================================================ */
+button,
+input,
+select,
+textarea {
+  font: inherit;
+}
+
+button {
+  border: 1px solid var(--line);
+  background: var(--panel);
+  color: var(--text);
+  border-radius: var(--radius-sm);
+  padding: 8px 14px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: background 120ms ease, border-color 120ms ease, box-shadow 120ms ease, color 120ms ease;
+}
+
+button:hover {
+  border-color: #cfd5df;
+  background: var(--panel-soft);
+}
+
+/* Primary action buttons: the last button in an action row, or explicit primaries */
+.actions > button:last-of-type:not(.secondary):not([disabled]),
+#create-base-product-btn,
+#create-store-template-btn,
+#save-settings-btn,
+#scan-assets-btn,
+#listing-copy-save,
+#save-ai-connection-btn,
+#save-description-profile-btn {
+  border-color: var(--indigo);
+  background: var(--indigo);
+  color: #fff;
+}
+
+.actions > button:last-of-type:not(.secondary):not([disabled]):hover,
+#create-base-product-btn:hover,
+#create-store-template-btn:hover,
+#save-settings-btn:hover,
+#scan-assets-btn:hover,
+#listing-copy-save:hover,
+#save-ai-connection-btn:hover,
+#save-description-profile-btn:hover {
+  background: #4338ca;
+  border-color: #4338ca;
+}
+
+button.secondary {
+  background: var(--panel);
+  color: var(--text-soft);
+}
+
+/* 次级动作按钮（存为模板/识别顺序/应用到全部 SKU 这类行内小操作）。 */
+.secondary-button {
+  padding: 6px 12px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--panel);
+  color: var(--text-soft);
+  font-size: 13px;
+  font-weight: 500;
+  white-space: nowrap;
+  cursor: pointer;
+  transition: background 120ms ease, border-color 120ms ease, color 120ms ease;
+}
+
+.secondary-button:hover {
+  border-color: #cfd5df;
+  background: var(--panel-soft);
+  color: var(--text);
+}
+
+.secondary-button.mini {
+  padding: 3px 9px;
+  font-size: 12px;
+}
+
+/* 全局 hidden 兜底：组件类的 display 规则会盖掉浏览器默认的 [hidden] 隐藏，
+   必须用更高权重的显式规则压回去（旧的做法是每个组件各写一条，漏一条就漏显）。 */
+[hidden] { display: none !important; }
+
+/* 模板列表/卡片上的模式与就绪徽章。 */
+.template-mode-badge,
+.template-readiness-badge {
+  display: inline-block;
+  margin-left: 6px;
+  padding: 1px 7px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 18px;
+  vertical-align: middle;
+  white-space: nowrap;
+}
+
+.template-mode-badge {
+  border: 1px solid var(--indigo);
+  background: var(--indigo-soft);
+  color: var(--indigo-ink);
+}
+
+.template-readiness-badge {
+  border: 1px solid var(--amber);
+  background: var(--amber-soft);
+  color: var(--amber);
+  cursor: help;
+}
+
+button:focus-visible,
+input:focus-visible,
+select:focus-visible,
+textarea:focus-visible,
+.button-link:focus-visible,
+.rail-item:focus-visible,
+.pipeline-stage:focus-visible {
+  outline: 2px solid var(--indigo);
+  outline-offset: 2px;
+}
+
+[aria-invalid="true"] {
+  border-color: var(--red);
+  box-shadow: 0 0 0 3px var(--red-soft);
+}
+
+button:disabled {
+  cursor: not-allowed;
+  opacity: 0.45;
+}
+
+input,
+select,
+textarea {
+  width: 100%;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  padding: 9px 11px;
+  background: var(--panel);
+  color: var(--text);
+  transition: border-color 120ms ease, box-shadow 120ms ease;
+}
+
+input:hover,
+select:hover,
+textarea:hover {
+  border-color: #cfd5df;
+}
+
+input:focus,
+select:focus,
+textarea:focus {
+  border-color: var(--indigo);
+  box-shadow: 0 0 0 3px var(--indigo-soft);
+  outline: none;
+}
+
+input::placeholder,
+textarea::placeholder {
+  color: #aab2c0;
+}
+
+textarea {
+  min-height: 86px;
+  resize: vertical;
+  line-height: 1.55;
+}
+
+/* ============================================================
+   App shell — left rail + main
+   ============================================================ */
+.app {
+  display: grid;
+  grid-template-columns: 200px minmax(0, 1fr);
+  min-height: 100vh;
+  min-width: 0;
+}
+
+.rail {
+  position: sticky;
+  top: 0;
+  align-self: start;
+  display: flex;
+  flex-direction: column;
+  height: 100vh;
+  padding: 18px 12px;
+  background: var(--rail);
+  color: var(--on-rail);
+}
+
+.rail-brand {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 6px 10px 20px;
+  font-size: 19px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  color: #fff;
+}
+
+.rail-brand::before {
+  content: "";
+  width: 22px;
+  height: 22px;
+  border-radius: 7px;
+  background: linear-gradient(135deg, var(--indigo), #7c74f0);
+  box-shadow: 0 2px 8px rgba(79, 70, 229, 0.5);
+}
+
+.rail-nav {
+  display: grid;
+  gap: 3px;
+}
+
+.rail-spacer {
+  flex: 1;
+}
+
+.rail-item {
+  display: flex;
+  align-items: center;
+  gap: 11px;
+  width: 100%;
+  padding: 9px 11px;
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--on-rail);
+  font-size: 13.5px;
+  font-weight: 500;
+  text-align: left;
+  cursor: pointer;
+  transition: background 120ms ease, color 120ms ease;
+}
+
+.rail-item svg {
+  flex: 0 0 20px;
+  opacity: 0.85;
+}
+
+.rail-item:hover {
+  background: var(--rail-hover);
+  color: #e8ebf0;
+}
+
+.rail-item.active {
+  background: var(--rail-active);
+  color: var(--on-rail-active);
+}
+
+.rail-item.active svg {
+  opacity: 1;
+  color: #a5a0f5;
+}
+
+.main {
+  padding: 28px clamp(20px, 3vw, 40px) 48px;
+  min-width: 0;
+}
+
+/* ============================================================
+   Topbar + typography
+   ============================================================ */
+.topbar {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  margin-bottom: 22px;
+}
+
+h1,
+h2,
+h3 {
+  margin: 0;
+  letter-spacing: -0.01em;
+}
+
+h1 {
+  font-size: 25px;
+  font-weight: 700;
+}
+
+h2 {
+  font-size: 16px;
+  font-weight: 600;
+}
+
+.topbar p,
+.muted {
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.topbar p {
+  margin: 5px 0 0;
+}
+
+.topbar #refresh-btn {
+  flex: 0 0 auto;
+}
+
+.operation-feedback {
+  position: sticky;
+  top: 14px;
+  z-index: 15;
+  margin: 0 0 18px;
+  padding: 11px 14px;
+  border: 1px solid #c8ccf4;
+  border-radius: var(--radius-sm);
+  color: var(--indigo-ink);
+  background: var(--indigo-soft);
+  box-shadow: var(--shadow-md);
+  font-size: 13.5px;
+}
+
+.operation-feedback.success {
+  border-color: #a9e0c6;
+  color: #0b6848;
+  background: var(--green-soft);
+}
+
+.operation-feedback.error {
+  border-color: #f2c0c0;
+  color: #991b1b;
+  background: var(--red-soft);
+}
+
+/* ============================================================
+   Views
+   ============================================================ */
+.view {
+  display: none;
+}
+
+.view.active {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 18px;
+}
+
+/* ============================================================
+   Signature: the listing pipeline
+   ============================================================ */
+.pipeline {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  gap: 0;
+  padding: 4px;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-sm);
+  overflow: hidden;
+}
+
+.pipeline-stage {
+  position: relative;
+  display: grid;
+  grid-template-columns: auto 1fr auto;
+  grid-template-areas: "dot label count";
+  align-items: center;
+  gap: 4px 10px;
+  padding: 14px 18px;
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  text-align: left;
+  cursor: pointer;
+  transition: background 140ms ease;
+}
+
+/* Connector line running between stages */
+.pipeline-stage::after {
+  content: "";
+  position: absolute;
+  top: 50%;
+  right: -1px;
+  width: 2px;
+  height: 26px;
+  transform: translateY(-50%);
+  background: var(--line);
+}
+
+.pipeline-stage:last-child::after {
+  display: none;
+}
+
+.pipeline-stage:hover {
+  background: var(--panel-soft);
+}
+
+.pipeline-dot {
+  grid-area: dot;
+  width: 11px;
+  height: 11px;
+  border-radius: 50%;
+  border: 2px solid #cbd2dd;
+  background: var(--panel);
+  transition: border-color 160ms ease, background 160ms ease, box-shadow 160ms ease;
+}
+
+.pipeline-label {
+  grid-area: label;
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--muted);
+  white-space: nowrap;
+}
+
+.pipeline-count {
+  grid-area: count;
+  font-size: 20px;
+  font-weight: 600;
+  color: var(--text-soft);
+  line-height: 1;
+}
+
+.pipeline-stage.done .pipeline-dot {
+  border-color: var(--green);
+  background: var(--green);
+}
+
+.pipeline-stage.done .pipeline-label {
+  color: var(--text-soft);
+}
+
+.pipeline-stage.active {
+  background: var(--indigo-soft);
+}
+
+.pipeline-stage.active .pipeline-dot {
+  border-color: var(--indigo);
+  background: var(--indigo);
+  box-shadow: 0 0 0 4px rgba(79, 70, 229, 0.18);
+}
+
+.pipeline-stage.active .pipeline-label {
+  color: var(--indigo-ink);
+  font-weight: 600;
+}
+
+.pipeline-stage.active .pipeline-count {
+  color: var(--indigo);
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .pipeline-stage.active .pipeline-dot {
+    animation: pipelinePulse 2.4s ease-in-out infinite;
+  }
+}
+
+@keyframes pipelinePulse {
+  0%, 100% { box-shadow: 0 0 0 4px rgba(79, 70, 229, 0.18); }
+  50% { box-shadow: 0 0 0 7px rgba(79, 70, 229, 0.08); }
+}
+
+/* ============================================================
+   Metrics + panels
+   ============================================================ */
+.metrics {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 14px;
+}
+
+.metric {
+  padding: 18px;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-sm);
+}
+
+.metric span {
+  display: block;
+  color: var(--muted);
+  font-size: 12.5px;
+  font-weight: 500;
+  margin-bottom: 10px;
+}
+
+.metric strong {
+  font-size: 30px;
+  font-weight: 600;
+  letter-spacing: -0.02em;
+}
+
+.panel {
+  padding: 20px;
+  min-width: 0;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-sm);
+}
+
+.dashboard-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 18px;
+}
+
+.dashboard-list,
+.dashboard-next-action {
+  display: grid;
+  gap: 8px;
+  color: var(--text-soft);
+  font-size: 13.5px;
+}
+
+.dashboard-next-action {
+  grid-template-columns: 1fr auto;
+  align-items: center;
+}
+
+.panel-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 16px;
+}
+
+.inline-form {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 14px;
+}
+
+.panel-head input,
+.inline-form input {
+  max-width: 520px;
+}
+
+/* ============================================================
+   Forms + labels
+   ============================================================ */
+.form-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 14px;
+  margin: 16px 0;
+  min-width: 0;
+}
+
+.form-grid.compact-form {
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+}
+
+label {
+  display: grid;
+  gap: 7px;
+  color: var(--text-soft);
+  font-size: 12.5px;
+  font-weight: 500;
+}
+
+.wide {
+  grid-column: span 3;
+}
+
+.actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin-top: 18px;
+}
+
+.actions.compact {
+  margin-top: 0;
+}
+
+.actions.compact button {
+  padding: 7px 12px;
+}
+
+/* ============================================================
+   Subnav (tabs)
+   ============================================================ */
+.subnav {
+  display: flex;
+  gap: 4px;
+  border-bottom: 1px solid var(--line);
+  margin-bottom: 4px;
+}
+
+.subnav-item {
+  border: 0;
+  border-bottom: 2px solid transparent;
+  border-radius: 0;
+  background: transparent;
+  color: var(--muted);
+  padding: 11px 14px;
+  font-weight: 500;
+  margin-bottom: -1px;
+}
+
+.subnav-item:hover {
+  background: transparent;
+  color: var(--text-soft);
+}
+
+.subnav-item.active {
+  border-bottom-color: var(--indigo);
+  color: var(--indigo);
+}
+
+.maintenance-tab {
+  display: none;
+}
+
+.maintenance-tab.active {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 18px;
+}
+
+/* ============================================================
+   Category / marketplace picker
+   ============================================================ */
+.category-field-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 12px 14px;
+  margin-top: 14px;
+  padding-top: 14px;
+  border-top: 1px solid var(--line-soft);
+  align-items: start;
+}
+
+.category-field {
+  display: grid;
+  gap: 6px;
+  align-content: start;
+}
+
+.category-field span {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+/* Multi-select attribute boxes (材料 / 图案 / 风格 …): give them a fixed,
+   scrollable height so they line up with the single-select dropdowns beside
+   them instead of ballooning to different heights and raggeding the grid. */
+.category-field select[multiple] {
+  height: 92px;
+  padding: 4px;
+  overflow-y: auto;
+}
+
+.category-field select[multiple] option {
+  padding: 3px 6px;
+  border-radius: 4px;
+}
+
+.category-field select[multiple] option:checked {
+  background: var(--indigo-soft) linear-gradient(0deg, var(--indigo-soft), var(--indigo-soft));
+  color: var(--indigo-ink);
+  font-weight: 600;
+}
+
+.marketplace-category-picker {
+  grid-column: 1 / -1;
+  display: grid;
+  gap: 7px;
+  min-width: 0;
+}
+
+.marketplace-category-results {
+  max-height: 260px;
+  overflow-y: auto;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--panel);
+}
+
+.marketplace-category-breadcrumbs {
+  min-height: 28px;
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 4px;
+  padding: 4px 0;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.marketplace-category-breadcrumbs button {
+  border: 0;
+  background: transparent;
+  color: var(--indigo);
+  padding: 2px 4px;
+  font: inherit;
+  cursor: pointer;
+}
+
+.marketplace-category-breadcrumbs button[aria-current="page"] {
+  color: var(--text);
+  cursor: default;
+}
+
+.marketplace-category-breadcrumb-separator {
+  color: var(--muted);
+}
+
+.marketplace-category-option {
+  width: 100%;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 12px;
+  border: 0;
+  border-bottom: 1px solid var(--line-soft);
+  border-radius: 0;
+  text-align: left;
+}
+
+.marketplace-category-option:last-child {
+  border-bottom: 0;
+}
+
+.marketplace-category-option:hover,
+.marketplace-category-option:focus-visible {
+  background: var(--indigo-soft);
+}
+
+.marketplace-category-option span {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.marketplace-category-option small {
+  display: block;
+  margin-top: 3px;
+  color: var(--muted);
+}
+
+.marketplace-category-option code {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.marketplace-category-branch {
+  width: 18px;
+  color: var(--muted);
+  font-size: 20px;
+  line-height: 1;
+  text-align: right;
+}
+
+.marketplace-category-status-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  min-height: 36px;
+}
+
+.marketplace-category-status-row span {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+/* ---- 基础商品类目三列级联选择器（跟马帮一样逐级选） ---- */
+.category-cascader {
+  display: grid;
+  gap: 8px;
+  min-width: 0;
+}
+
+.category-cascader-search input {
+  width: 100%;
+}
+
+.category-cascader-cols {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+  align-items: stretch;
+}
+
+.category-cascader-col {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--panel);
+  overflow: hidden;
+}
+
+.category-cascader-col-head {
+  padding: 6px 10px;
+  font-size: 12px;
+  color: var(--muted);
+  border-bottom: 1px solid var(--line-soft);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.category-cascader-list {
+  flex: 1;
+  min-height: 220px;
+  max-height: 320px;
+  overflow-y: auto;
+  padding: 4px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.category-cascader-item {
+  width: 100%;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 8px;
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  text-align: left;
+  font: inherit;
+  cursor: pointer;
+}
+
+.category-cascader-item > span {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.category-cascader-item:hover,
+.category-cascader-item:focus-visible {
+  background: var(--indigo-soft);
+}
+
+.category-cascader-item.selected {
+  background: var(--indigo-soft);
+  color: var(--indigo-ink);
+  font-weight: 600;
+}
+
+.category-cascader-item.is-leaf.selected {
+  outline: 1px solid var(--indigo);
+}
+
+.category-cascader-arrow {
+  color: var(--muted);
+  font-size: 16px;
+  line-height: 1;
+}
+
+.category-cascader-more {
+  margin-top: 4px;
+  padding: 5px 8px;
+  border: 1px dashed var(--line);
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--indigo);
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.category-cascader-more:hover,
+.category-cascader-more:focus-visible {
+  border-color: var(--indigo);
+  background: var(--indigo-soft);
+}
+
+.category-cascader-empty-note {
+  margin: 0;
+  padding: 10px;
+  font-size: 12px;
+}
+
+.category-cascader-breadcrumbs {
+  min-height: 28px;
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 4px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.category-cascader-breadcrumbs button {
+  border: 0;
+  background: transparent;
+  color: var(--indigo);
+  padding: 2px 4px;
+  font: inherit;
+  cursor: pointer;
+}
+
+.category-cascader-breadcrumbs button[aria-current="page"] {
+  color: var(--text);
+  cursor: default;
+}
+
+.category-cascader-breadcrumb-sep {
+  color: var(--muted);
+}
+
+@media (max-width: 720px) {
+  .category-cascader-cols {
+    grid-template-columns: 1fr;
+  }
+
+  .category-cascader-list {
+    min-height: 140px;
+    max-height: 200px;
+  }
+}
+
+.category-version-admin {
+  margin-top: 16px;
+  border-top: 1px solid var(--line);
+}
+
+/* ============================================================
+   Settings
+   ============================================================ */
+.settings-layout {
+  display: grid;
+  grid-template-columns: 220px minmax(0, 1fr);
+  min-height: 620px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-md);
+  overflow: hidden;
+  background: var(--panel);
+  box-shadow: var(--shadow-sm);
+}
+
+.settings-nav {
+  align-content: start;
+  display: grid;
+  gap: 2px;
+  padding: 14px;
+  border-right: 1px solid var(--line);
+  background: var(--panel-soft);
+}
+
+.settings-nav-item {
+  width: 100%;
+  text-align: left;
+  background: transparent;
+  border-color: transparent;
+  color: var(--text-soft);
+  font-weight: 500;
+  padding: 9px 12px;
+}
+
+.settings-nav-item:hover {
+  background: var(--panel);
+  border-color: transparent;
+}
+
+.settings-nav-item.active {
+  color: var(--indigo-ink);
+  border-color: transparent;
+  background: var(--indigo-soft);
+}
+
+.settings-content {
+  display: grid;
+  grid-template-rows: 1fr auto;
+  min-width: 0;
+  padding: 24px;
+}
+
+.settings-group {
+  display: none;
+  align-content: start;
+  gap: 16px;
+}
+
+.settings-group.active {
+  display: grid;
+}
+
+.settings-connection-list {
+  display: grid;
+  gap: 10px;
+}
+
+.settings-connection-row,
+.safety-policy {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 14px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--panel-soft);
+}
+
+/* 只让左侧信息列变成纵向堆叠。以前的 `.settings-connection-row div` 连右侧按钮容器
+   一起覆盖成 grid，把「编辑 / 删除」竖着摞起来，一行被撑得很高。 */
+.settings-connection-row > div:not(.settings-connection-actions),
+.safety-policy {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+}
+
+.settings-connection-row span,
+.safety-policy span {
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.settings-connection-actions {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 8px;
+  flex: 0 0 auto;
+}
+
+.settings-actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding-top: 18px;
+  border-top: 1px solid var(--line);
+}
+
+.worker-log {
+  max-height: 240px;
+  margin: 0;
+  overflow: auto;
+  padding: 14px;
+  border: 1px solid #2a2e39;
+  border-radius: var(--radius-sm);
+  background: #16181d;
+  color: #cdd6e6;
+  font: 12px/1.6 var(--font-mono);
+  white-space: pre-wrap;
+}
+
+.worker-status {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 20px;
+  margin: 6px 0 0;
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.worker-status-dot {
+  width: 10px;
+  height: 10px;
+  flex: 0 0 10px;
+  border: 2px solid var(--panel);
+  border-radius: 50%;
+  background: currentColor;
+  box-shadow: 0 0 0 1px currentColor;
+}
+
+.worker-status-running { color: var(--green); }
+/* 按需启动下「已关闭」是预期状态（有任务会自动唤醒），用弱化色而不是告警色。 */
+.worker-status-idle { color: var(--text-soft); }
+.worker-status-warning { color: var(--amber); }
+.worker-status-error { color: var(--red); }
+
+.toggle-field {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.toggle-field input {
+  width: auto;
+  accent-color: var(--indigo);
+}
+
+.category-version-admin summary {
+  cursor: pointer;
+  padding: 12px 0;
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.category-version-content {
+  padding-bottom: 10px;
+}
+
+.category-version-admin h3 {
+  margin: 0;
+  font-size: 15px;
+}
+
+/* ============================================================
+   Deployment readiness checks
+   ============================================================ */
+.deployment-readiness {
+  display: grid;
+  gap: 12px;
+}
+
+.deployment-summary {
+  display: grid;
+  gap: 4px;
+}
+
+.deployment-summary span,
+.deployment-actions span,
+.deployment-check span {
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.deployment-checks {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.deployment-check {
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  padding: 12px;
+  background: var(--panel-soft);
+}
+
+.deployment-check.ok { border-color: #ade0c4; background: var(--green-soft); }
+.deployment-check.warning { border-color: #f0d29a; background: var(--amber-soft); }
+.deployment-check.error { border-color: #f0b8b8; background: var(--red-soft); }
+
+.deployment-check strong,
+.deployment-actions span {
+  display: block;
+}
+
+.deployment-actions {
+  display: grid;
+  gap: 4px;
+  border-top: 1px solid var(--line);
+  padding-top: 10px;
+}
+
+/* ============================================================
+   Tables
+   ============================================================ */
+.table-wrap {
+  width: 100%;
+  max-width: 100%;
+  min-width: 0;
+  overflow: auto;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+}
+
+.table-empty-row td {
+  padding: 28px 16px;
+  text-align: center;
+  color: var(--muted);
+  background: var(--panel-soft);
+}
+
+table {
+  width: 100%;
+  border-collapse: collapse;
+  min-width: 760px;
+  background: var(--panel);
+}
+
+td input,
+td select {
+  min-width: 92px;
+}
+
+th,
+td {
+  padding: 11px 12px;
+  border-bottom: 1px solid var(--line-soft);
+  text-align: left;
+  vertical-align: middle;
+  font-size: 13.5px;
+}
+
+tbody tr:last-child td {
+  border-bottom: 0;
+}
+
+tbody tr {
+  transition: background 100ms ease;
+}
+
+tbody tr:hover {
+  background: var(--panel-soft);
+}
+
+th {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  background: var(--panel-soft);
+  color: var(--text-soft);
+  font-weight: 600;
+  font-size: 12px;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+  vertical-align: middle;
+}
+
+/* SKU / IDs read as data */
+td code {
+  font-size: 12.5px;
+  color: var(--text-soft);
+}
+
+/* ============================================================
+   Status badges
+   ============================================================ */
+.status {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  border-radius: 999px;
+  padding: 3px 10px;
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--text-soft);
+  background: #eef1f5;
+  white-space: nowrap;
+}
+
+.status.ready,
+.status.published {
+  color: var(--green);
+  background: var(--green-soft);
+}
+
+.status.online {
+  color: var(--green);
+  background: var(--green-soft);
+}
+
+.status.stale {
+  color: var(--amber);
+  background: var(--amber-soft);
+}
+
+.status.waiting_manual {
+  color: var(--amber);
+  background: var(--amber-soft);
+}
+
+.status.needs_work {
+  color: var(--red);
+  background: var(--red-soft);
+}
+
+.status.failed,
+.status.invalid_size {
+  color: var(--red);
+  background: var(--red-soft);
+}
+
+.status.ready-to-list {
+  color: var(--green);
+  background: var(--green-soft);
+}
+
+.status.needs-work {
+  color: var(--red);
+  background: var(--red-soft);
+}
+
+/* ============================================================
+   Task error board + filters
+   ============================================================ */
+.task-error-board {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(160px, 1fr));
+  gap: 12px;
+  margin: 14px 0;
+}
+
+.task-error-card {
+  display: grid;
+  gap: 4px;
+  text-align: left;
+  min-height: 88px;
+  align-content: start;
+  border-radius: var(--radius-sm);
+  background: var(--panel-soft);
+}
+
+.task-error-card.active {
+  border-color: var(--indigo);
+  background: var(--indigo-soft);
+}
+
+.task-error-card strong {
+  font-size: 26px;
+  font-weight: 600;
+}
+
+.task-error-card small,
+.task-error-message {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.task-filters {
+  display: grid;
+  grid-template-columns: 150px 210px repeat(3, minmax(130px, 1fr)) auto;
+  gap: 10px;
+  align-items: center;
+  margin: 14px 0;
+}
+
+.reason-link {
+  border: 0;
+  padding: 0;
+  color: var(--indigo);
+  background: transparent;
+  text-align: left;
+}
+
+.reason-link:hover {
+  background: transparent;
+  text-decoration: underline;
+}
+
+/* ============================================================
+   Bundle / plan / policy cards
+   ============================================================ */
+.bundle-summary { display: grid; gap: 12px; }
+
+.bundle-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.bundle-metric,
+.bundle-blocking,
+.bundle-title,
+.bundle-script,
+.bundle-snapshot {
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--panel-soft);
+  padding: 12px 14px;
+}
+
+.bundle-metric span,
+.bundle-title span,
+.bundle-blocking span,
+.bundle-script span,
+.bundle-snapshot span {
+  display: block;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.bundle-metric strong {
+  display: block;
+  margin-top: 5px;
+  font-size: 18px;
+  font-weight: 600;
+}
+
+.bundle-blocking.has-blocking { border-color: #f0b8b8; background: var(--red-soft); }
+.bundle-title { display: grid; gap: 6px; }
+
+.bundle-script {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1.2fr);
+  gap: 10px;
+}
+
+.bundle-script span { margin-top: 5px; word-break: break-word; }
+
+.bundle-snapshot {
+  display: grid;
+  grid-template-columns: 1.6fr repeat(4, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.bundle-snapshot.no-snapshot { background: var(--panel-soft); }
+.bundle-snapshot.has-snapshot { border-color: #ade0c4; background: var(--green-soft); }
+.bundle-snapshot span { margin-top: 5px; word-break: break-word; }
+.bundle-action-wrap { margin-top: 12px; }
+.bundle-selector,
+.bundle-action-wrap code { word-break: break-all; }
+
+.plan-summary { display: grid; gap: 10px; margin-top: 14px; }
+
+.plan-summary-item,
+.plan-list-item,
+.policy-item,
+.plan-step {
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--panel-soft);
+}
+
+.plan-summary-item,
+.plan-list-item { padding: 12px 14px; }
+
+.plan-chain {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 12px;
+  margin-top: 14px;
+}
+
+.plan-step {
+  display: grid;
+  gap: 8px;
+  min-height: 116px;
+  padding: 14px;
+}
+
+.plan-step small { color: var(--muted); line-height: 1.5; }
+
+.policy-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+  margin-top: 14px;
+}
+
+.policy-item {
+  display: grid;
+  gap: 8px;
+  padding: 14px;
+  min-height: 84px;
+}
+
+.policy-item span { color: var(--muted); font-size: 13px; }
+.policy-item strong { line-height: 1.45; }
+.policy-item strong.ready { color: var(--green); }
+.policy-item strong.warn { color: var(--amber); }
+.policy-item strong.failed { color: var(--red); }
+
+.plan-list { display: grid; gap: 10px; margin-top: 14px; }
+
+.task-plan-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+  margin-top: 14px;
+}
+
+.task-plan-card {
+  display: grid;
+  gap: 10px;
+  min-height: 178px;
+  padding: 14px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--panel-soft);
+}
+
+.task-plan-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.task-plan-priority { color: var(--muted); font-size: 12px; }
+
+.task-plan-meta {
+  display: grid;
+  gap: 4px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.task-plan-card small { color: var(--text); line-height: 1.5; }
+
+.log-list { display: grid; gap: 10px; }
+
+.log-entry {
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  padding: 12px;
+  background: var(--panel-soft);
+}
+
+.log-entry strong {
+  display: inline-block;
+  min-width: 110px;
+}
+
+/* ============================================================
+   Assets, images, product cards
+   ============================================================ */
+.asset-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
+  gap: 12px;
+  margin-top: 14px;
+}
+
+.asset-detail-sections { display: grid; gap: 16px; }
+.asset-section { display: grid; gap: 10px; }
+.asset-section h3 { margin: 0; font-size: 15px; }
+
+.asset-section-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(160px, 1fr));
+  gap: 12px;
+}
+
+.asset-card-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 8px;
+}
+
+.asset-card-actions button {
+  padding: 5px 9px;
+  font-size: 12px;
+}
+
+.group-quality {
+  display: grid;
+  gap: 5px;
+  min-width: 130px;
+}
+
+.group-quality span:last-child {
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+.asset-quality-panel {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 12px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  padding: 14px;
+  background: var(--panel-soft);
+}
+
+.asset-quality-panel strong,
+.asset-quality-panel span { display: block; }
+.asset-quality-panel strong { margin-bottom: 4px; }
+.asset-quality-panel div span { color: var(--muted); font-size: 12px; }
+
+.image-order-editor {
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  margin-top: 14px;
+  padding: 14px;
+  background: var(--panel-soft);
+}
+
+.image-order-list {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(130px, 1fr));
+  gap: 12px;
+  margin: 12px 0;
+}
+
+.image-order-item {
+  display: grid;
+  grid-template-rows: 110px 18px 18px 34px;
+  gap: 6px;
+  align-items: center;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  padding: 8px;
+  background: var(--panel);
+  cursor: grab;
+}
+
+.image-order-item:active { cursor: grabbing; }
+
+.image-order-item img {
+  width: 100%;
+  height: 110px;
+  object-fit: cover;
+  border-radius: 7px;
+  background: #eef1f5;
+}
+
+.image-order-item strong { font-size: 12px; color: var(--muted); }
+
+.image-order-item span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 12px;
+}
+
+.image-order-item button { min-height: 34px; padding: 6px 8px; }
+
+.image-order-list .muted,
+.image-picker-grid .muted {
+  grid-column: 1 / -1;
+  margin: 0;
+}
+
+.image-picker-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
+  gap: 12px;
+  margin: 12px 0;
+}
+
+.image-pick-item {
+  display: grid;
+  grid-template-rows: 110px minmax(34px, auto) 18px 34px;
+  gap: 6px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  padding: 8px;
+  background: var(--panel);
+}
+
+.image-pick-item img {
+  width: 100%;
+  height: 110px;
+  object-fit: cover;
+  border-radius: 7px;
+  background: #eef1f5;
+}
+
+.image-pick-item span {
+  display: -webkit-box;
+  overflow: hidden;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  word-break: break-all;
+  font-size: 12px;
+  line-height: 1.35;
+}
+
+.image-pick-item small {
+  overflow: hidden;
+  color: var(--muted);
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.image-pick-item button { min-height: 34px; padding: 6px 8px; }
+
+.color-editor-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-top: 16px;
+}
+
+.color-editor-head h3 { margin: 0; }
+
+/* ---- 颜色图：常用颜色快捷添加（点一下即以该颜色名新增一行） ---- */
+.color-quick-pick {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin: 8px 0 2px;
+}
+
+.color-quick-pick-label {
+  font-size: 12px;
+  margin-right: 2px;
+}
+
+.color-quick-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 11px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--panel);
+  color: var(--text-soft);
+  font-size: 12px;
+  line-height: 18px;
+  cursor: pointer;
+  transition: background 120ms ease, border-color 120ms ease, color 120ms ease, box-shadow 120ms ease;
+}
+
+.color-quick-chip:hover:not(:disabled),
+.color-quick-chip:focus-visible:not(:disabled) {
+  border-color: var(--indigo);
+  background: var(--indigo-soft);
+  color: var(--indigo-ink);
+}
+
+.color-quick-dot {
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  /* 白色圆点需要一圈描边才看得见；深色圆点描边提升边缘对比。 */
+  border: 1px solid color-mix(in srgb, var(--text) 22%, transparent);
+  box-shadow: inset 0 0 0 1.5px rgb(255 255 255 / 22%);
+  flex: none;
+}
+
+.color-quick-name { min-width: 0; }
+
+.color-quick-check { color: var(--green); font-size: 11px; }
+
+/* 已添加的颜色置灰：再点不会重复加行。 */
+.color-quick-chip:disabled,
+.color-quick-chip.is-added {
+  opacity: 0.45;
+  cursor: default;
+}
+
+.color-quick-chip.is-added { border-style: dashed; }
+
+.variant-image-map {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(360px, 1fr));
+  gap: 12px;
+  margin-top: 10px;
+}
+
+.variant-image-row {
+  display: grid;
+  grid-template-columns: 18px minmax(84px, 1fr) 52px minmax(0, 1.4fr) auto;
+  gap: 10px;
+  align-items: center;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  padding: 8px 10px;
+  background: var(--panel);
+}
+
+.variant-image-row .drag-handle {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: 100%;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1;
+  letter-spacing: -2px;
+  cursor: grab;
+  user-select: none;
+}
+
+.variant-image-row .drag-handle:active { cursor: grabbing; }
+
+.variant-image-row img,
+.variant-image-empty {
+  width: 52px;
+  height: 52px;
+  border-radius: 7px;
+  background: #eef1f5;
+  object-fit: cover;
+}
+
+.variant-image-row select,
+.variant-image-row input { min-width: 0; }
+
+.variant-image-row button[data-remove-base-color] {
+  padding: 7px 12px;
+  white-space: nowrap;
+  color: var(--red);
+  border-color: color-mix(in srgb, var(--red) 30%, var(--line));
+}
+
+.variant-image-row button[data-remove-base-color]:hover {
+  background: var(--red-soft);
+  border-color: var(--red);
+}
+
+/* 「颜色图顺序跟随产品图顺序」开关（商品维护 → 颜色图区标题旁，2026-10-10）。
+   打开时给颜色行一点联动底色，提示拖动会和「产品图顺序」互相带动。 */
+.maintenance-section-head .maintenance-follow-toggle {
+  gap: 6px;
+  align-self: center;
+  font-size: 12.5px;
+  color: var(--text-soft);
+  cursor: pointer;
+  user-select: none;
+}
+
+.maintenance-section-head .maintenance-follow-toggle input[type="checkbox"] {
+  accent-color: var(--kraft-deep);
+}
+
+.maintenance-follow-toggle span { white-space: nowrap; }
+
+.base-color-follow-hint {
+  margin: 10px 0 0;
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.variant-image-map.is-follow-images .variant-image-row { background: var(--panel-soft); }
+
+.asset-group-select { width: auto; min-width: 16px; }
+
+.check-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
+  gap: 12px;
+}
+
+.check-item {
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  padding: 12px;
+  background: var(--panel-soft);
+}
+
+.check-item.ok { border-color: #ade0c4; }
+.check-item.warn { border-color: #f0d29a; }
+.check-item.fail { border-color: #f0b8b8; }
+
+.check-item strong { display: block; margin-bottom: 5px; }
+.check-item span { color: var(--muted); font-size: 12px; }
+
+.ai-suggestion-panel {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 10px;
+  align-items: start;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  padding: 14px;
+  margin-top: 14px;
+  background: var(--panel-soft);
+}
+
+.ai-suggestion-panel span,
+.ai-suggestion-result span,
+.ai-suggestion-result small {
+  display: block;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.ai-suggestion-result {
+  grid-column: 1 / -1;
+  border-top: 1px solid var(--line);
+  padding-top: 10px;
+  word-break: break-word;
+}
+
+.ai-suggestion-result strong { display: block; margin-bottom: 5px; }
+
+.asset-item {
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  padding: 12px;
+  background: var(--panel-soft);
+  min-height: 120px;
+}
+
+.asset-thumb,
+.sku-thumb,
+.image-preview img {
+  display: block;
+  width: 100%;
+  object-fit: cover;
+  border: 1px solid var(--line);
+  background: #eef1f5;
+}
+
+.asset-thumb {
+  height: 110px;
+  border-radius: 7px;
+  margin-bottom: 8px;
+}
+
+.sku-thumb { width: 54px; height: 54px; border-radius: 7px; }
+
+.group-thumb {
+  width: 76px;
+  height: 76px;
+  border-radius: 7px;
+  object-fit: cover;
+  border: 1px solid var(--line);
+  background: #eef1f5;
+}
+
+.preview-row { display: block; }
+
+.image-preview {
+  width: min(260px, 100%);
+  min-height: 160px;
+  border: 1px dashed var(--line);
+  border-radius: var(--radius-sm);
+  padding: 8px;
+  color: var(--muted);
+  background: var(--panel-soft);
+}
+
+.image-preview img { height: 180px; border-radius: 7px; }
+.asset-item strong { display: block; margin-bottom: 6px; }
+
+.asset-item span {
+  display: block;
+  color: var(--muted);
+  font-size: 12px;
+  word-break: break-all;
+}
+
+.product-card-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+  gap: 14px;
+}
+
+.product-card {
+  position: relative;
+  display: grid;
+  grid-template-rows: 150px minmax(112px, auto) auto;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-md);
+  background: var(--panel);
+  overflow: hidden;
+  box-shadow: var(--shadow-sm);
+  transition: box-shadow 140ms ease, border-color 140ms ease, transform 140ms ease;
+}
+
+.product-card:hover {
+  box-shadow: var(--shadow-md);
+  transform: translateY(-2px);
+}
+
+.product-card.selected {
+  border-color: var(--indigo);
+  box-shadow: 0 0 0 3px var(--indigo-soft);
+}
+
+/* 勾选（多选）高亮：蓝色描边浅蓝光晕，与单选 .selected 的靛蓝区分。 */
+.product-card.checked {
+  border-color: #2563eb;
+  box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.16);
+  background: linear-gradient(180deg, rgba(37, 99, 235, 0.04), rgba(37, 99, 235, 0.02) 40%, transparent 60%);
+}
+
+/* 卡片左上角勾选框：常显半透明，悬停/勾选时全显；点击不触发卡片单选。 */
+.product-card-check {
+  position: absolute;
+  top: 8px;
+  left: 8px;
+  z-index: 3;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.92);
+  box-shadow: var(--shadow-sm);
+  cursor: pointer;
+  opacity: 0.55;
+  transition: opacity 120ms ease;
+}
+.product-card:hover .product-card-check,
+.product-card.checked .product-card-check {
+  opacity: 1;
+}
+.product-card-check input {
+  width: 15px;
+  height: 15px;
+  margin: 0;
+  accent-color: var(--indigo);
+  cursor: pointer;
+}
+
+/* 本地导入队列：连续选择多个本地目录时，每个商品目录占一行排队串行导入。
+   行内明细复用页面状态行的文案，运行中的那一行由 JS 就地更新，避免整表重画。 */
+.local-import-queue {
+  margin: 6px 0 4px;
+  padding: 8px 10px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--panel-soft);
+}
+
+/* 没有全局 [hidden] 规则，带 display 的类会盖掉浏览器默认隐藏，得显式写一条。 */
+.local-import-queue[hidden],
+.local-import-queue .chip[hidden] {
+  display: none;
+}
+
+.local-import-queue-head-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.local-import-queue-hint {
+  margin: 0 0 6px;
+  font-size: 12px;
+}
+
+.local-import-queue-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 6px;
+}
+
+.local-import-queue-summary {
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--text-soft);
+}
+
+.local-import-queue-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  max-height: 220px;
+  overflow-y: auto;
+}
+
+.local-import-queue-item {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  padding: 4px 6px;
+  border-radius: var(--radius-sm);
+  font-size: 12.5px;
+  line-height: 1.5;
+}
+
+.local-import-queue-item--running {
+  background: color-mix(in srgb, var(--indigo) 7%, transparent);
+}
+
+.local-import-queue-item--waiting {
+  color: var(--muted);
+}
+
+.local-import-queue-item--failed {
+  background: var(--red-soft);
+}
+
+.local-import-queue-item--succeeded {
+  background: var(--green-soft);
+}
+
+.local-import-queue-glyph {
+  flex: 0 0 auto;
+  width: 16px;
+  text-align: center;
+}
+
+.local-import-queue-name {
+  flex: 0 0 auto;
+  max-width: 40%;
+  font-weight: 600;
+  color: var(--text);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.local-import-queue-detail {
+  flex: 1 1 auto;
+  min-width: 0;
+  color: var(--text-soft);
+  overflow-wrap: anywhere;
+}
+
+.local-import-queue-item--failed .local-import-queue-detail {
+  color: var(--red);
+}
+
+.local-import-queue-remove {
+  flex: 0 0 auto;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--muted);
+  font-size: 12px;
+  cursor: pointer;
+  text-decoration: underline;
+}
+
+.local-import-queue-remove:hover {
+  color: var(--danger);
+}
+
+/* 批量操作栏：显示在筛选条上方，选中任意商品后出现。 */
+.base-product-batch-bar {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: 8px 0 4px;
+  padding: 8px 10px;
+  border: 1px dashed var(--indigo);
+  border-radius: var(--radius-sm);
+  background: color-mix(in srgb, var(--indigo) 5%, var(--panel));
+}
+.base-product-batch-count {
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--indigo);
+  margin-right: 4px;
+}
+.base-product-batch-divider {
+  width: 1px;
+  height: 18px;
+  margin: 0 2px;
+  background: var(--line);
+}
+.base-product-batch-label {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--muted);
+}
+.chip.chip--ai {
+  color: var(--indigo);
+  border-color: color-mix(in srgb, var(--indigo) 45%, var(--line));
+}
+.chip.chip--ai:hover {
+  background: color-mix(in srgb, var(--indigo) 8%, var(--panel));
+  border-color: var(--indigo);
+}
+.chip.chip--ai:disabled,
+.chip.chip--busy {
+  opacity: 0.55;
+  cursor: progress;
+}
+.chip.danger-ghost {
+  color: var(--danger);
+  border-color: color-mix(in srgb, var(--danger) 45%, var(--line));
+}
+.chip.danger-ghost:hover {
+  background: color-mix(in srgb, var(--danger) 8%, var(--panel));
+  border-color: var(--danger);
+  color: var(--danger);
+}
+
+.product-card-thumb { background: #eef1f5; }
+
+.product-card-thumb img {
+  width: 100%;
+  height: 150px;
+  object-fit: cover;
+  display: block;
+}
+
+.product-card-body { display: grid; gap: 5px; padding: 12px; }
+.product-card-body span { color: var(--muted); font-size: 12px; }
+
+.product-card-actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 12px;
+  border-top: 1px solid var(--line-soft);
+}
+
+.empty-state {
+  border: 1px dashed var(--line);
+  border-radius: var(--radius-sm);
+  padding: 20px;
+  color: var(--muted);
+  background: var(--panel-soft);
+}
+
+/* ============================================================
+   Dialogs + modals
+   ============================================================ */
+.modal-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 20;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+  background: rgba(21, 26, 38, 0.5);
+  backdrop-filter: blur(2px);
+}
+
+.modal-backdrop[hidden] { display: none; }
+
+.modal-panel {
+  width: min(980px, 100%);
+  max-height: min(860px, 92vh);
+  overflow: auto;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-lg);
+  background: var(--panel);
+  padding: 20px;
+  box-shadow: var(--shadow-lg);
+}
+
+.workflow-dialog {
+  width: min(860px, calc(100vw - 32px));
+  max-height: min(820px, calc(100vh - 32px));
+  overflow: auto;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-lg);
+  padding: 20px;
+  background: var(--panel);
+  box-shadow: var(--shadow-lg);
+}
+
+/* 小型设置类弹窗（AI 连接 / 马帮账号 / 描述方案 / 站点顺序）不需要 860px 宽。 */
+.workflow-dialog.compact-dialog {
+  width: min(520px, calc(100vw - 32px));
+}
+
+dialog:not([open]) { display: none; }
+
+.workflow-dialog::backdrop {
+  background: rgba(21, 26, 38, 0.5);
+  backdrop-filter: blur(2px);
+}
+
+.workflow-dialog .panel-head button[data-close-dialog] {
+  min-width: 34px;
+  padding: 4px 10px;
+  font-size: 18px;
+  line-height: 1;
+  color: var(--muted);
+}
+
+/* ============================================================
+   NAS folder browser
+   ============================================================ */
+.nas-browser-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 4px 0;
+}
+
+.nas-browser-toolbar .nas-browser-filter {
+  flex: 1;
+  min-width: 0;
+}
+
+.nas-browser-toolbar #nas-browser-refresh-btn {
+  flex: none;
+  white-space: nowrap;
+  padding: 5px 10px;
+}
+
+.nas-browser-list {
+  display: grid;
+  gap: 2px;
+  margin: 8px 0;
+  max-height: min(46vh, 420px);
+  overflow: auto;
+  border: 1px solid var(--line-soft);
+  border-radius: var(--radius-sm);
+  background: var(--panel);
+  padding: 4px;
+}
+
+/* 滚动加载提示行：占满整行、居中，滚动到底自动追加下一页 */
+.nas-browser-render-limit {
+  grid-column: 1 / -1;
+  text-align: center;
+  margin: 4px 0 2px;
+}
+
+.nas-browser-item {
+  width: 100%;
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 8px;
+  text-align: left;
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  padding: 6px 8px;
+  color: var(--text);
+  font: inherit;
+  cursor: pointer;
+}
+
+.nas-browser-item:hover,
+.nas-browser-item:focus-visible {
+  background: var(--indigo-soft);
+  border-color: var(--indigo);
+  outline: none;
+}
+
+.nas-browser-item .nas-browser-item-name {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.nas-browser-branch {
+  color: var(--muted);
+  font-size: 16px;
+  line-height: 1;
+}
+
+/* Rows from a fast shallow open whose leaf status is still being probed. */
+.nas-browser-unknown-tag {
+  font-size: 12px;
+  line-height: 1;
+  padding: 2px 7px;
+  border-radius: 999px;
+  background: var(--panel-soft);
+  color: var(--muted);
+  white-space: nowrap;
+  opacity: 0.75;
+}
+
+.nas-browser-item--leaf {
+  /* leaf = selectable product folder */
+}
+
+.nas-browser-item--leaf .nas-browser-leaf-tag {
+  font-size: 12px;
+  line-height: 1;
+  padding: 2px 7px;
+  border-radius: 999px;
+  background: var(--panel-soft);
+  color: var(--muted);
+  white-space: nowrap;
+}
+
+.nas-browser-item--leaf:hover .nas-browser-leaf-tag {
+  background: #fff;
+  color: var(--indigo-ink);
+}
+
+.nas-browser-item--leaf.is-selected {
+  background: var(--indigo-soft);
+  border-color: var(--indigo);
+}
+
+.nas-browser-item--leaf.is-selected .nas-browser-leaf-tag {
+  background: var(--indigo);
+  color: #fff;
+}
+
+.nas-browser-selection-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  list-style: none;
+  margin: 8px 0 0;
+  padding: 0;
+}
+
+.nas-browser-selection-list li {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  max-width: 100%;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--panel-soft);
+  padding: 3px 6px 3px 10px;
+}
+
+.nas-browser-selection-list .nas-selection-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.nas-browser-selection-list .link-button {
+  flex: none;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.mabang-import-preview {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+  margin: 16px 0;
+}
+
+.mabang-import-preview-group {
+  min-width: 0;
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--panel-soft);
+}
+
+.mabang-import-preview-group h3 { margin: 0 0 8px; font-size: 14px; }
+.mabang-import-preview-group p,
+.mabang-import-preview-group ul { margin: 6px 0; overflow-wrap: anywhere; }
+
+.mabang-import-status {
+  display: inline-block;
+  margin-bottom: 6px;
+  padding: 2px 8px;
+  border-radius: 999px;
+  font-size: 12px;
+  color: var(--indigo-ink);
+  background: var(--indigo-soft);
+}
+
+.mabang-import-status.missing,
+.mabang-import-status.conflict {
+  color: #991b1b;
+  background: var(--red-soft);
+}
+
+.mabang-import-warnings {
+  grid-column: 1 / -1;
+  padding: 12px;
+  border-left: 3px solid var(--amber);
+  border-radius: 0 var(--radius-sm) var(--radius-sm) 0;
+  color: #6e4600;
+  background: var(--amber-soft);
+  overflow-wrap: anywhere;
+}
+
+.button-link {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 38px;
+  padding: 0 14px;
+  border: 1px solid var(--indigo);
+  border-radius: var(--radius-sm);
+  color: #fff;
+  background: var(--indigo);
+  text-decoration: none;
+  font-size: 14px;
+  font-weight: 500;
+}
+
+.button-link:hover { background: #4338ca; }
+
+.template-picker-list { display: grid; gap: 10px; margin: 14px 0; }
+
+.template-picker-item {
+  display: grid;
+  grid-template-columns: 24px minmax(0, 1fr);
+  gap: 10px;
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--panel-soft);
+}
+
+.template-picker-item span,
+.template-picker-item small { display: block; }
+.template-picker-item small { margin-top: 4px; color: var(--muted); }
+
+/* ============================================================
+   Store template workspace
+   ============================================================ */
+#store-template-size-options {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 14px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  padding: 12px;
+}
+
+#store-template-size-options label {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+
+#store-template-size-options input { accent-color: var(--indigo); }
+
+/* .size-chart-control moved to the end of this file — see the newer definition
+   with the button-triggered picker. Keep .table-thumb for the templates table. */
+
+.table-thumb {
+  width: 72px;
+  height: 72px;
+  object-fit: contain;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  background: var(--panel-soft);
+}
+
+.store-template-workspace { margin-top: 4px; }
+
+.store-template-section {
+  padding: 20px 0 22px;
+  border-top: 1px solid var(--line-soft);
+}
+
+.store-template-section:first-child { padding-top: 6px; border-top: 0; }
+
+.template-section-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 16px;
+  margin-bottom: 14px;
+}
+
+.template-section-head h3 { margin: 0; font-size: 15px; color: var(--text); }
+.template-section-head p { margin: 0; color: var(--muted); font-size: 13px; }
+
+.template-section-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 14px;
+  align-items: start;
+}
+
+.template-section-grid label { display: grid; gap: 7px; min-width: 0; }
+.template-section-grid .wide { grid-column: 1 / -1; }
+.transaction-grid { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+.media-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+
+/* ============================================================
+   水印（马帮原生水印模板 + 应用范围）
+   ------------------------------------------------------------
+   目录按店铺采集；采集不到时手动填也能用。两个角色（主图 / 产品图）各自一张卡，
+   触发器 + 下拉菜单 + 已选预览 + 范围选择，样式跟模板编辑器其它控件一致。
+   ============================================================ */
+.watermark-block {
+  display: grid;
+  gap: 10px;
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--panel-soft);
+}
+
+.watermark-catalog-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.watermark-catalog-title {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  min-width: 0;
+}
+
+.watermark-catalog-label {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text);
+}
+
+.watermark-catalog-status {
+  font-size: 12px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.watermark-catalog-status--ok { color: var(--green); }
+.watermark-catalog-status--warn { color: var(--amber); }
+.watermark-catalog-status--failed { color: var(--red); }
+
+.watermark-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.watermark-selection {
+  display: grid;
+  gap: 10px;
+  align-content: start;
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--panel);
+}
+
+.watermark-selection-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.watermark-role-title {
+  font-size: 13.5px;
+  font-weight: 600;
+  color: var(--text);
+}
+
+.watermark-role-hint {
+  font-size: 11.5px;
+  color: var(--muted);
+}
+
+.watermark-picker { position: relative; }
+
+.watermark-trigger {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  min-height: 38px;
+  padding: 5px 10px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--panel);
+  color: var(--text);
+  font: inherit;
+  font-size: 13px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.watermark-trigger:hover:not(:disabled) { border-color: var(--indigo); }
+
+.watermark-trigger:disabled {
+  color: var(--muted);
+  background: var(--panel-soft);
+  cursor: not-allowed;
+}
+
+.watermark-trigger-thumb {
+  flex: 0 0 auto;
+  width: 24px;
+  height: 24px;
+  border: 1px solid var(--line);
+  border-radius: 5px;
+  background: var(--panel-soft);
+  object-fit: contain;
+}
+
+.watermark-trigger-label {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.watermark-trigger-caret {
+  flex: 0 0 auto;
+  width: 0;
+  height: 0;
+  border-top: 5px solid var(--muted);
+  border-right: 4px solid transparent;
+  border-left: 4px solid transparent;
+}
+
+.watermark-menu {
+  position: absolute;
+  z-index: 30;
+  top: calc(100% + 4px);
+  left: 0;
+  right: 0;
+  max-height: 232px;
+  overflow-y: auto;
+  padding: 4px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--panel);
+  box-shadow: var(--shadow-md);
+}
+
+.watermark-menu-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 6px 8px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text);
+  font: inherit;
+  font-size: 12.5px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.watermark-menu-item:hover,
+.watermark-menu-item.is-highlighted { background: var(--panel-soft); }
+
+.watermark-menu-item[aria-selected="true"] {
+  background: var(--indigo-soft);
+  color: var(--indigo-ink);
+  font-weight: 600;
+}
+
+.watermark-menu-thumb {
+  flex: 0 0 auto;
+  width: 28px;
+  height: 28px;
+  border: 1px solid var(--line);
+  border-radius: 5px;
+  background: var(--panel-soft);
+  object-fit: contain;
+}
+
+.watermark-menu-thumb-empty {
+  display: grid;
+  place-items: center;
+  color: var(--muted);
+  font-size: 9px;
+}
+
+.watermark-menu-name {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.watermark-menu-close {
+  margin-bottom: 4px;
+  border-bottom: 1px solid var(--line-soft);
+  border-radius: 6px 6px 0 0;
+  color: var(--muted);
+}
+
+.watermark-menu-close[aria-selected="true"] {
+  background: var(--panel-soft);
+  color: var(--text);
+  font-weight: 600;
+}
+
+.watermark-empty-hint {
+  margin: 6px 0 0;
+  font-size: 11.5px;
+  line-height: 1.5;
+  color: var(--amber);
+}
+
+.watermark-choice-preview {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-height: 62px;
+  padding: 8px 10px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--panel-soft);
+}
+
+.watermark-choice-preview img {
+  flex: 0 0 auto;
+  width: 46px;
+  height: 46px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--panel);
+  object-fit: contain;
+}
+
+.watermark-choice-preview strong {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--text);
+  font-size: 12.5px;
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.watermark-choice-none {
+  color: var(--muted);
+  font-size: 12.5px;
+}
+
+.watermark-choice-resolved {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+
+.watermark-choice-id {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--muted);
+}
+
+/* 「目录里没有这个 ID」时把已保存的选择照样显示出来——绝不因为目录没加载就丢掉配置。 */
+.watermark-choice-warning {
+  font-size: 11px;
+  color: var(--amber);
+}
+
+.watermark-positions {
+  display: grid;
+  gap: 6px;
+}
+
+.watermark-positions-label {
+  font-size: 11.5px;
+  color: var(--muted);
+}
+
+.watermark-mode-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.watermark-mode-option {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 10px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--panel);
+  color: var(--text-soft);
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.watermark-mode-option:has(input:checked) {
+  border-color: var(--indigo);
+  background: var(--indigo-soft);
+  color: var(--indigo-ink);
+  font-weight: 600;
+}
+
+.watermark-mode-option input { margin: 0; accent-color: var(--indigo); }
+
+.watermark-position-checks {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.watermark-position-check {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 3px 8px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--panel);
+  color: var(--text-soft);
+  font-size: 11.5px;
+  cursor: pointer;
+}
+
+.watermark-position-check:has(input:checked) {
+  border-color: var(--indigo);
+  background: var(--indigo-soft);
+  color: var(--indigo-ink);
+  font-weight: 600;
+}
+
+.watermark-position-check input { margin: 0; accent-color: var(--indigo); }
+
+.watermark-position-check--blocked {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.watermark-position-checks-hint {
+  font-size: 11px;
+  color: var(--muted);
+}
+
+.watermark-manual {
+  border-top: 1px dashed var(--line);
+  padding-top: 8px;
+}
+
+.watermark-manual > summary {
+  color: var(--muted);
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.watermark-manual > p { margin: 6px 0; font-size: 11.5px; line-height: 1.5; }
+
+.watermark-manual-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+  align-items: end;
+}
+
+.watermark-manual-grid label {
+  display: grid;
+  gap: 4px;
+  font-size: 11.5px;
+  color: var(--text-soft);
+}
+
+.watermark-manual-grid input {
+  min-height: 32px;
+  padding: 4px 8px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  font: inherit;
+  font-size: 12.5px;
+}
+
+.watermark-manual-grid button { min-height: 32px; }
+
+@media (max-width: 980px) {
+  .watermark-grid { grid-template-columns: minmax(0, 1fr); }
+}
+
+/* ============================================================
+   Listing copy editor
+   ============================================================ */
+.listing-editor {
+  width: min(1180px, calc(100vw - 32px));
+  max-height: calc(100vh - 32px);
+  overflow-x: hidden;
+  overflow-y: auto;
+  padding: 0;
+}
+
+.listing-editor label { display: grid; gap: 7px; min-width: 0; }
+
+/* 「产品图最后一张放尺码表」开关（模板编辑器 + 副本检查弹窗）：行内复选框，
+   覆盖 .listing-editor label 的 grid 布局；跨境时 app.js 设 hidden，必须真的不显示
+   （上面的 display 会压过 [hidden]，所以两处都要显式写一条）。 */
+.switch-line {
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  color: var(--text);
+}
+
+.switch-line input[type="checkbox"] {
+  width: auto;
+  margin: 0;
+  flex: 0 0 auto;
+}
+
+.listing-editor label.switch-line { display: flex; gap: 8px; }
+.listing-editor label.switch-line[hidden] { display: none; }
+.template-section-grid label.checkbox-line[hidden] { display: none; }
+
+/* 检查店铺刊登副本：跨境 CNSC 隐藏本土专属的「店铺促销活动 / 统一库存」label
+   （app.js 对 CNSC 设 hidden）。全局 label display:grid 会压过 hidden，需显式写。 */
+.listing-editor label[hidden] { display: none; }
+
+.listing-editor-head {
+  position: sticky;
+  z-index: 4;
+  top: 0;
+  margin: 0;
+  padding: 18px 20px;
+  border-bottom: 1px solid var(--line);
+  background: var(--panel);
+}
+
+.listing-editor-head h2,
+.listing-editor-head p { margin: 0; }
+.listing-editor-head p { margin-top: 4px; }
+.listing-editor-content { padding: 0 20px; }
+
+.listing-editor-section {
+  padding: 20px 0;
+  border-top: 1px solid var(--line-soft);
+  scroll-margin-top: 90px;
+}
+
+.listing-editor-section:first-child { border-top: 0; }
+.listing-editor-section h3 { margin: 0 0 14px; font-size: 16px; }
+
+.listing-editor-section-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.listing-editor-section-head h3 { margin: 0; }
+
+.listing-editor-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 14px;
+}
+
+.listing-editor-grid .wide { grid-column: 1 / -1; }
+
+.readiness-errors {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 7px;
+  min-height: 42px;
+  margin: 16px 20px 0;
+  padding: 12px 14px;
+  border-left: 3px solid var(--amber);
+  border-radius: 0 var(--radius-sm) var(--radius-sm) 0;
+  background: var(--amber-soft);
+}
+
+.readiness-errors button {
+  min-height: 30px;
+  padding: 4px 10px;
+  border-color: #e0ad43;
+  color: #6e4600;
+  background: var(--panel);
+}
+
+.readiness-errors.ready {
+  align-items: center;
+  border-left-color: var(--green);
+  color: #12623a;
+  background: var(--green-soft);
+}
+
+.readiness-errors.ready-with-warnings {
+  align-items: center;
+  border-left-color: var(--amber);
+  color: #6e4600;
+  background: var(--amber-soft);
+}
+
+.readiness-warning-inline {
+  display: block;
+  margin-top: 4px;
+  color: #8a5a00;
+  font-size: 12px;
+}
+
+.listing-copy-image-list {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(130px, 1fr));
+  gap: 12px;
+  margin-top: 12px;
+}
+
+.listing-copy-image-item {
+  min-width: 0;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--panel);
+  cursor: grab;
+  overflow: hidden;
+}
+
+.listing-copy-image-item img,
+.listing-copy-image-placeholder {
+  width: 100%;
+  aspect-ratio: 1;
+  object-fit: contain;
+  background: var(--panel-soft);
+}
+
+.listing-copy-image-placeholder {
+  display: grid;
+  place-items: center;
+  padding: 10px;
+  color: var(--muted);
+  overflow-wrap: anywhere;
+}
+
+.listing-copy-image-item > div:last-child { min-width: 0; padding: 8px; }
+.listing-copy-image-item strong,
+.listing-copy-image-item span { display: block; }
+.listing-copy-image-item strong { font-size: 13px; }
+
+.listing-copy-image-item span {
+  margin-top: 3px;
+  overflow: hidden;
+  color: var(--muted);
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.listing-copy-image-item.dragging { opacity: 0.45; }
+
+.listing-copy-image-item.drag-over {
+  border-color: var(--indigo);
+  box-shadow: inset 0 0 0 2px var(--indigo);
+}
+
+.listing-copy-size-chart-control {
+  display: grid;
+  grid-template-columns: 160px minmax(0, 320px);
+  align-items: end;
+  gap: 14px;
+}
+
+.listing-copy-video-control {
+  display: grid;
+  grid-template-columns: 240px minmax(0, 1fr);
+  gap: 14px;
+  align-items: start;
+}
+
+.listing-copy-video-control video {
+  width: 240px;
+  aspect-ratio: 1;
+  object-fit: contain;
+  background: #16181d;
+  border-radius: var(--radius-sm);
+}
+
+.listing-copy-media-upload {
+  display: grid;
+  align-content: center;
+  gap: 8px;
+  min-height: 160px;
+  padding: 16px;
+  border: 1px dashed #c1c9d6;
+  border-radius: var(--radius-sm);
+  background: var(--panel-soft);
+}
+
+.listing-copy-media-label { color: var(--text); font-weight: 600; }
+.listing-copy-media-upload p { margin: 0; }
+
+.listing-copy-media-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+.listing-copy-media-actions > button:first-child {
+  border-color: var(--indigo);
+  color: #fff;
+  background: var(--indigo);
+}
+
+.listing-copy-media-actions > button:first-child:hover { background: #4338ca; }
+.listing-copy-media-actions .muted { min-width: 0; overflow-wrap: anywhere; }
+
+.file-input-native {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+
+.video-status.invalid { color: var(--amber); }
+
+.listing-copy-size-chart-preview-wrap {
+  display: grid;
+  width: 160px;
+  aspect-ratio: 1;
+  place-items: center;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--panel-soft);
+}
+
+#listing-copy-size-chart-preview { width: 100%; height: 100%; object-fit: contain; }
+
+.listing-copy-sku-scroll {
+  margin-top: 12px;
+  overflow: auto;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+}
+
+.listing-copy-sku-table { min-width: 820px; margin: 0; border: 0; }
+
+.listing-copy-sku-table th {
+  position: sticky;
+  z-index: 1;
+  top: 0;
+  background: var(--panel-soft);
+}
+
+.listing-copy-sku-table th,
+.listing-copy-sku-table td { padding: 9px; }
+
+.listing-copy-sku-table td:first-child {
+  max-width: 260px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: var(--font-mono);
+  font-size: 12.5px;
+}
+
+.listing-copy-sku-table input { width: 112px; min-width: 0; }
+
+.listing-transaction-grid {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(120px, 1fr));
+  gap: 14px;
+}
+
+.listing-copy-save-result {
+  min-height: 20px;
+  margin: 0;
+  padding: 0 20px 10px;
+}
+
+.listing-editor-actions {
+  position: sticky;
+  z-index: 4;
+  bottom: 0;
+  justify-content: flex-end;
+  margin: 0;
+  padding: 14px 20px 18px;
+  border-top: 1px solid var(--line);
+  background: var(--panel);
+  box-shadow: 0 -8px 20px rgba(21, 26, 38, 0.05);
+}
+
+/* ============================================================
+   File grids
+   ============================================================ */
+.file-group-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: 12px 0;
+}
+
+.file-group.active {
+  border-color: var(--indigo);
+  color: var(--indigo);
+  background: var(--indigo-soft);
+}
+
+.file-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
+  gap: 12px;
+}
+
+.file-card {
+  display: grid;
+  gap: 6px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  padding: 8px;
+  background: var(--panel);
+}
+
+.file-card-preview {
+  height: 112px;
+  border-radius: 7px;
+  background: #eef1f5;
+  overflow: hidden;
+}
+
+.file-card-preview img {
+  width: 100%;
+  height: 112px;
+  object-fit: cover;
+  display: block;
+}
+
+.file-card strong {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.file-card span { color: var(--muted); font-size: 12px; }
+
+.size-price-editor { margin: 0; }
+
+.size-price-grid {
+  display: grid;
+  grid-template-columns: minmax(64px, .45fr) minmax(140px, 1fr) minmax(140px, 1fr);
+  gap: 8px 12px;
+  align-items: center;
+}
+
+.size-price-grid input { width: 100%; }
+
+.size-price-grid output {
+  min-height: 38px;
+  display: flex;
+  align-items: center;
+  padding: 0 10px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--panel-soft);
+}
+
+.template-id-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(130px, 1fr)) auto;
+  gap: 8px;
+  min-width: 520px;
+}
+
+/* ============================================================
+   Automation job detail
+   ============================================================ */
+.automation-job-detail-dialog { width: min(760px, calc(100vw - 32px)); }
+
+.automation-job-detail-title-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+}
+
+.automation-live-indicator {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--green);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.automation-live-indicator > span {
+  width: 7px;
+  height: 7px;
+  border-radius: 999px;
+  background: currentColor;
+  box-shadow: 0 0 0 4px var(--green-soft);
+}
+
+.automation-job-detail-summary {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 12px;
+  margin: 16px 0;
+}
+
+.automation-job-detail-summary > div {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--panel-soft);
+}
+
+.automation-job-detail-summary span { color: var(--muted); font-size: 12px; }
+.automation-job-detail-summary strong { overflow-wrap: anywhere; }
+
+.automation-job-detail-summary .automation-job-detail-error {
+  grid-column: 1 / -1;
+  background: var(--red-soft);
+  border-color: #f0caca;
+  color: var(--red);
+}
+
+.automation-job-detail-section { margin-top: 18px; }
+.automation-job-detail-section h3 { margin: 0 0 12px; font-size: 15px; }
+
+.automation-job-timeline {
+  display: grid;
+  gap: 0;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.automation-job-timeline li {
+  display: grid;
+  grid-template-columns: 170px minmax(0, 1fr);
+  gap: 12px;
+  padding: 12px 0;
+  border-top: 1px solid var(--line-soft);
+}
+
+.automation-job-timeline time { color: var(--muted); font-size: 12px; overflow-wrap: anywhere; }
+.automation-job-timeline p,
+.automation-job-stage p { margin: 4px 0 0; color: var(--muted); overflow-wrap: anywhere; }
+.automation-job-stages { display: grid; gap: 8px; }
+
+.automation-job-stage {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--panel);
+}
+
+/* ============================================================
+   Drag animations
+   ============================================================ */
+.image-order-list.animated .image-order-item,
+.image-order-item {
+  transition: transform 160ms ease, box-shadow 160ms ease, border-color 160ms ease, opacity 160ms ease;
+}
+
+.image-order-item.dragging {
+  opacity: 0.72;
+  transform: scale(1.03);
+  box-shadow: var(--shadow-lg);
+}
+
+.image-order-item.drag-over {
+  border-color: var(--indigo);
+  transform: translateY(-3px);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}
+
+/* ============================================================
+   Responsive
+   ============================================================ */
+
+/* Tablet: collapse rail to icon-only */
+@media (max-width: 1080px) {
+  .app {
+    grid-template-columns: 60px minmax(0, 1fr);
+  }
+
+  .rail {
+    padding: 16px 8px;
+  }
+
+  .rail-brand {
+    justify-content: center;
+    padding: 6px 0 18px;
+    font-size: 0;
+  }
+
+  .rail-brand::before {
+    width: 26px;
+    height: 26px;
+  }
+
+  .rail-item {
+    justify-content: center;
+    padding: 11px 0;
+  }
+
+  .rail-item span {
+    display: none;
+  }
+
+  .pipeline {
+    grid-template-columns: 1fr;
+  }
+
+  .pipeline-stage::after {
+    top: auto;
+    right: auto;
+    bottom: -1px;
+    left: 25px;
+    width: 26px;
+    height: 2px;
+    transform: none;
+  }
+}
+
+/* Mobile: stack rail on top, single column */
+@media (max-width: 760px) {
+  .app {
+    grid-template-columns: 1fr;
+  }
+
+  .rail {
+    position: sticky;
+    top: 0;
+    z-index: 18;
+    flex-direction: row;
+    align-items: center;
+    height: auto;
+    padding: 8px 12px;
+    overflow-x: auto;
+  }
+
+  .rail-brand {
+    padding: 0 12px 0 4px;
+    font-size: 0;
+  }
+
+  .rail-nav {
+    display: flex;
+    gap: 4px;
+  }
+
+  .rail-spacer {
+    display: none;
+  }
+
+  .rail-item {
+    flex: 0 0 auto;
+    padding: 9px 11px;
+  }
+
+  .rail > .rail-item {
+    margin-left: auto;
+  }
+
+  .metrics,
+  .form-grid,
+  .form-grid.compact-form,
+  .dashboard-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .template-section-grid,
+  .transaction-grid,
+  .media-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .wide {
+    grid-column: span 1;
+  }
+
+  .category-field-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .marketplace-category-option {
+    grid-template-columns: 1fr;
+    gap: 4px;
+  }
+
+  .variant-image-map {
+    grid-template-columns: 1fr;
+  }
+
+  .variant-image-row {
+    grid-template-columns: 18px 1fr auto;
+    grid-template-areas:
+      "handle name remove"
+      "handle thumb thumb"
+      "handle image image";
+    row-gap: 8px;
+  }
+
+  .variant-image-row .drag-handle { grid-area: handle; align-items: flex-start; padding-top: 8px; }
+  .variant-image-row input[data-base-color-index] { grid-area: name; }
+  .variant-image-row img,
+  .variant-image-row .variant-image-empty { grid-area: thumb; }
+  .variant-image-row select[data-variant-image-index] { grid-area: image; }
+  .variant-image-row button[data-remove-base-color] { grid-area: remove; }
+
+  .variant-image-row img,
+  .variant-image-empty {
+    width: 100%;
+    height: auto;
+    aspect-ratio: 1;
+  }
+
+  .topbar,
+  .panel-head,
+  .inline-form,
+  .task-filters,
+  .task-error-board,
+  .bundle-grid,
+  .bundle-script,
+  .bundle-snapshot,
+  .plan-chain,
+  .policy-grid,
+  .task-plan-grid,
+  .asset-quality-panel,
+  .ai-suggestion-panel {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .plan-chain,
+  .policy-grid,
+  .task-plan-grid,
+  .bundle-grid,
+  .bundle-script,
+  .bundle-snapshot,
+  .deployment-checks,
+  .asset-quality-panel,
+  .ai-suggestion-panel {
+    grid-template-columns: 1fr;
+  }
+
+  .settings-layout {
+    grid-template-columns: 1fr;
+  }
+
+  .settings-nav {
+    display: flex;
+    overflow-x: auto;
+    border-right: 0;
+    border-bottom: 1px solid var(--line);
+  }
+
+  .settings-nav-item {
+    flex: 0 0 auto;
+    white-space: nowrap;
+  }
+
+  .main {
+    padding: 18px 14px 32px;
+    width: 100%;
+    min-width: 0;
+  }
+
+  .topbar {
+    align-items: flex-start;
+  }
+
+  .panel {
+    padding: 16px;
+  }
+
+  .actions > button,
+  .actions > .button-link {
+    min-height: 40px;
+  }
+
+  .workflow-dialog .actions {
+    position: sticky;
+    bottom: -20px;
+    margin: 16px -20px -20px;
+    padding: 14px 20px 20px;
+    background: var(--panel);
+    border-top: 1px solid var(--line);
+  }
+}
+
+@media (max-width: 560px) {
+  .metrics,
+  .form-grid,
+  .form-grid.compact-form,
+  .dashboard-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .size-chart-control {
+    grid-template-columns: 72px minmax(0, 1fr);
+  }
+
+  .size-chart-control input[type="file"] {
+    grid-column: 1 / -1;
+  }
+
+  .product-card-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .workflow-dialog {
+    width: calc(100vw - 20px);
+    max-height: calc(100vh - 20px);
+    padding: 16px;
+  }
+
+  .workflow-dialog .panel-head {
+    flex-direction: row;
+    align-items: center;
+  }
+
+  .workflow-dialog .panel-head > button[data-close-dialog] {
+    flex: 0 0 40px;
+    width: 40px;
+    height: 40px;
+    padding: 0;
+  }
+
+  .mabang-import-preview {
+    grid-template-columns: 1fr;
+  }
+
+  #mabang-page-import-dialog .actions {
+    position: static;
+    margin: 14px 0 0;
+    padding: 14px 0 0;
+    border-top: 1px solid var(--line);
+    background: transparent;
+  }
+
+  .listing-editor { width: calc(100vw - 20px); max-height: calc(100vh - 20px); }
+  .listing-editor-head { padding: 14px 16px; }
+  .listing-editor-content { padding: 0 16px; }
+  .readiness-errors { margin: 14px 16px 0; }
+  .listing-editor-grid,
+  .listing-transaction-grid { grid-template-columns: 1fr; }
+  .listing-copy-image-list { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .listing-copy-size-chart-control { grid-template-columns: 1fr; }
+  .listing-copy-video-control { grid-template-columns: 1fr; }
+  .listing-copy-video-control video { width: 100%; }
+  .listing-copy-size-chart-preview-wrap { width: min(160px, 100%); }
+  .listing-editor-section-head { align-items: flex-start; flex-direction: column; }
+  .listing-editor-actions { position: sticky; margin: 0; padding: 12px 16px 16px; }
+  .listing-editor-actions button { flex: 1 1 100%; }
+  .listing-copy-save-result { padding: 0 16px 8px; }
+  .automation-job-detail-summary { grid-template-columns: 1fr; }
+  .automation-job-timeline li { grid-template-columns: 1fr; gap: 4px; }
+}
+
+/* ============================================================
+   Automation status glyph system + eyebrow micro-label
+   ============================================================ */
+
+.eyebrow {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  font-weight: 500;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: color-mix(in srgb, var(--text) 62%, transparent);
+}
+
+.card-glyph,
+.row-glyph,
+.header-glyph {
+  --glyph-color: var(--glyph-idle);
+  display: inline-block;
+  border-radius: 50%;
+  background: var(--glyph-color);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--glyph-color) 22%, transparent);
+  vertical-align: middle;
+  flex-shrink: 0;
+}
+
+.card-glyph--idle,
+.row-glyph--idle,
+.header-glyph--idle { --glyph-color: var(--glyph-idle); }
+.card-glyph--watch,
+.row-glyph--watch,
+.header-glyph--watch { --glyph-color: var(--glyph-watch); }
+.card-glyph--alert,
+.row-glyph--alert,
+.header-glyph--alert { --glyph-color: var(--glyph-alert); }
+.card-glyph--done,
+.row-glyph--done,
+.header-glyph--done { --glyph-color: var(--glyph-done); }
+
+.card-glyph {
+  position: absolute;
+  top: 12px;
+  right: 12px;
+  width: 10px;
+  height: 10px;
+  z-index: 2;
+}
+
+.row-glyph { width: 8px; height: 8px; }
+.header-glyph { width: 12px; height: 12px; }
+
+.row-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  color: var(--text-soft);
+}
+
+.row-status-label { font-family: var(--font-sans); font-size: 12.5px; color: var(--text); }
+
+/* ============================================================
+   Template card grid — the standalone Templates view
+   ============================================================ */
+
+.template-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 16px;
+  flex-wrap: wrap;
+}
+
+.template-toolbar .eyebrow { color: var(--muted); }
+
+.template-card-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+  gap: 14px;
+}
+
+.template-card {
+  position: relative;
+  display: grid;
+  gap: 10px;
+  padding: 18px 18px 16px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-md);
+  background: var(--panel);
+  box-shadow: var(--shadow-sm);
+  transition: box-shadow 140ms ease, border-color 140ms ease, transform 140ms ease;
+}
+
+.template-card:hover {
+  box-shadow: var(--shadow-md);
+  transform: translateY(-1px);
+}
+
+.template-card-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.template-card-store {
+  font-size: 11px;
+  font-family: var(--font-mono);
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+
+.template-card-name {
+  font-size: 16px;
+  font-weight: 600;
+  color: var(--text);
+  line-height: 1.3;
+}
+
+/* 账号隔离：卡片上标出模板归属的马帮账号（多账号时靠它区分同名店铺）。 */
+.template-card-account {
+  margin-top: 2px;
+  font-size: 11.5px;
+  color: var(--muted);
+}
+
+/* 店铺模板页顶部的马帮账号切换：切账号只看该账号的模板与店铺。 */
+.template-account-field {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12.5px;
+  color: var(--text-soft);
+  white-space: nowrap;
+}
+
+.template-account-field select {
+  min-width: 150px;
+  padding: 6px 8px;
+  font-size: 12.5px;
+}
+
+.template-card-meta {
+  display: grid;
+  gap: 4px;
+  font-size: 12.5px;
+  color: var(--text-soft);
+}
+
+.template-card-meta code {
+  font-size: 12px;
+  color: var(--text);
+}
+
+.template-card-actions {
+  display: flex;
+  gap: 8px;
+  padding-top: 10px;
+  border-top: 1px solid var(--line-soft);
+  margin-top: 4px;
+}
+
+.template-card-actions button { flex: 1; padding: 7px 10px; font-size: 12.5px; }
+
+.template-empty {
+  grid-column: 1 / -1;
+  padding: 32px;
+  text-align: center;
+  color: var(--muted);
+  border: 1px dashed var(--line);
+  border-radius: var(--radius-md);
+  background: var(--panel-soft);
+}
+
+/* ============================================================
+   Product maintenance modal — left summary + right tabs
+   ============================================================ */
+
+#base-maintenance-modal .modal-panel {
+  width: min(1200px, 92vw);
+  max-width: min(1200px, 92vw);
+  max-height: min(88vh, 820px);
+  padding: 0;
+  display: grid;
+  grid-template-rows: auto 1fr auto;
+  overflow: hidden;
+}
+
+.maintenance-header {
+  padding: 18px 24px 16px;
+  border-bottom: 1px solid var(--line);
+  display: grid;
+  gap: 4px;
+}
+
+.maintenance-header-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.maintenance-header-title {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  font-size: 18px;
+  font-weight: 600;
+  color: var(--text);
+}
+
+.maintenance-header-actions { display: flex; gap: 8px; }
+
+.maintenance-header-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 14px;
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+
+.maintenance-header-meta strong {
+  color: var(--text);
+  font-weight: 600;
+  letter-spacing: 0.02em;
+}
+
+.maintenance-body {
+  display: grid;
+  grid-template-columns: 264px minmax(0, 1fr);
+  min-height: 0;
+  overflow: hidden;
+}
+
+.maintenance-summary {
+  padding: 18px;
+  border-right: 1px solid var(--line);
+  background: var(--panel-soft);
+  display: grid;
+  gap: 18px;
+  align-content: start;
+  overflow-y: auto;
+}
+
+.maintenance-summary-thumb {
+  width: 100%;
+  aspect-ratio: 1 / 1;
+  border-radius: var(--radius-sm);
+  background: #eef1f5 center / cover no-repeat;
+  border: 1px solid var(--line);
+}
+
+.maintenance-summary-section {
+  display: grid;
+  gap: 8px;
+}
+
+.maintenance-summary-section .eyebrow { color: var(--muted); }
+
+.maintenance-summary-auto {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-family: var(--font-mono);
+  font-size: 13px;
+  color: var(--text);
+}
+
+.maintenance-summary-copies {
+  display: grid;
+  gap: 6px;
+  font-size: 12.5px;
+  color: var(--text-soft);
+}
+
+.maintenance-summary-copies li {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  list-style: none;
+}
+
+.maintenance-summary-copies ul { margin: 0; padding: 0; display: grid; gap: 6px; }
+
+.maintenance-rollback {
+  border: 1px solid var(--amber);
+  color: var(--amber);
+  background: var(--amber-soft);
+  padding: 8px 12px;
+  font-weight: 500;
+}
+
+.maintenance-rollback:hover {
+  background: var(--amber);
+  color: #fff;
+  border-color: var(--amber);
+}
+
+.maintenance-main {
+  display: grid;
+  grid-template-rows: auto 1fr;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.maintenance-scroll {
+  overflow-y: auto;
+  padding: 8px 24px 24px;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.maintenance-section {
+  padding: 20px 0 22px;
+  border-top: 1px solid var(--line-soft);
+}
+
+.maintenance-section:first-child { border-top: 0; padding-top: 14px; }
+
+.maintenance-section-head {
+  display: flex;
+  align-items: baseline;
+  gap: 12px;
+  margin-bottom: 12px;
+}
+
+.maintenance-section-head .eyebrow { color: var(--kraft); }
+.maintenance-section-head h3 { margin: 0; }
+.maintenance-section-head .maintenance-section-action { margin-left: auto; }
+
+.maintenance-section-sub { margin: 16px 0 10px; }
+.maintenance-section-sub h4 {
+  margin: 0;
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--text-soft);
+}
+
+.maintenance-footer {
+  padding: 14px 24px 18px;
+  border-top: 1px solid var(--line);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  background: var(--panel);
+}
+
+.maintenance-footer #base-image-editor-result { margin: 0; flex: 1; }
+
+#save-base-image-order-btn {
+  border-color: var(--indigo);
+  background: var(--indigo);
+  color: #fff;
+  padding: 11px 22px;
+  font-size: 14.5px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  box-shadow: 0 4px 14px color-mix(in srgb, var(--indigo) 35%, transparent);
+}
+
+#save-base-image-order-btn:hover {
+  background: #4338ca;
+  border-color: #4338ca;
+  box-shadow: 0 6px 20px color-mix(in srgb, var(--indigo) 45%, transparent);
+}
+
+#save-base-image-order-btn:active {
+  transform: translateY(1px);
+  box-shadow: 0 2px 8px color-mix(in srgb, var(--indigo) 35%, transparent);
+}
+
+/* ============================================================
+   Image lightbox — click any image in the maintenance modal to zoom.
+   Click anywhere on the overlay to close.
+   ============================================================ */
+
+#image-lightbox {
+  position: fixed;
+  inset: 0;
+  z-index: 1000;
+  display: none;
+  align-items: center;
+  justify-content: center;
+  padding: clamp(24px, 5vw, 64px);
+  background: rgba(9, 12, 18, 0.86);
+  backdrop-filter: blur(4px);
+  cursor: zoom-out;
+  animation: image-lightbox-fade 140ms ease-out;
+}
+
+#image-lightbox.open { display: flex; }
+
+#image-lightbox img {
+  max-width: 100%;
+  max-height: 100%;
+  object-fit: contain;
+  border-radius: var(--radius-sm);
+  box-shadow: 0 30px 80px rgba(0, 0, 0, 0.5);
+  cursor: default;
+}
+
+@keyframes image-lightbox-fade {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+/* Any image inside the maintenance modal is zoomable — signal it with a cursor. */
+#base-maintenance-modal img { cursor: zoom-in; }
+#base-maintenance-modal .maintenance-summary-thumb { cursor: zoom-in; }
+
+@media (max-width: 900px) {
+  .maintenance-body { grid-template-columns: 1fr; }
+  .maintenance-summary { border-right: 0; border-bottom: 1px solid var(--line); }
+  #base-maintenance-modal .modal-panel { width: calc(100vw - 20px); max-height: calc(100vh - 20px); }
+}
+
+/* ============================================================
+   Base-product filter chips
+   ============================================================ */
+.chip-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: 8px 0 16px;
+}
+
+.chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 12px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--panel);
+  color: var(--text-soft);
+  font-size: 12.5px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: background 120ms ease, border-color 120ms ease, color 120ms ease;
+}
+
+.chip:hover {
+  border-color: #cfd5df;
+  background: var(--panel-soft);
+  color: var(--text);
+}
+
+.chip--active {
+  background: var(--text);
+  color: var(--panel);
+  border-color: var(--text);
+}
+
+.chip--active:hover {
+  background: #000;
+  color: var(--panel);
+  border-color: #000;
+}
+
+.chip .row-glyph {
+  width: 8px;
+  height: 8px;
+  box-shadow: 0 0 0 2px color-mix(in srgb, currentColor 22%, transparent);
+}
+
+.chip-count {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  padding: 1px 6px;
+  border-radius: 999px;
+  background: color-mix(in srgb, currentColor 12%, transparent);
+  color: inherit;
+  font-feature-settings: "tnum" 1;
+}
+
+/* 商品维护「分类」行：四段阶段 chip 排在「全部」后面，用颜色和后面的商品类目区分开。 */
+.chip--stage-imported {
+  color: var(--indigo-ink);
+  border-color: color-mix(in srgb, var(--indigo) 30%, var(--line));
+}
+
+.chip--stage-uncopied {
+  color: var(--amber);
+  border-color: color-mix(in srgb, var(--amber) 38%, var(--line));
+}
+
+.chip--stage-pending {
+  color: var(--text-soft);
+}
+
+.chip--stage-completed {
+  color: var(--green);
+  border-color: color-mix(in srgb, var(--green) 32%, var(--line));
+}
+
+/* 选中态统一成深色实心，别让阶段色盖住（.chip--stage-* 和 .chip--active 同权重，
+   这条多一级类名，任何位置都能赢）。 */
+.chip--stage.chip--active,
+.chip--stage.chip--active:hover {
+  background: var(--text);
+  color: var(--panel);
+  border-color: var(--text);
+}
+
+.chip-divider {
+  align-self: stretch;
+  width: 1px;
+  min-height: 22px;
+  margin: 0 2px;
+  background: var(--line);
+}
+
+/* 卡片上的阶段徽标：和筛选 chip 同一套颜色，直接显示商品现在停在哪一段。 */
+.product-card-body .stage-badge {
+  justify-self: start;
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 8px;
+  border-radius: 999px;
+  font-size: 11.5px;
+  font-weight: 500;
+  white-space: nowrap;
+}
+
+.product-card-body .stage-badge--imported { color: var(--indigo-ink); background: var(--indigo-soft); }
+.product-card-body .stage-badge--uncopied { color: var(--amber); background: var(--amber-soft); }
+.product-card-body .stage-badge--pending { color: var(--text-soft); background: #eef1f5; }
+.product-card-body .stage-badge--completed { color: var(--green); background: var(--green-soft); }
+
+
+/* ============================================================
+   Store template editor — size chips (draggable), size-chart picker,
+   labeled-inline rows, category picker empty state.
+   ============================================================ */
+
+/* Size chip — draggable when selected. Selected chips sit at the top of the
+   flex row in the user-defined order; unselected trail below in standard order. */
+#store-template-size-options {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  border: 0;
+  padding: 4px 0 0;
+  margin: 0;
+}
+
+#store-template-size-options legend {
+  flex-basis: 100%;
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--text-soft);
+  padding: 0 0 4px;
+}
+
+.size-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 12px 6px 8px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--panel);
+  color: var(--text-soft);
+  font-size: 13px;
+  cursor: pointer;
+  user-select: none;
+  transition: background 120ms ease, border-color 120ms ease, color 120ms ease, box-shadow 120ms ease;
+}
+
+.size-chip:hover { border-color: #cfd5df; background: var(--panel-soft); color: var(--text); }
+
+.size-chip--selected {
+  border-color: var(--indigo);
+  background: var(--indigo-soft);
+  color: var(--indigo-ink);
+  cursor: grab;
+}
+
+.size-chip--selected:active { cursor: grabbing; }
+.size-chip--dragging { opacity: 0.4; }
+
+.size-chip-handle {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  letter-spacing: -1px;
+  color: color-mix(in srgb, var(--indigo-ink) 55%, transparent);
+}
+
+.size-chip input[type="checkbox"] {
+  width: 14px;
+  height: 14px;
+  margin: 0;
+  accent-color: var(--indigo);
+  cursor: inherit;
+}
+
+/* ---- 副本 CNSC 全球价编辑区 ---- */
+.listing-copy-cnsc-subhead {
+  margin: 14px 0 6px;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-soft);
+}
+
+.listing-copy-cnsc-details {
+  border: 1px solid var(--line-soft);
+  border-radius: var(--radius-sm);
+  padding: 8px 10px;
+  margin: 6px 0;
+}
+
+.listing-copy-cnsc-details[open] {
+  background: var(--panel-soft);
+}
+
+.listing-copy-cnsc-target-summary {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  flex-wrap: wrap;
+  cursor: pointer;
+  list-style: none;
+}
+
+.listing-copy-cnsc-target-summary::-webkit-details-marker { display: none; }
+
+.listing-copy-cnsc-target-summary .listing-copy-cnsc-subhead { margin: 0; }
+
+.listing-copy-cnsc-summary-text { font-size: 12px; }
+
+.listing-copy-cnsc-chevron {
+  display: inline-block;
+  color: var(--muted);
+  transition: transform 120ms ease;
+}
+
+.listing-copy-cnsc-details[open] .listing-copy-cnsc-chevron { transform: rotate(90deg); }
+
+.listing-copy-cnsc-binding-bar {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: 8px 0;
+}
+
+.listing-copy-cnsc-binding-bar label {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+  color: var(--text-soft);
+}
+
+.listing-copy-cnsc-parse {
+  display: grid;
+  gap: 6px;
+  margin: 8px 0;
+}
+
+.listing-copy-cnsc-parse label {
+  display: grid;
+  gap: 4px;
+  font-size: 13px;
+  color: var(--text-soft);
+}
+
+.listing-copy-cnsc-parse small { font-weight: 400; }
+
+.listing-copy-cnsc-price-preview {
+  margin: 0;
+  padding: 8px 10px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--panel-soft);
+  font-family: var(--font-mono);
+  font-size: 12px;
+  max-height: 200px;
+  overflow: auto;
+  white-space: pre-wrap;
+}
+
+.listing-copy-cnsc-coverage {
+  margin: 4px 0;
+  font-size: 12px;
+  color: var(--red);
+}
+
+.listing-copy-cnsc-coverage--ok,
+.listing-copy-cnsc-coverage.listing-copy-cnsc-coverage--ok { color: var(--green); }
+
+.cnsc-site-order-label {
+  display: block;
+  margin-bottom: 6px;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.cnsc-target-config-wrap { min-width: 0; }
+
+.cnsc-target-config-table { width: 100%; }
+
+.mabang-import-mode-row {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  min-height: 24px;
+  margin: 6px 0;
+}
+
+/* 类目区「AI 推荐/重试」操作行。 */
+.category-ai-row {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: 6px 0;
+}
+
+/* ---- CNSC 全球价：站点识别顺序（可拖动站点块）与按尺码互斥分档 ---- */
+.cnsc-site-order-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding: 8px;
+  min-height: 44px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--panel-soft);
+}
+
+.cnsc-tier-size-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.cnsc-size-chip {
+  display: inline-flex;
+  align-items: center;
+  padding: 3px 10px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--panel);
+  color: var(--muted);
+  font-size: 12px;
+  cursor: pointer;
+  user-select: none;
+  transition: background 120ms ease, border-color 120ms ease, color 120ms ease;
+}
+
+.cnsc-size-chip:hover {
+  border-color: #cfd5df;
+  color: var(--text-soft);
+}
+
+/* 互斥点选：点亮 = 该尺码分给这一档（同一尺码只会属于一个档）。 */
+.cnsc-size-chip--on {
+  border-color: var(--indigo);
+  background: var(--indigo-soft);
+  color: var(--indigo-ink);
+  font-weight: 600;
+}
+
+/* ---- 副本 SKU 明细：按仓库批量改库存（泰国/广州/菲律宾） ---- */
+.listing-copy-warehouse-batch {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin: 8px 0;
+  padding: 8px 10px;
+  border: 1px dashed var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--panel-soft);
+}
+
+.listing-copy-warehouse-batch[hidden] { display: none; }
+
+
+.size-chip-label {
+  font-family: var(--font-mono);
+  font-weight: 500;
+  font-feature-settings: "tnum" 1;
+}
+
+/* Labeled-inline: a form label that hosts an input plus an adjacent button on one row. */
+.labeled-inline .labeled-inline-row {
+  display: flex;
+  align-items: stretch;
+  gap: 6px;
+}
+
+.labeled-inline .labeled-inline-row select,
+.labeled-inline .labeled-inline-row input { flex: 1; min-width: 0; }
+
+.labeled-inline .labeled-inline-row button {
+  flex: 0 0 auto;
+  padding: 8px 12px;
+  font-size: 12.5px;
+  white-space: nowrap;
+}
+
+/* Size-chart picker — button-triggered file input, matches listing-copy pattern. */
+.size-chart-control {
+  display: grid;
+  grid-template-columns: 130px minmax(0, 200px) auto minmax(0, 1fr);
+  align-items: center;
+  gap: 12px;
+}
+
+.size-chart-preview-wrap {
+  position: relative;
+  width: 96px;
+  height: 96px;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  background: var(--panel-soft);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  overflow: hidden;
+}
+
+.size-chart-preview-wrap img {
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  background: var(--panel);
+}
+
+.size-chart-preview-wrap .muted {
+  font-size: 11px;
+  color: var(--muted);
+}
+
+.size-chart-picker {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  min-width: 0;
+}
+
+.size-chart-picker button {
+  padding: 8px 14px;
+  font-size: 13px;
+  border-color: var(--indigo);
+  color: var(--indigo-ink);
+  background: var(--indigo-soft);
+}
+
+.size-chart-picker button:hover {
+  background: var(--indigo);
+  color: #fff;
+  border-color: var(--indigo);
+}
+
+.size-chart-picker #store-template-size-chart-file-name,
+.size-chart-picker #store-template-default-sku-file-name {
+  font-size: 12px;
+  color: var(--muted);
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* 店铺模板默认 SKU(白T恤)：区块内小标题 + 勾选行 + 图片列。 */
+.default-sku-head {
+  margin-top: 18px;
+  padding-top: 14px;
+  border-top: 1px dashed var(--line);
+}
+
+.template-section-grid label.checkbox-line {
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  color: var(--text);
+}
+
+.template-section-grid label.checkbox-line input[type="checkbox"] {
+  width: auto;
+  margin: 0;
+  flex: 0 0 auto;
+}
+
+.default-sku-image-control {
+  display: grid;
+  grid-template-columns: 130px minmax(0, 200px) minmax(0, 1fr);
+  align-items: center;
+  gap: 12px;
+}
+
+/* 子元素上的 display 规则会盖过 hidden 属性，跨境模式下这几个块必须真隐藏。
+   小标题要盖过 .store-template-editor .template-section-head 的 display:block。 */
+#store-template-default-sku-block[hidden],
+#store-template-strip-parentheses-line[hidden],
+.store-template-editor .default-sku-head[hidden],
+.size-chart-picker[hidden] {
+  display: none;
+}
+
+.file-input-native {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+/* Category picker empty state — guides the user to the mabang import flow. */
+.marketplace-category-empty {
+  padding: 20px;
+  margin: 12px 0;
+  border: 1px dashed var(--amber);
+  border-radius: var(--radius-sm);
+  background: var(--amber-soft);
+  color: var(--text);
+}
+
+.marketplace-category-empty p { margin: 0 0 8px; }
+.marketplace-category-empty p:last-of-type { margin-bottom: 12px; }
+
+.marketplace-category-empty .actions {
+  display: flex;
+  gap: 10px;
+  justify-content: flex-start;
+}
+
+.marketplace-category-empty .actions button {
+  border-color: var(--amber);
+  background: var(--amber);
+  color: #fff;
+}
+
+.marketplace-category-empty .actions button:hover {
+  background: #b45309;
+  border-color: #b45309;
+}
+
+@media (max-width: 720px) {
+  .size-chart-control { grid-template-columns: 130px minmax(0, 1fr); }
+  .size-chart-preview-wrap { grid-column: 2; }
+  .size-chart-picker { grid-column: 1 / -1; }
+}
+
+/* ============================================================
+   Description profile — store scope tag + inline field hint
+   ============================================================ */
+.scope-tag {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 8px;
+  border-radius: 999px;
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  letter-spacing: 0.04em;
+  font-weight: 500;
+  margin-right: 6px;
+}
+
+.scope-tag--store {
+  background: color-mix(in srgb, var(--indigo) 12%, transparent);
+  color: var(--indigo-ink);
+}
+
+.scope-tag--global {
+  background: color-mix(in srgb, var(--kraft) 15%, transparent);
+  color: var(--kraft);
+}
+
+.field-hint {
+  display: block;
+  margin-top: 6px;
+  font-size: 11.5px;
+  line-height: 1.55;
+  color: var(--muted);
+}
+
+/* ============================================================
+   描述生成方案对话框（description-profile-dialog）— 分区模板专用
+   ============================================================ */
+#description-profile-dialog {
+  width: min(920px, 96vw);
+  max-width: none;
+}
+
+.profile-intro,
+.dialog-note {
+  margin: 2px 0 12px;
+  padding: 8px 12px;
+  background: var(--panel-soft, #f8fafc);
+  border-left: 3px solid var(--line, #d7dbe0);
+  border-radius: 0 8px 8px 0;
+  line-height: 1.6;
+}
+
+/* 设置分组的间距统一由 grid 的 gap 控制。子元素自带的 margin 会和 gap 叠加，
+   而「状态占位 <p>」在没有状态时是空的，于是每一处都多出几十像素的幻影空隙。 */
+.settings-group > * {
+  margin-top: 0;
+  margin-bottom: 0;
+}
+
+/* 还没写入内容的状态占位 <p> 不参与布局；JS 填入文字后会自动恢复显示。 */
+.settings-group p:empty {
+  display: none;
+}
+
+/* 页面导入：先选账号，再开窗口采集。 */
+.mabang-import-account-field {
+  max-width: 320px;
+  margin: 0 0 12px;
+}
+
+/* ============================================================
+   马帮账号（多账号）
+   ============================================================ */
+/* 同一分组里的第二块内容：用分隔线隔开，标题沿用页面既有的 h2 尺寸，
+   否则 h3 会落到浏览器默认字号（比分组标题还大）。 */
+.settings-subsection {
+  margin-top: 22px;
+  padding-top: 20px;
+  border-top: 1px solid var(--line);
+}
+
+.settings-subsection > .panel-head {
+  margin-bottom: 12px;
+}
+
+/* ============================================================
+   局域网访问
+   ============================================================ */
+.lan-access-hero {
+  display: grid;
+  gap: 14px;
+  padding: 16px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--panel-soft);
+}
+
+.lan-address-list {
+  display: grid;
+  gap: 10px;
+}
+
+.lan-address-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  padding: 12px 14px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--panel-soft);
+}
+
+.lan-address-row.is-unreachable {
+  opacity: 0.62;
+}
+
+.lan-address-main {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+}
+
+.lan-address-url {
+  color: var(--indigo-ink);
+  font: 13px/1.45 var(--font-mono);
+  overflow-wrap: anywhere;
+}
+
+.lan-address-meta {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.lan-address-actions {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 8px;
+}
+
+.lan-address-badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: var(--indigo-soft);
+  color: var(--indigo-ink);
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+.lan-address-badge.is-muted {
+  background: var(--panel);
+  color: var(--muted);
+}
+
+.lan-hint-list {
+  display: grid;
+  gap: 4px;
+  margin: 0;
+  padding-left: 18px;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+#settings-network-firewall-result code {
+  overflow-wrap: anywhere;
+  word-break: break-all;
+}
+
+@media (max-width: 760px) {
+  .lan-address-row {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .lan-address-actions {
+    width: 100%;
+    justify-content: flex-start;
+  }
+}
+
+#mabang-account-dialog {
+  width: min(560px, 96vw);
+}
+
+/* 字段少，用两列；四列会把输入框拉得很长很空。 */
+#mabang-account-dialog .form-grid.compact-form {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+#mabang-account-dialog .toggle-field {
+  grid-column: 1 / -1;
+}
+
+/* 模式相关提示条 */
+.mode-help {
+  margin: 0 0 12px;
+  padding: 8px 12px;
+  background: var(--panel-soft, #f6f8fa);
+  border-radius: 8px;
+  line-height: 1.6;
+}
+
+.mode-help--warn {
+  background: #fff8e6;
+  border: 1px solid #f0d78c;
+  color: #7a5b00;
+}
+
+/* 基本信息行：名称 + 店铺（两列） */
+.profile-basic-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px 14px;
+  margin-bottom: 14px;
+}
+
+.profile-basic-grid label {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 12.5px;
+  color: var(--muted, #7c8598);
+  min-width: 0;
+}
+
+/* 分区编辑 / 指令 / 预览的通用块 */
+.profile-field {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin: 0 0 16px;
+  min-width: 0;
+}
+
+.profile-block-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-strong, #1f2937);
+}
+
+.profile-field textarea {
+  width: 100%;
+  box-sizing: border-box;
+  resize: vertical;
+}
+
+.field-hint {
+  display: block;
+  font-size: 11.5px;
+  line-height: 1.6;
+  color: var(--muted, #7c8598);
+}
+
+/* 小型按钮 */
+button.mini {
+  padding: 3px 8px;
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+/* 分区列表 */
+.profile-sections {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin: 2px 0 4px;
+}
+
+.profile-sections details.profile-section-item {
+  border: 1px solid var(--line, #d7dbe0);
+  border-radius: 8px;
+  padding: 6px 10px;
+  background: var(--panel, #fff);
+}
+
+.profile-sections summary {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  cursor: pointer;
+  list-style: none;
+  font-size: 12.5px;
+  min-width: 0;
+}
+
+.profile-sections summary::-webkit-details-marker {
+  display: none;
+}
+
+.profile-section-summary-label {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-weight: 600;
+  overflow: hidden;
+  min-width: 0;
+}
+
+.profile-section-title-text {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.profile-section-moves {
+  display: inline-flex;
+  gap: 2px;
+  flex-shrink: 0;
+}
+
+.profile-sections summary select {
+  width: auto;
+  flex-shrink: 0;
+  font-size: 12px;
+  padding: 3px 6px;
+}
+
+.profile-sections summary button {
+  flex-shrink: 0;
+}
+
+/* 种类徽章 */
+.profile-type-badge {
+  flex-shrink: 0;
+  display: inline-block;
+  padding: 1px 8px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 500;
+  line-height: 1.7;
+}
+
+.profile-type-badge--fixed { background: #eef1f5; color: #4a5261; }
+.profile-type-badge--fields { background: #e7f0ff; color: #1d4ed8; }
+.profile-type-badge--ai { background: #e9f9ef; color: #15803d; }
+
+/* 分区展开体：第一行 emoji/标题，第二行起内容 */
+.profile-section-body {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding-top: 10px;
+}
+
+.profile-section-body .profile-row-line {
+  display: grid;
+  grid-template-columns: 90px minmax(0, 1fr);
+  gap: 8px 12px;
+}
+
+.profile-section-body label {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  font-size: 11.5px;
+  color: var(--muted, #7c8598);
+  min-width: 0;
+}
+
+.profile-section-body textarea,
+.profile-section-body input {
+  width: 100%;
+  box-sizing: border-box;
+}
+
+.profile-section-body > textarea,
+.profile-section-body > input[data-section-hint] {
+  margin-top: 2px;
+}
+
+/* 追加分区 */
+.profile-add-section-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 2px 0;
+}
+
+.profile-add-section-row select {
+  width: auto;
+  min-width: 160px;
+}
+
+/* 字段行编辑器（分区类型 = 字段） */
+.profile-rows-editor {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-top: 2px;
+}
+
+.profile-rows-head,
+.profile-field-row {
+  display: grid;
+  grid-template-columns: minmax(120px, 1.1fr) 150px minmax(140px, 1fr) minmax(120px, 0.9fr) 34px;
+  gap: 6px;
+  align-items: center;
+}
+
+.profile-rows-head {
+  font-size: 11px;
+  color: var(--muted, #7c8598);
+  padding: 0 2px;
+}
+
+.profile-field-row {
+  border: 1px solid var(--line-soft, #edf0f4);
+  border-radius: 6px;
+  padding: 4px 6px;
+  background: #fcfcfd;
+}
+
+.profile-rows-head > span:first-child {
+  grid-column: 1;
+}
+
+.profile-field-row .profile-row-emoji-cell {
+  display: flex;
+  gap: 6px;
+  min-width: 0;
+}
+
+/* 基础商品详情行的提示与示例（整组键值直出） */
+.profile-base-detail-preview {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  min-width: 0;
+}
+
+.profile-base-detail-hint {
+  font-size: 11px;
+  color: var(--muted, #7c8598);
+}
+
+.profile-base-detail-sample {
+  padding: 6px 10px;
+  border: 1px dashed var(--line, #d7dbe0);
+  border-radius: 6px;
+  background: #f7f8fa;
+  font-family: var(--font-mono, ui-monospace, Menlo, Consolas, monospace);
+  font-size: 11.5px;
+  line-height: 1.7;
+  color: var(--text-soft, #4a5261);
+  white-space: pre-wrap;
+}
+
+.profile-row-emoji-cell input[data-row-emoji] {
+  width: 52px;
+  flex-shrink: 0;
+  padding: 6px 8px;
+}
+
+.profile-row-emoji-cell input[data-row-label] {
+  min-width: 0;
+  padding: 6px 8px;
+}
+
+.profile-row-source {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  font-size: 10.5px;
+  color: var(--muted, #7c8598);
+  min-width: 0;
+}
+
+.profile-row-source select,
+.profile-field-row input[data-row-value],
+.profile-field-row input[data-row-hint],
+.profile-field-row input[data-row-slot],
+.profile-field-row select[data-row-field] {
+  width: 100%;
+  padding: 6px 8px;
+  font-size: 12px;
+}
+
+.profile-row-slot-cell .profile-row-placeholder {
+  display: block;
+  font-size: 11px;
+  color: var(--muted, #9aa3b2);
+  text-align: center;
+}
+
+.profile-row-tools {
+  text-align: right;
+}
+
+.profile-rows-empty {
+  padding: 10px 12px;
+  border: 1px dashed var(--line, #d7dbe0);
+  border-radius: 6px;
+  color: var(--muted, #7c8598);
+  font-size: 12px;
+  background: #fcfcfd;
+}
+
+/* 完成预览 */
+.profile-preview-wrap {
+  margin: 4px 0 14px;
+}
+
+.profile-preview {
+  border: 1px solid var(--line, #d7dbe0);
+  border-radius: 8px;
+  background: #fbfbfc;
+  padding: 10px 12px;
+  font-family: var(--font-mono, ui-monospace, SFMono-Regular, Menlo, Consolas, monospace);
+  font-size: 12px;
+  line-height: 1.7;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.profile-preview-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+  margin: -2px 0 8px;
+  padding-bottom: 6px;
+  border-bottom: 1px dashed var(--line, #d7dbe0);
+  color: var(--muted, #7c8598);
+  font-family: var(--font-sans, -apple-system, "Segoe UI", sans-serif);
+  font-size: 11.5px;
+}
+
+.profile-preview-head #description-profile-preview-head-name {
+  color: var(--text, #1f2937);
+  font-weight: 600;
+}
+
+.profile-preview-block {
+  margin: 0 0 10px;
+}
+
+.profile-preview-block::first-line {
+  font-weight: 700;
+  color: var(--text-strong, #1f2937);
+}
+
+.profile-preview-empty {
+  color: var(--muted, #7c8598);
+  font-family: var(--font-sans, -apple-system, "Segoe UI", sans-serif);
+}
+
+/* ============================================================
+   Listing copies table — thumbnail column, aligned numerics, truncation.
+   ============================================================ */
+
+/* 副本面板头部操作区：批量生成按钮在上，全选+提示在下，右对齐。 */
+.listing-copy-head-actions {
+  display: grid;
+  justify-items: end;
+  gap: 8px;
+}
+
+/* 刷新在「批量生成自动化任务」左侧（同一行）。
+   这里只用 flex 排布：不再给刷新按钮加 absolute/right 覆盖（原来那条会把按钮从行里摘出去，
+   容器上为其做的 position: relative 也一并撤掉）。 */
+.listing-copy-head-actions-main {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  justify-content: flex-end;
+}
+
+.listing-copy-head-actions-sub {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.listing-copy-head-actions-sub .muted {
+  font-size: 12px;
+}
+
+.listing-copy-head-actions-sub #select-all-listing-copies-btn {
+  padding: 4px 12px;
+  font-size: 12.5px;
+}
+
+.listing-copies-table { table-layout: auto; }
+
+/* 首列只是多选框：收窄，避免表格自动布局把余量堆给空列。
+   全局 input{width:100%;padding:9px 11px} 会把裸 checkbox 撑满整列，
+   这里恢复成紧凑的内联多选框。 */
+.listing-copies-table th:first-child,
+.listing-copies-table td:first-child {
+  width: 34px;
+  padding-right: 2px;
+}
+
+.listing-copies-table td:first-child input[type="checkbox"] {
+  width: 16px;
+  min-width: 0; /* 覆盖 td input 的 min-width:92px，否则多选框被撑满整列 */
+  height: 16px;
+  padding: 0;
+  margin: 0;
+  accent-color: var(--indigo);
+  cursor: pointer;
+}
+
+.listing-copy-thumb-cell {
+  padding: 6px 8px;
+  width: 62px;
+}
+
+.listing-copy-thumb {
+  display: block;
+  width: 46px;
+  height: 46px;
+  object-fit: cover;
+  border-radius: 6px;
+  border: 1px solid var(--line);
+  background: var(--panel-soft);
+}
+
+.listing-copy-thumb--empty {
+  display: block;
+  width: 46px;
+  height: 46px;
+  border-radius: 6px;
+  border: 1px dashed var(--line);
+  background: var(--panel-soft);
+}
+
+.listing-copy-title-cell,
+.listing-copy-category-cell,
+.listing-copy-template-cell,
+.listing-copy-store-cell {
+  max-width: 260px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* 模板列通常是「店铺名 - 站点类目」长串；给更宽预算但同样单行省略，
+   避免在窄列里折成十几行把整行撑到 200px+。 */
+.listing-copy-template-cell {
+  max-width: 320px;
+}
+
+/* 操作按钮与状态标签横排，绝不竖排堆叠：窄 td 若允许换行，三个按钮会
+   上下叠成 200px+，把整行撑高。 */
+.table-actions {
+  white-space: nowrap;
+}
+
+.table-actions button {
+  white-space: nowrap;
+}
+
+.row-status-label {
+  white-space: nowrap;
+}
+
+.listing-copy-num-cell {
+  text-align: right;
+  font-family: var(--font-mono);
+  font-feature-settings: "tnum" 1;
+  width: 64px;
+}
+
+/* AI connection balance line — cached balance display under the connection meta. */
+.ai-balance-line {
+  display: block;
+  margin-top: 4px;
+  font-size: 12px;
+  color: var(--text-soft);
+}
+.ai-balance-line code {
+  font-weight: 600;
+  color: var(--indigo-ink);
+}
+.ai-balance-line--error {
+  color: var(--red);
+}
+
+/* ============================================================
+   Production dashboard — stat tiles, sparkline, header.
+   ============================================================ */
+
+/* ============================================================
+   Production dashboard (hero rebuild)
+   ============================================================ */
+.production-header {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 16px;
+  margin-bottom: 20px;
+  padding-bottom: 14px;
+  border-bottom: 1px solid var(--line-soft);
+}
+
+.production-header .eyebrow { color: var(--kraft); }
+.production-header p { margin: 4px 0 0; font-family: var(--font-mono); font-size: 12px; }
+
+.production-actions button {
+  border-color: var(--indigo);
+  background: var(--indigo);
+  color: #fff;
+  padding: 9px 16px;
+}
+.production-actions button:hover { background: #4338ca; border-color: #4338ca; }
+
+/* Hero — big number left, sparkline right. This is where the operator's eye
+   should land first. */
+.production-hero {
+  display: grid;
+  grid-template-columns: 260px minmax(0, 1fr);
+  gap: 32px;
+  align-items: stretch;
+  padding: 28px 32px;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-md);
+  margin-bottom: 18px;
+  position: relative;
+  overflow: hidden;
+}
+
+.production-hero::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  top: 0;
+  bottom: 0;
+  width: 3px;
+  background: var(--kraft);
+}
+
+.production-hero-metric {
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  gap: 6px;
+  border-right: 1px solid var(--line-soft);
+  padding-right: 32px;
+}
+
+.production-hero-label {
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--kraft);
+}
+
+.production-hero-value {
+  font-family: var(--font-mono);
+  font-feature-settings: "tnum" 1;
+  font-size: 76px;
+  font-weight: 500;
+  line-height: 0.95;
+  color: var(--text);
+  letter-spacing: -0.02em;
+}
+
+.production-hero-hint {
+  font-size: 12.5px;
+  color: var(--muted);
+  margin-top: 2px;
+}
+
+.production-hero-chart {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.production-hero-chart-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 6px;
+}
+
+.production-hero-legend {
+  display: flex;
+  gap: 16px;
+  margin-top: 4px;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--muted);
+}
+
+.production-hero-legend span {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+/* Secondary meter chip row — flat, dense, right below the hero. */
+.meter-row {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 10px;
+  margin-bottom: 20px;
+}
+
+.meter-chip {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  grid-template-rows: auto auto;
+  align-items: baseline;
+  column-gap: 10px;
+  row-gap: 2px;
+  padding: 14px 16px;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+}
+
+.meter-chip .row-glyph {
+  grid-row: 1 / span 2;
+  align-self: center;
+  margin-right: 2px;
+  transform: scale(1.15);
+}
+
+.meter-chip strong {
+  font-family: var(--font-mono);
+  font-feature-settings: "tnum" 1;
+  font-size: 22px;
+  font-weight: 500;
+  color: var(--text);
+  line-height: 1;
+}
+
+.meter-chip span {
+  font-size: 12px;
+  color: var(--text-soft);
+  align-self: end;
+}
+
+.meter-chip small {
+  grid-column: 2;
+  font-size: 11px;
+  color: var(--muted);
+}
+
+.sparkline-row {
+  margin-top: 8px;
+  display: flex;
+  justify-content: stretch;
+  flex: 1;
+  min-height: 0;
+}
+
+#production-sparkline {
+  width: 100%;
+  height: auto;
+  aspect-ratio: 700 / 160;
+  display: block;
+}
+
+.sparkline-axis text {
+  font-family: var(--font-mono);
+  font-feature-settings: "tnum" 1;
+}
+
+.dashboard-grid--split {
+  grid-template-columns: 1fr 1fr;
+}
+
+.muted-heading {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text);
+  margin: 0;
+}
+
+.production-next-panel .panel-head,
+.production-recent-panel .panel-head {
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 2px;
+}
+
+.production-next-panel .eyebrow,
+.production-recent-panel .eyebrow {
+  color: var(--kraft);
+}
+
+/* Status pill used across job details + tables. Wraps a row glyph + text. */
+.status-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  white-space: nowrap;
+  font-weight: 500;
+}
+
+.automation-timeline-item {
+  display: grid;
+  grid-template-columns: 8px auto minmax(0, 1fr);
+  gap: 10px;
+  align-items: baseline;
+}
+
+.automation-timeline-item .row-glyph {
+  align-self: center;
+}
+
+/* 执行步骤（表单填充顺序）— 序号 + 名称 + 时间横排，像一份勾选清单。 */
+.automation-job-steps {
+  display: grid;
+  gap: 4px;
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.automation-step-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 5px 8px;
+  border-radius: var(--radius-sm);
+  background: var(--panel-soft);
+  font-size: 13px;
+}
+
+.automation-step-item .automation-step-index {
+  min-width: 20px;
+  text-align: center;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--muted);
+  background: var(--panel);
+  border: 1px solid var(--line-soft);
+  border-radius: 999px;
+  padding: 1px 0;
+}
+
+.automation-step-item strong {
+  flex: 1;
+  min-width: 0;
+  font-weight: 500;
+}
+
+.automation-step-item time {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--text-soft);
+  white-space: nowrap;
+}
+
+.automation-step-item--evidence {
+  margin-top: 6px;
+  border: 1px solid var(--kraft-line);
+  background: var(--kraft-wash);
+}
+
+.automation-step-item--evidence > span:last-child {
+  margin-left: auto;
+  color: var(--text-soft);
+  font-size: 12px;
+  text-align: right;
+}
+
+/* Automation jobs table — glyph column + hoverable rows opening detail. */
+.automation-job-row { cursor: pointer; }
+.automation-job-row:hover { background: color-mix(in srgb, var(--panel-soft) 60%, var(--panel)); }
+.automation-job-glyph-cell { width: 32px; text-align: center; }
+.automation-job-identity-cell { min-width: 210px; }
+.automation-job-identity-main { display: flex; align-items: center; gap: 8px; }
+.automation-job-identity-text { min-width: 0; }
+.automation-job-identity-cell strong { display: block; font-weight: 500; }
+.automation-job-identity-cell small { display: block; font-family: var(--font-mono); font-size: 11px; color: var(--muted); }
+
+/* 自动化任务「店铺 / 主 SKU」左侧的商品主图缩略图（比副本列表的 46px 小一号，表格更紧凑）。 */
+.automation-job-thumb {
+  flex: none;
+  display: block;
+  width: 34px;
+  height: 34px;
+  object-fit: cover;
+  border-radius: 6px;
+  border: 1px solid var(--line);
+  background: var(--panel-soft);
+}
+
+/* 取不到图时保留一个占位框，行的文字起点仍然对齐。 */
+.automation-job-thumb--empty { border-style: dashed; }
+.automation-job-gap-cell,
+.automation-job-error-cell {
+  max-width: 240px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* 错误格里的提醒（如「主图水印：水印未配置」）是重要信息，允许换行完整
+   显示，不被父级的单行省略截断。 */
+.automation-job-error-cell small,
+.automation-job-gap-cell small {
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+.automation-job-updated-cell {
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  color: var(--text-soft);
+  cursor: help;
+  text-decoration: underline dotted color-mix(in srgb, var(--muted) 40%, transparent) 1px;
+  text-underline-offset: 3px;
+}
+
+@media (max-width: 900px) {
+  .production-hero { grid-template-columns: 1fr; gap: 20px; padding: 20px; }
+  .production-hero-metric { border-right: 0; border-bottom: 1px solid var(--line-soft); padding-right: 0; padding-bottom: 16px; }
+  .production-hero-value { font-size: 60px; }
+  .meter-row { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .dashboard-grid--split { grid-template-columns: 1fr; }
+}
+
+.legacy-dashboard-shim {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+}
+
+@media (max-width: 900px) {
+  .stat-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .dashboard-grid--split { grid-template-columns: 1fr; }
+}
+
+/* ============================================================
+   SPEC-SHEET SKIN — 商品维护 · 模板维护 · 副本检查
+   ------------------------------------------------------------
+   These maintenance/editor surfaces are the data-entry side of a
+   garment tech pack. We dress them as a tailor's spec sheet on the
+   cutting bench: kraft (hang-tag brown) field codes, a dashed seam
+   under every section head, and a warm kraft-paper cover band on
+   each editor. Indigo stays the action color; the status-glyph
+   language is untouched. One signature, applied the same way in all
+   three screens — everything else stays quiet.
+   ============================================================ */
+
+/* --- Editor cover band: the tech-pack cover sheet --------------- */
+/* Maintenance modal (点击「维护」), template editor, listing/copy check
+   all share one header treatment: a kraft top rule + craft-paper wash. */
+.maintenance-header,
+.store-template-editor > .panel-head,
+.listing-editor-head {
+  position: relative;
+  background:
+    linear-gradient(180deg, var(--kraft-wash), var(--panel) 78%);
+}
+
+.maintenance-header::before,
+.store-template-editor > .panel-head::before,
+.listing-editor-head::before {
+  content: "";
+  position: absolute;
+  inset: 0 0 auto 0;
+  height: 2px;
+  background: repeating-linear-gradient(
+    90deg,
+    var(--kraft) 0 14px,
+    transparent 14px 22px
+  );
+  opacity: 0.75;
+}
+
+.store-template-editor > .panel-head,
+.listing-editor-head { border-top-left-radius: inherit; border-top-right-radius: inherit; }
+
+/* The listing/copy-check header keeps its sticky behaviour; just warm it. */
+.listing-editor-head { padding-top: 20px; }
+
+/* --- The signature: field code + stitched seam ----------------- */
+/* Every section head across the three editors becomes a spec-sheet
+   field row: a mono field code, then a dashed kraft seam (the topstitch)
+   running the full width beneath it. */
+.maintenance-section-head,
+.store-template-section .template-section-head,
+.listing-editor-section > h3,
+.listing-editor-section > .listing-editor-section-head {
+  position: relative;
+  padding-bottom: 11px;
+  border-bottom: 1.5px dashed var(--kraft-line);
+}
+
+/* Restore the small gap the dashed seam replaces, consistently. */
+.store-template-section .template-section-head { margin-bottom: 16px; }
+.listing-editor-section > h3,
+.listing-editor-section > .listing-editor-section-head { margin-bottom: 16px; }
+
+/* A stitch tick sits on the seam — the point where the field code is
+   fastened to the sheet, like a tailor's tack. */
+.maintenance-section-head::after,
+.store-template-section .template-section-head::after,
+.listing-editor-section > h3::after,
+.listing-editor-section > .listing-editor-section-head::after {
+  content: "";
+  position: absolute;
+  left: 0;
+  bottom: -4px;
+  width: 26px;
+  height: 6px;
+  border-radius: 2px;
+  background: var(--kraft);
+  opacity: 0.9;
+}
+
+/* Section titles in the template + listing editors get a kraft spec-mark
+   before the text so they read as field labels, not plain headings.
+   (Maintenance modal already leads with a mono eyebrow, handled below.) */
+.store-template-section .template-section-head h3,
+.listing-editor-section > h3,
+.listing-editor-section > .listing-editor-section-head h3 {
+  display: inline-flex;
+  align-items: center;
+  gap: 9px;
+}
+
+.store-template-section .template-section-head h3::before,
+.listing-editor-section > h3::before,
+.listing-editor-section > .listing-editor-section-head h3::before {
+  content: "";
+  width: 3px;
+  height: 15px;
+  border-radius: 2px;
+  background: var(--kraft);
+  flex: none;
+}
+
+/* Maintenance-modal field codes (META / IMAGES / COLORS …) read as
+   punched hang-tag codes: kraft ink on a paper chip. */
+.maintenance-section-head .eyebrow {
+  padding: 2px 8px;
+  border: 1px solid var(--kraft-line);
+  border-radius: 4px;
+  background: var(--kraft-soft);
+  color: var(--kraft-deep);
+}
+
+/* --- Maintenance modal: warm the spec column ------------------- */
+/* The left summary rail is the cover flap of the spec sheet. */
+.maintenance-summary {
+  background: var(--kraft-wash);
+  border-right: 1px solid var(--kraft-line);
+}
+
+.maintenance-summary .eyebrow { color: var(--kraft-deep); }
+
+.maintenance-summary-thumb {
+  border-color: var(--kraft-line);
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.6);
+}
+
+/* Header meta reads as the tech-pack reference strip. */
+.maintenance-header-meta {
+  padding-top: 10px;
+  margin-top: 2px;
+  border-top: 1px dashed var(--kraft-line);
+}
+
+/* --- Product cards: hang-tag treatment ------------------------- */
+/* The 「维护」 button is the primary act on each card — promote it with a
+   kraft-inked outline so the whole grid reads as a rack of tagged garments. */
+.product-card-actions button[data-maintain-base-product] {
+  border-color: var(--kraft);
+  color: var(--kraft-deep);
+  background: var(--kraft-soft);
+  font-weight: 600;
+}
+
+.product-card-actions button[data-maintain-base-product]:hover {
+  background: var(--kraft);
+  border-color: var(--kraft);
+  color: #fff;
+}
+
+/* Kraft hover 边框只作用于普通卡片；选中(.selected)/勾选(.checked)卡片已有
+   高亮边框，hover 时若再盖 kraft-line 会把选中效果遮掉（规则顺序靠后覆盖了
+   上方的 .product-card.selected）。 */
+.product-card:hover:not(.selected):not(.checked) { border-color: var(--kraft-line); }
+.product-card-actions { border-top-color: var(--kraft-line); }
+
+/* --- Template cards: matching spec-tag rule -------------------- */
+.template-card::before {
+  content: "";
+  position: absolute;
+  top: 0;
+  left: 18px;
+  right: 18px;
+  height: 2px;
+  border-radius: 0 0 2px 2px;
+  background: repeating-linear-gradient(
+    90deg,
+    var(--kraft) 0 10px,
+    transparent 10px 16px
+  );
+  opacity: 0;
+  transition: opacity 140ms ease;
+}
+
+.template-card:hover { border-color: var(--kraft-line); }
+.template-card:hover::before { opacity: 0.8; }
+
+.template-card-actions button[data-edit-store-template] {
+  border-color: var(--kraft);
+  color: var(--kraft-deep);
+  background: var(--kraft-soft);
+  font-weight: 600;
+}
+
+.template-card-actions button[data-edit-store-template]:hover {
+  background: var(--kraft);
+  border-color: var(--kraft);
+  color: #fff;
+}
+
+/* --- Copy-check readiness banner: keep status colors, warm neutral -- */
+/* The listing-editor section subheads (商品图「首图为主图」etc.) already use
+   .muted; nothing to change — the seam does the framing. */
+
+/* Reduced motion: the only transitions added are hover color/opacity,
+   which the global reduce block (see top of file) already neutralizes for
+   transforms. Nothing here animates on load. */
+@media (prefers-reduced-motion: reduce) {
+  .template-card::before { transition: none; }
+}
+
+/* ============================================================
+   SPEC-SHEET SKIN — pass 2: the ledgers, panel heads, cover edge
+   ------------------------------------------------------------
+   Carry the tech-pack language out of the editors and onto the
+   list views so the whole workbench reads as one bound spec book:
+   the 副本/自动化 tables become kraft ledger pages, list panel
+   codes share the hang-tag ink, and the workbench gets a quiet
+   cover edge. Scope stays off the editor SKU sub-tables and never
+   touches indigo actions or status glyphs.
+   ============================================================ */
+
+/* --- Workbench cover edge -------------------------------------- */
+/* A hairline kraft rule above the view title ties the outer shell
+   to the kraft top-rule on every editor header. */
+.topbar {
+  position: relative;
+  padding-top: 12px;
+}
+
+.topbar::before {
+  content: "";
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 46px;
+  height: 2px;
+  border-radius: 0 0 2px 2px;
+  background: var(--kraft);
+}
+
+/* --- List panel field codes ------------------------------------ */
+/* STORE COPIES / AUTOMATION JOBS / STORE TEMPLATES / BASE PRODUCTS
+   share the hang-tag ink so each list reads as a page of the book. */
+#automation .panel-head > div > .eyebrow,
+#templates .panel-head .eyebrow,
+#product-maintenance .panel-head .eyebrow {
+  color: var(--kraft-deep);
+}
+
+/* --- Ledger tables: 副本 / 自动化 ------------------------------ */
+/* Only the standalone list tables inside #automation. The SKU
+   sub-tables live inside .listing-editor / .modal-panel dialogs,
+   which are never descendants of #automation, so they stay clean. */
+#automation .table-wrap {
+  border-color: var(--kraft-line);
+}
+
+#automation .table-wrap table thead th {
+  background: var(--kraft-soft);
+  color: var(--kraft-deep);
+  border-bottom: 1.5px solid var(--kraft);
+}
+
+#automation .table-wrap tbody tr:hover {
+  background: var(--kraft-wash);
+}
+
+/* Keep the row rules warm so the grid reads like ledger scan-lines. */
+#automation .table-wrap tbody td {
+  border-bottom-color: color-mix(in srgb, var(--kraft-line) 55%, transparent);
+}
+
+#automation .table-wrap .task-section-row:hover {
+  background: transparent;
+}
+
+#automation .table-wrap .task-section-row td {
+  padding: 9px 12px 7px;
+  border-bottom: 1px solid var(--line);
+  color: var(--text-soft);
+  background: var(--panel-soft);
+  font-size: 12px;
+  letter-spacing: 0.02em;
+}
+
+#automation .table-wrap .task-section-row td > * + * {
+  margin-left: 8px;
+}
+
+#automation .table-wrap .task-section-row td > span:last-child {
+  color: var(--muted);
+}
+
+/* 分区标题行与已完成的时间分桶行都可点折叠（现场反馈：已完成越积越多，列表被拖得很长）。 */
+#automation .table-wrap .task-section-row,
+#automation .table-wrap .copy-bucket-row {
+  cursor: pointer;
+  user-select: none;
+}
+
+#automation .table-wrap .task-section-row:hover td,
+#automation .table-wrap .copy-bucket-row:hover td {
+  background: color-mix(in srgb, var(--panel-soft) 72%, var(--kraft-line) 28%);
+}
+
+#automation .table-wrap .copy-bucket-row td {
+  padding: 7px 12px 6px;
+  border-bottom: 1px dashed var(--line);
+  color: var(--text-soft);
+  background: color-mix(in srgb, var(--panel-soft) 60%, transparent);
+  font-size: 12px;
+}
+
+#automation .table-wrap .copy-bucket-row td > * + * {
+  margin-left: 8px;
+}
+
+#automation .table-wrap .copy-bucket-caret {
+  display: inline-block;
+  min-width: 12px;
+  color: var(--muted);
+  font-size: 11px;
+}
+
+#automation .table-wrap .task-section-row--failed td {
+  color: var(--red);
+  background: var(--red-soft);
+}
+
+#automation .table-wrap .task-section-row--completed td {
+  padding-top: 14px;
+  border-top: 2px solid var(--green);
+  color: var(--green);
+  background: linear-gradient(180deg, var(--green-soft), var(--panel) 85%);
+}
+
+/* --- Empty states: kraft paper frame --------------------------- */
+/* "No data yet" stays inside the spec-sheet language: a dashed
+   kraft frame on warm paper rather than a flat grey box. */
+.empty-state,
+.template-empty {
+  border: 1px dashed var(--kraft-line);
+  background: var(--kraft-wash);
+}
+
+.table-empty-row td {
+  background: var(--kraft-wash);
+}
+
+/* ============================================================
+   PRICES section relayout (商品维护 → 维护 → 站点价格)
+   ------------------------------------------------------------
+   The whole section was a stack of unstyled block containers, so
+   every control collapsed into its own full-width row (readonly
+   path, 选择, 清空 each on a line; toolbars flowing raw). Re-group
+   into tidy horizontal rows so it reads as a compact spec panel.
+   Scoped under #maintenance-section-prices so nothing else shifts.
+   ============================================================ */
+
+/* Product-category picker: [ path input (grows) ] [选择] [清空] one row. */
+#maintenance-section-prices .marketplace-category-picker.inline-picker {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto auto;
+  gap: 10px;
+  align-items: center;
+}
+
+#maintenance-section-prices .inline-picker #base-maintenance-category-path {
+  grid-column: 1;
+}
+
+#maintenance-section-prices .inline-picker button {
+  white-space: nowrap;
+}
+
+/* Quick-template toolbar: label · select · save · delete · status, aligned. */
+#maintenance-section-prices .category-quick-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin-top: 10px;
+}
+
+#maintenance-section-prices .category-quick-toolbar #base-category-template-select {
+  flex: 1 1 220px;
+  min-width: 0;
+  max-width: 360px;
+}
+
+#maintenance-section-prices .category-quick-toolbar .muted:first-child {
+  flex: 0 0 auto;
+}
+
+/* Size-chart block: preview thumbnail beside its controls, not stacked. */
+#maintenance-section-prices .maintenance-sizechart {
+  display: grid;
+  grid-template-columns: 132px minmax(0, 1fr);
+  gap: 16px;
+  align-items: start;
+}
+
+#maintenance-section-prices .maintenance-sizechart-preview {
+  width: 132px;
+  aspect-ratio: 1;
+  display: grid;
+  place-items: center;
+  padding: 6px;
+  text-align: center;
+  border: 1px solid var(--kraft-line);
+  border-radius: var(--radius-sm);
+  background: var(--kraft-wash);
+  overflow: hidden;
+}
+
+#maintenance-section-prices .maintenance-sizechart-preview img {
+  max-width: 100%;
+  max-height: 100%;
+  object-fit: contain;
+  border-radius: 4px;
+}
+
+#maintenance-section-prices .maintenance-sizechart-preview p { margin: 0; }
+
+#maintenance-section-prices .maintenance-sizechart-controls {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 10px 12px;
+  align-items: end;
+}
+
+/* the size-chart <select> label spans the full first row; buttons sit below it */
+#maintenance-section-prices .maintenance-sizechart-controls label {
+  grid-column: 1 / -1;
+}
+
+#maintenance-section-prices .maintenance-sizechart-controls button,
+#maintenance-section-prices .maintenance-sizechart-controls #base-recognize-sizes-status {
+  align-self: center;
+}
+
+#maintenance-section-prices .maintenance-sizechart-controls #base-recognize-sizes-status {
+  grid-column: 1 / -1;
+}
+
+/* "识别出的尺码" header row: title left, 全选/清空 links right. */
+#maintenance-section-prices .maintenance-section-sub {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+#maintenance-section-prices .maintenance-section-action-links {
+  display: inline-flex;
+  gap: 12px;
+}
+
+/* Add-size and size-template rows: label input sits inline with its buttons. */
+#maintenance-section-prices .maintenance-sizechart-add,
+#maintenance-section-prices .maintenance-sizechart-templates {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: end;
+  gap: 8px 10px;
+  margin-top: 10px;
+}
+
+#maintenance-section-prices .maintenance-sizechart-add label,
+#maintenance-section-prices .maintenance-sizechart-templates label {
+  flex: 1 1 220px;
+  min-width: 0;
+  max-width: 360px;
+}
+
+#maintenance-section-prices .maintenance-sizechart-add button,
+#maintenance-section-prices .maintenance-sizechart-templates button {
+  flex: 0 0 auto;
+}
+
+/* CNSC paste + apply toolbars: keep buttons on one wrapping row. */
+#maintenance-section-prices .base-price-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 10px;
+  margin: 12px 0;
+}
+
+#maintenance-section-prices .base-price-parse {
+  display: grid;
+  gap: 10px;
+  margin-bottom: 12px;
+}
+
+#maintenance-section-prices .base-price-parse label { display: grid; gap: 6px; }
+
+#maintenance-section-prices .base-price-parse button { justify-self: start; }
+
+/* Divider warms to the kraft seam language used across the sheet. */
+#maintenance-section-prices .maintenance-section-divider {
+  height: 0;
+  margin: 18px 0;
+  border: 0;
+  border-top: 1px dashed var(--kraft-line);
+}
+
+/* CNSC usage note reads as a stamped caution slip, not raw text. */
+#maintenance-section-prices .maintenance-note--cnsc {
+  margin: 4px 0 8px;
+  padding: 9px 12px;
+  border-left: 3px solid var(--kraft);
+  border-radius: 0 var(--radius-sm) var(--radius-sm) 0;
+  background: var(--kraft-wash);
+  color: var(--kraft-deep);
+  font-size: 12.5px;
+}
+
+@media (max-width: 760px) {
+  #maintenance-section-prices .marketplace-category-picker.inline-picker,
+  #maintenance-section-prices .maintenance-sizechart,
+  #maintenance-section-prices .maintenance-sizechart-controls {
+    grid-template-columns: 1fr;
+  }
+  #maintenance-section-prices .maintenance-sizechart-preview {
+    width: 100%;
+    max-width: 200px;
+  }
+}
+
+/* The color→site price table is wide by design (820px min); its wrapper is
+   named *-scroll but never actually scrolled, so it blew the whole section
+   wide and forced a page-level horizontal scrollbar. Contain it. */
+#maintenance-section-prices .base-price-color-scroll {
+  overflow-x: auto;
+  border: 1px solid var(--kraft-line);
+  border-radius: var(--radius-sm);
+  margin-top: 4px;
+}
+
+#maintenance-section-prices .base-price-color-scroll .listing-copy-sku-table {
+  border: 0;
+}
+
+/* Site-price cell packed 8 countries into one vertical stack, so every color
+   row grew ~8 lines tall. Lay the countries out as a compact 2-col grid, and
+   make each country a single [code][原价][售价] row. Scoped to this table so the
+   listing-editor CNSC block keeps its own layout. */
+#base-price-color-table .base-price-site-cell {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 6px 16px;
+  align-items: center;
+}
+#base-price-color-table .listing-copy-cnsc-site-price {
+  display: grid;
+  grid-template-columns: 30px minmax(0, 1fr) minmax(0, 1fr);
+  gap: 6px;
+  align-items: center;
+}
+#base-price-color-table .listing-copy-cnsc-site-price > span {
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  font-weight: 600;
+  color: var(--kraft-deep);
+  letter-spacing: 0.04em;
+}
+#base-price-color-table .listing-copy-cnsc-site-price input {
+  width: 100%;
+  min-width: 0;
+}
+/* Align the vertically-centred cost input with the top country row. */
+#base-price-color-table td:nth-child(2) { vertical-align: top; }
+#base-price-color-table td:first-child { vertical-align: top; }
+
+/* ============================================================
+   TEMPLATE EDITOR — layout rebuild (pass 5)
+   Problems in the old layout:
+   - .template-section-head used justify-content:space-between, so
+     every section's description paragraph was flung to the far-right
+     edge (left ~876px), visually orphaned from its heading.
+   - Sections were separated only by a hairline, so the tall dialog
+     read as one long, sparse, ungrouped scroll.
+   Rebuild: each section is a self-contained spec card with a kraft
+   cover band; the description reads as a subtitle directly beneath
+   its heading. Scoped to .store-template-editor so no other dialog
+   that reuses .template-section-* is touched.
+   ============================================================ */
+
+/* Stack the sections as real cards with breathing room between them. */
+.store-template-editor .store-template-workspace {
+  display: grid;
+  gap: 16px;
+  margin-top: 14px;
+}
+
+.store-template-editor .store-template-section {
+  padding: 16px 20px 20px;
+  border: 1px solid var(--kraft-line);
+  border-radius: var(--radius-md);
+  background: linear-gradient(180deg, var(--kraft-wash), var(--panel) 64px);
+}
+/* Override the base first-child rule that removed the top border. */
+.store-template-editor .store-template-section:first-child {
+  padding-top: 16px;
+  border-top: 1px solid var(--kraft-line);
+}
+
+/* Head: title and description STACK on the left. No more space-between. */
+.store-template-editor .template-section-head {
+  display: block;
+  margin-bottom: 16px;
+}
+.store-template-editor .template-section-head p {
+  margin-top: 5px;
+  max-width: 66ch;
+  line-height: 1.5;
+}
+
+/* Actions bar reads as the sheet's sign-off row: kraft seam above it. */
+.store-template-editor > .actions {
+  margin-top: 18px;
+  padding-top: 16px;
+  border-top: 1.5px dashed var(--kraft-line);
+}
+.store-template-editor > #store-template-result:not(:empty) {
+  margin-top: 14px;
+}
+
+@media (max-width: 720px) {
+  .store-template-editor .store-template-section {
+    padding: 14px 14px 16px;
+  }
+}
+
+/* 自动化面板顶部「执行中」卡片：实时步骤 + 人工标记（现场需求：执行步骤要看得到、在最上面）。 */
+.automation-job-detail-dialog .automation-manual-finish {
+  position: sticky;
+  bottom: 0;
+  margin-top: 12px;
+  padding: 10px 0 6px;
+  border-top: 1px solid var(--line);
+  background: var(--panel);
+}
+
+#automation .automation-live-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+#automation .automation-live-head h3 {
+  margin: 2px 0 4px;
+  font-size: 15px;
+}
+
+#automation .automation-live-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+#automation .automation-live-steps {
+  margin: 12px 0 4px;
+  padding-left: 0;
+  list-style: none;
+}
+
+#automation .automation-live-steps .automation-step-item {
+  padding: 3px 0;
+}
+
+#automation .automation-live-steps .automation-step-item--pending strong {
+  color: var(--muted);
+}
+
+#automation .automation-manual-finish {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin-top: 12px;
+  padding-top: 10px;
+  border-top: 1px dashed var(--line);
+}
+
+.automation-job-detail-dialog .automation-manual-finish input {
+  flex: 1 1 260px;
+  min-width: 200px;
+}
+
+/* 执行详情弹窗内的人工确认块：备注 + 两个按钮（常驻底部） */
+#automation .automation-manual-finish input {
+  width: 100%;
+  margin: 6px 0;
+}
+
+.automation-job-detail-dialog .automation-job-detail-timeline-section > summary {
+  cursor: pointer;
+  color: var(--text-soft);
+  font-size: 13px;
+  letter-spacing: 0.02em;
+}
+
+.automation-job-detail-dialog .automation-manual-finish-actions {
+  display: flex;
+  gap: 8px;
+}
+
+/* 详情弹窗底部确认栏（弹窗本身是滚动容器，用 sticky 常驻可见） */
+.automation-job-detail-dialog .automation-manual-finish .muted {
+  margin: 0 0 4px;
+  font-size: 12px;
+}
+
+.automation-job-detail-dialog .automation-manual-finish-actions {
+  display: flex;
+  gap: 8px;
+  justify-content: flex-end;
+}
+
+/* 导入队列：来源徽标（本地/NAS）+ 重试按钮 */
+.local-import-queue-source {
+  margin-right: 6px;
+  padding: 1px 5px;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.local-import-queue-retry {
+  margin-left: 8px;
+  padding: 2px 8px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text-soft);
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.local-import-queue-retry:hover {
+  border-color: var(--accent, #4b6bfb);
+  color: var(--text);
+}
+
+/* 副本编辑器：错误状态行 + 上次执行结果 */
+.listing-editor .listing-copy-status-error {
+  color: var(--red);
+  font-weight: 600;
+}
+
+.listing-editor .listing-copy-last-run {
+  margin: 6px 0 0;
+  padding: 6px 10px;
+  border: 1px dashed var(--line);
+  border-radius: 6px;
+  color: var(--text-soft);
+  font-size: 12px;
+}
+
+.listing-editor .listing-copy-last-run--failed {
+  border-color: var(--red);
+  color: var(--red);
+}
+
+/* 生成自动化任务进行中：按钮上跑秒，明确"在生成" */
+#automation .is-loading {
+  opacity: 0.75;
+  cursor: progress;
+}
+
+/* 「再次尝试」已进队列 / 正在重排：按钮置灰但仍保持可读，光标提示在排队 */
+#automation .is-queued {
+  opacity: 0.7;
+  cursor: progress;
+}
+
+#automation .automation-job-head-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+/* 多选类目属性的「＋ 添加自选值」入口 */
+.category-field .category-field-custom-btn {
+  margin-top: 4px;
+  align-self: flex-start;
+}
+
+/* 「复制到店铺模板」：本土/跨境两张卡片 + 模板按店铺分组 */
+.copy-template-mode-cards {
+  display: flex;
+  gap: 10px;
+  margin: 10px 0 12px;
+}
+
+.copy-template-mode-card {
+  flex: 1 1 0;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 2px;
+  padding: 10px 14px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--panel-soft);
+  color: var(--text-soft);
+  cursor: pointer;
+  text-align: left;
+}
+
+.copy-template-mode-card.is-active {
+  border-color: var(--accent, #4b6bfb);
+  background: color-mix(in srgb, var(--panel-soft) 60%, var(--accent, #4b6bfb) 12%);
+  color: var(--text);
+}
+
+.copy-template-mode-card-title {
+  font-weight: 600;
+}
+
+.template-picker-group + .template-picker-group {
+  margin-top: 10px;
+}
+
+.template-picker-group-head {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  margin: 6px 0 4px;
+  color: var(--text-soft);
+  font-size: 12px;
+  letter-spacing: 0.02em;
+}
+
+.template-picker-group-head small {
+  color: var(--muted);
+}
+
+/* 「颜色识别使用的 AI 连接」下拉 */
+.settings-ai-color-row {
+  margin-top: 10px;
+  grid-template-columns: 1fr;
+  gap: 4px;
+}
+
+.settings-ai-color-row > label {
+  gap: 4px;
+}
+
+.settings-ai-color-row select {
+  min-width: 280px;
+  max-width: 420px;
+}
+
+/* 拖拽多个文件夹批量导入：面板整体高亮 + 提示 */
+#product-maintenance.is-drop-target {
+  outline: 2px dashed var(--accent, #4b6bfb);
+  outline-offset: -6px;
+  background: color-mix(in srgb, var(--panel-soft) 70%, var(--accent, #4b6bfb) 8%);
+}
+
+#product-maintenance.is-drop-target::after {
+  content: "松开即把拖入的文件夹加入导入队列";
+  position: absolute;
+  right: 24px;
+  bottom: 16px;
+  padding: 6px 12px;
+  border-radius: 8px;
+  background: var(--panel, #fff);
+  border: 1px solid var(--line);
+  color: var(--text-soft);
+  font-size: 12px;
+  pointer-events: none;
+}
+
+#product-maintenance {
+  position: relative;
+}
+
+/* ============================================================
+   设置 → 存储与清理
+   ------------------------------------------------------------
+   这一段原先只有 HTML 结构、没有样式：复选框被全局 input 规则撑到
+   最右侧，标题、说明和占用数字挤成一段文字。这里按「概览 → 清理项
+   → 清理策略 → 操作区」四层重新排布，沿用面板的 line / panel-soft /
+   indigo 令牌，数字统一走等宽字体便于纵向比较。
+   ============================================================ */
+.storage-head {
+  align-items: flex-start;
+}
+
+.storage-head h2 {
+  margin-top: 2px;
+}
+
+.storage-head p.muted {
+  max-width: 62ch;
+  margin: 6px 0 0;
+  line-height: 1.6;
+}
+
+.storage-head > button {
+  flex: 0 0 auto;
+}
+
+.storage-cleanup-list {
+  display: grid;
+  gap: 14px;
+}
+
+/* ---- 概览：左侧总占用，右侧最近一次清理 / 压缩的账 ---- */
+.storage-summary {
+  display: grid;
+  grid-template-columns: minmax(230px, 0.85fr) minmax(0, 1.15fr);
+  overflow: hidden;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-md);
+  background: var(--panel);
+}
+
+.storage-summary-total {
+  display: grid;
+  gap: 6px;
+  align-content: center;
+  padding: 18px 20px;
+  border-right: 1px solid var(--line);
+  background: linear-gradient(180deg, var(--panel-soft), var(--panel));
+}
+
+.storage-kicker {
+  color: var(--muted);
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.storage-summary-total strong {
+  font-family: var(--font-mono);
+  font-size: 26px;
+  font-weight: 600;
+  letter-spacing: -0.02em;
+  line-height: 1.1;
+}
+
+.storage-reclaimable {
+  color: var(--text-soft);
+  font-size: 12.5px;
+}
+
+.storage-reclaimable b {
+  color: var(--indigo-ink);
+  font-family: var(--font-mono);
+  font-weight: 600;
+}
+
+.storage-history {
+  display: grid;
+  gap: 10px;
+  align-content: center;
+  margin: 0;
+  padding: 16px 20px;
+  font-size: 12.5px;
+}
+
+.storage-history-row {
+  display: grid;
+  grid-template-columns: 96px minmax(0, 1fr);
+  gap: 12px;
+  align-items: baseline;
+}
+
+.storage-history-row dt {
+  color: var(--muted);
+  white-space: nowrap;
+}
+
+.storage-history-row dd {
+  margin: 0;
+  color: var(--text-soft);
+  line-height: 1.55;
+}
+
+.storage-history-row dd b {
+  color: var(--text);
+  font-family: var(--font-mono);
+  font-weight: 600;
+}
+
+.storage-history-warn {
+  color: var(--amber);
+  font-weight: 600;
+}
+
+/* ---- 清理项 ---- */
+.storage-category-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: -4px;
+}
+
+.storage-category-head h3 {
+  font-size: 13px;
+  font-weight: 600;
+  letter-spacing: 0;
+}
+
+.storage-category-list {
+  overflow: hidden;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-md);
+  background: var(--panel);
+}
+
+.storage-cleanup-item {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  gap: 14px;
+  align-items: start;
+  margin: 0;
+  padding: 13px 16px;
+  color: var(--text);
+  font-size: 13px;
+  font-weight: 400;
+  background: var(--panel);
+  cursor: pointer;
+  transition: background 120ms ease, box-shadow 120ms ease;
+}
+
+.storage-cleanup-item + .storage-cleanup-item {
+  border-top: 1px solid var(--line-soft);
+}
+
+.storage-cleanup-item:hover {
+  background: var(--panel-soft);
+}
+
+/* 勾选态给整行淡底 + 左侧色条，避免只靠一个小方框表达选中 */
+.storage-cleanup-item:has(input:checked) {
+  background: var(--indigo-soft);
+  box-shadow: inset 3px 0 0 var(--indigo);
+}
+
+.storage-cleanup-item input[type="checkbox"] {
+  width: 16px;
+  min-width: 0;
+  height: 16px;
+  margin: 3px 0 0;
+  padding: 0;
+  accent-color: var(--indigo);
+  cursor: pointer;
+}
+
+.storage-cleanup-item.is-idle {
+  cursor: default;
+}
+
+.storage-cleanup-item.is-idle:hover {
+  background: var(--panel);
+}
+
+.storage-cleanup-item.is-idle input[type="checkbox"] {
+  cursor: not-allowed;
+}
+
+.storage-item-main {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+}
+
+.storage-item-title {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+.storage-item-title strong {
+  font-size: 13.5px;
+  font-weight: 600;
+}
+
+.storage-item-main small {
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 400;
+  line-height: 1.55;
+}
+
+.storage-tag {
+  padding: 1px 7px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--panel-soft);
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 500;
+  white-space: nowrap;
+}
+
+.storage-cleanup-size {
+  display: grid;
+  justify-items: end;
+  gap: 2px;
+  min-width: 132px;
+  text-align: right;
+}
+
+.storage-cleanup-size strong {
+  font-family: var(--font-mono);
+  font-size: 13.5px;
+  font-weight: 600;
+  line-height: 1.3;
+}
+
+.storage-cleanup-size small {
+  color: var(--text-soft);
+  font-size: 12px;
+  font-weight: 400;
+}
+
+.storage-cleanup-item.is-idle .storage-cleanup-size strong,
+.storage-cleanup-item.is-idle .storage-cleanup-size small {
+  color: var(--muted);
+}
+
+/* ---- 清理策略：两张并排卡片，避免整页被超长输入行拉平 ---- */
+.storage-cleanup-options {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+  gap: 14px;
+  align-items: stretch;
+}
+
+.storage-policy-card {
+  display: grid;
+  gap: 14px;
+  align-content: start;
+  padding: 16px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-md);
+  background: var(--panel-soft);
+}
+
+.storage-policy-head {
+  display: grid;
+  gap: 10px;
+}
+
+.storage-policy-head h3 {
+  font-size: 13px;
+  font-weight: 600;
+  letter-spacing: 0;
+}
+
+.storage-policy-head p {
+  margin: 4px 0 0;
+  line-height: 1.55;
+}
+
+.storage-policy-head .toggle-field {
+  justify-self: start;
+  color: var(--text);
+  font-size: 12.5px;
+  font-weight: 500;
+}
+
+/* `.form-grid.compact-form` 是 4 列；卡片内改成 2 列并压平自带的 margin */
+.form-grid.storage-field-grid {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px 12px;
+  margin: 0;
+}
+
+.storage-field-grid label {
+  gap: 5px;
+  font-size: 12px;
+}
+
+.storage-field-grid input {
+  min-height: 34px;
+  padding: 7px 10px;
+}
+
+/* ---- 操作区 ---- */
+/* 不在这里再画一条分隔线：下面紧跟全局「保存设置」栏，本身已有 border-top，
+   两条线只隔一个按钮高度会很局促；这里只留间距，层次交给留白。 */
+.storage-cleanup-actions {
+  flex-wrap: wrap;
+  align-items: flex-end;
+  padding-top: 0;
+  border-top: 0;
+}
+
+.storage-action-feedback {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+}
+
+.storage-action-feedback p {
+  margin: 0;
+  line-height: 1.5;
+}
+
+.storage-selection {
+  color: var(--text-soft);
+  font-size: 12.5px;
+}
+
+.storage-selection.is-empty {
+  color: var(--muted);
+}
+
+.storage-action-buttons {
+  display: flex;
+  flex: 0 0 auto;
+  flex-wrap: wrap;
+  gap: 10px;
+  justify-content: flex-end;
+}
+
+/* 清理是不可逆操作，用主色明确唯一主动作；压缩保持次按钮 */
+#settings-storage-clean-btn {
+  border-color: var(--indigo);
+  background: var(--indigo);
+  color: #fff;
+}
+
+#settings-storage-clean-btn:hover {
+  border-color: #4338ca;
+  background: #4338ca;
+}
+
+@media (max-width: 980px) {
+  .storage-summary {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .storage-summary-total {
+    border-right: 0;
+    border-bottom: 1px solid var(--line);
+  }
+}
+
+@media (max-width: 720px) {
+  .storage-cleanup-item {
+    grid-template-columns: auto minmax(0, 1fr);
+  }
+
+  .storage-cleanup-size {
+    grid-column: 2;
+    justify-items: start;
+    min-width: 0;
+    text-align: left;
+  }
+
+  .storage-action-feedback,
+  .storage-action-buttons {
+    width: 100%;
+  }
+
+  .storage-action-buttons {
+    justify-content: flex-start;
+  }
+}
+
+/* ============================================================
+   版本更新（GitHub Release 检查 / 安装 / 发布）
+   ============================================================ */
+.updates-version-card {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 14px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--panel-soft);
+}
+
+/* 只处理左侧的版本文案列；右侧按钮容器保留 .settings-connection-actions 的 flex 布局。 */
+.updates-version-card > div:not(.settings-connection-actions) {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+}
+
+.updates-version {
+  color: var(--indigo-ink);
+  font: 600 20px/1.2 var(--font-mono);
+}
+
+.updates-latest {
+  display: grid;
+  gap: 10px;
+  padding: 14px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--panel-soft);
+}
+
+/* .updates-latest 自己写了 display:grid，会盖掉 hidden 属性的 UA 样式。 */
+.updates-latest[hidden] {
+  display: none;
+}
+
+.updates-latest-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.updates-latest-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  min-width: 0;
+}
+
+.updates-latest-title strong {
+  color: var(--indigo-ink);
+  font: 600 15px/1.3 var(--font-mono);
+}
+
+.updates-latest-link {
+  color: var(--indigo-ink);
+  font-size: 13px;
+}
+
+.updates-latest-link[hidden] {
+  display: none;
+}
+
+.updates-notes {
+  max-height: 220px;
+  margin: 0;
+  overflow: auto;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+#settings-release-notes {
+  min-height: 88px;
+  resize: vertical;
+}
+
+/* 发布说明独占一行，两个勾选项各占一半，避免文字被挤成窄条换行。 */
+.form-grid.compact-form .release-notes-field {
+  grid-column: 1 / -1;
+}
+
+.form-grid.compact-form .release-toggle-field {
+  grid-column: span 2;
+}
+
+/* 还没开始发布时状态徽章是空的，不要留一个空胶囊占位。 */
+#settings-release-status:empty {
+  display: none;
+}
+
+/* 分组标题旁的按钮别被挤成两行。 */
+#settings-updates-save-btn {
+  white-space: nowrap;
+}
+
+#settings-release-log {
+  max-height: 220px;
+}
+

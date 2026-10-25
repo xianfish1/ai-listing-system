@@ -1,0 +1,1439 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>马帮导出工作台</title>
+    <link rel="icon" href="data:," />
+    <!-- 字体自托管：原来每次首屏都要等 fonts.googleapis.com 的渲染阻塞样式表（本机实测约 500ms）。 -->
+    <link rel="preload" href="/fonts/inter-400-latin.woff2" as="font" type="font/woff2" crossorigin />
+    <link rel="preload" href="/fonts/inter-500-latin.woff2" as="font" type="font/woff2" crossorigin />
+    <link rel="stylesheet" href="/fonts.css?v=self-hosted-v1" />
+    <link rel="stylesheet" href="/styles.css?v=color-quick-pick-v1&feature=category-cascader-v1&feature=desc-profile-base-detail-v2&feature=base-product-multiselect-v1&feature=base-product-stage-v1&feature=local-import-queue-v1&feature=nas-import-queue-retry-v1&feature=copy-editor-errors-v1&feature=job-generation-feedback-v1&feature=fill-missing-attributes-v1&feature=multi-select-custom-value-v1&feature=copy-template-mode-cards-v1&feature=jobs-time-buckets-v1&feature=jobs-collapsed-by-default-v1&feature=ai-color-connection-v1&feature=size-chart-local-image-v1&feature=refresh-position-v1&feature=refresh-inline-v1&feature=jobs-sku-thumb-v1&feature=size-chart-last-image-v1&feature=switch-line-v1&feature=watermark-redesign-v1&feature=mabang-account-list-v1&feature=worker-per-account-v1&feature=mabang-account-ui-v4&feature=import-headed-window-v1&feature=base-color-follow-images-v1&feature=store-template-account-v1&feature=base-product-rerecognize-v1&feature=github-updates-v1&feature=category-cascader-v1" />
+  </head>
+  <body>
+    <div class="app">
+      <aside class="rail" aria-label="主导航">
+        <div class="rail-brand">马帮</div>
+        <nav class="rail-nav">
+          <button class="rail-item active" data-view="dashboard" data-nav-key="home" title="首页">
+            <svg width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.5" viewBox="0 0 24 24"><path d="M3 12l2-2m0 0l7-7 7 7M5 10v10a1 1 0 001 1h3m10-11l2 2m-2-2v10a1 1 0 01-1 1h-3m-4 0v-6a1 1 0 011-1h2a1 1 0 011 1v6m-6 0h6"/></svg>
+            <span>首页</span>
+          </button>
+          <button class="rail-item" data-view="product-maintenance" data-nav-key="products" title="商品维护">
+            <svg width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.5" viewBox="0 0 24 24"><path d="M20 7l-8-4-8 4m16 0l-8 4m8-4v10l-8 4m0-10L4 7m8 4v10M4 7v10l8 4"/></svg>
+            <span>商品</span>
+          </button>
+          <button class="rail-item" data-view="templates" data-nav-key="templates" title="店铺模板">
+            <svg width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.5" viewBox="0 0 24 24"><path d="M4 5a1 1 0 011-1h14a1 1 0 011 1v2a1 1 0 01-1 1H5a1 1 0 01-1-1V5zm0 8a1 1 0 011-1h6a1 1 0 011 1v6a1 1 0 01-1 1H5a1 1 0 01-1-1v-6zm10 0a1 1 0 011-1h4a1 1 0 011 1v6a1 1 0 01-1 1h-4a1 1 0 01-1-1v-6z"/></svg>
+            <span>模板</span>
+          </button>
+          <button class="rail-item" data-view="automation" data-nav-key="copies" data-automation-tab="copies" title="刊登副本">
+            <svg width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.5" viewBox="0 0 24 24"><path d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2"/></svg>
+            <span>副本</span>
+          </button>
+          <button class="rail-item" data-view="automation" data-nav-key="jobs" data-automation-tab="jobs" title="自动化">
+            <svg width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.5" viewBox="0 0 24 24"><path d="M13 10V3L4 14h7v7l9-11h-7z"/></svg>
+            <span>自动化</span>
+          </button>
+          <!-- 「文件管理」rail 入口已下线（用户请求）；section 保留在 DOM 里，供 pipeline stage 跳转和后续需要时使用。 -->
+          <button class="rail-item" data-view="plan" data-nav-key="plan" title="项目计划">
+            <svg width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.5" viewBox="0 0 24 24"><path d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2m-6 9l2 2 4-4"/></svg>
+            <span>计划</span>
+          </button>
+        </nav>
+        <div class="rail-spacer"></div>
+        <button class="rail-item" data-view="settings" data-nav-key="settings" title="设置">
+          <svg width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.5" viewBox="0 0 24 24"><path d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.066 2.573c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.573 1.066c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.066-2.573c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.573-1.066z"/><circle cx="12" cy="12" r="3"/></svg>
+          <span>设置</span>
+        </button>
+      </aside>
+
+      <main class="main">
+        <header class="topbar">
+          <div>
+            <h1 id="view-title">工作台总览</h1>
+            <p id="service-status">正在检查服务状态...</p>
+          </div>
+          <button id="refresh-btn">刷新</button>
+        </header>
+        <div id="global-operation-feedback" class="operation-feedback" role="status" aria-live="polite" hidden></div>
+        <section id="dashboard" class="view active">
+          <div class="production-header">
+            <div>
+              <span class="eyebrow">PRODUCTION LOG</span>
+              <p class="muted" id="production-today-date">–</p>
+            </div>
+            <div class="production-actions">
+              <button type="button" data-dashboard-action="create_base_product">从 NAS 创建</button>
+            </div>
+          </div>
+
+          <div class="production-hero">
+            <div class="production-hero-metric">
+              <span class="production-hero-label">TODAY · SAVED DRAFTS</span>
+              <strong class="production-hero-value" id="stat-today-saved">–</strong>
+              <span class="production-hero-hint" id="stat-today-saved-hint">加载中</span>
+            </div>
+            <div class="production-hero-chart">
+              <div class="production-hero-chart-head">
+                <span class="eyebrow">7-DAY TREND</span>
+                <span class="muted" id="production-trend-summary">–</span>
+              </div>
+              <div class="sparkline-row">
+                <svg id="production-sparkline" viewBox="0 0 700 160" preserveAspectRatio="xMidYMid meet" aria-label="近 7 天产量趋势">
+                  <polyline id="production-sparkline-saved" fill="none" stroke="var(--glyph-done)" stroke-width="2.5" stroke-linejoin="round" stroke-linecap="round" points="" />
+                  <polyline id="production-sparkline-failed" fill="none" stroke="var(--glyph-alert)" stroke-width="2" stroke-linejoin="round" stroke-linecap="round" points="" />
+                  <g id="production-sparkline-axis" class="sparkline-axis"></g>
+                </svg>
+              </div>
+              <div class="production-hero-legend">
+                <span><span class="row-glyph row-glyph--done" aria-hidden="true"></span>Saved</span>
+                <span><span class="row-glyph row-glyph--alert" aria-hidden="true"></span>Failed</span>
+              </div>
+            </div>
+          </div>
+
+          <div class="meter-row">
+            <div class="meter-chip">
+              <span class="row-glyph row-glyph--alert" aria-hidden="true"></span>
+              <strong id="stat-today-failed">–</strong>
+              <span>今日失败</span>
+              <small id="stat-today-failed-hint">本周 –</small>
+            </div>
+            <div class="meter-chip">
+              <span class="row-glyph row-glyph--watch" aria-hidden="true"></span>
+              <strong id="stat-attention">–</strong>
+              <span>待人工</span>
+              <small>needs_confirmation / _manual / _regeneration</small>
+            </div>
+            <div class="meter-chip">
+              <span class="row-glyph row-glyph--done" aria-hidden="true"></span>
+              <strong id="stat-success-rate">–</strong>
+              <span>本周成功率</span>
+              <small id="stat-success-rate-hint">saved / (saved + failed)</small>
+            </div>
+            <div class="meter-chip">
+              <span class="row-glyph row-glyph--idle" aria-hidden="true"></span>
+              <strong id="stat-week-saved">–</strong>
+              <span>本周保存</span>
+              <small id="stat-week-saved-hint">近 7 天累计</small>
+            </div>
+          </div>
+
+          <div class="dashboard-grid dashboard-grid--split">
+            <div class="panel production-next-panel">
+              <div class="panel-head">
+                <span class="eyebrow">CONTINUE</span>
+                <h3 class="muted-heading">继续工作</h3>
+              </div>
+              <div id="dashboard-next-action" class="dashboard-next-action"></div>
+            </div>
+            <div class="panel production-recent-panel">
+              <div class="panel-head">
+                <span class="eyebrow">RECENT SAVES</span>
+                <h3 class="muted-heading">最近保存结果</h3>
+              </div>
+              <div id="dashboard-recent-results" class="dashboard-list"></div>
+            </div>
+          </div>
+
+          <!-- Legacy dashboard elements kept in the DOM so existing JS references don't null-check-fail;
+               they're hidden behind display:none so the page stays clean. -->
+          <div class="legacy-dashboard-shim" hidden aria-hidden="true">
+            <span id="metric-products" data-loading-metric="true"></span>
+            <span id="metric-assets" data-loading-metric="true"></span>
+            <span id="metric-exportable" data-loading-metric="true"></span>
+            <span id="metric-status"></span>
+            <span id="pipeline-products"></span>
+            <span id="pipeline-templates"></span>
+            <span id="pipeline-copies"></span>
+            <span id="pipeline-jobs"></span>
+            <span id="pipeline-scan"></span>
+            <span id="readiness-badge"></span>
+            <span id="dashboard-batch-status"></span>
+            <div id="dashboard-current-batch"></div>
+            <div id="dashboard-connections"></div>
+            <div id="readiness-checks"></div>
+            <div id="readiness-actions"></div>
+          </div>
+        </section>
+        <section id="product-maintenance" class="view">
+          <div class="panel">
+            <div class="panel-head">
+              <div>
+                <span class="eyebrow">BASE PRODUCTS</span>
+                <h2>基础商品</h2>
+              </div>
+              <div class="actions compact">
+                <button id="create-base-product-btn">从 NAS 创建</button>
+                <button id="create-local-base-product-btn" class="secondary" type="button">＋ 添加文件夹</button>
+                <button id="local-import-queue-show" class="chip" type="button" hidden>显示导入队列</button>
+                <button id="copy-to-store-templates-btn">复制到店铺模板</button>
+              </div>
+            </div>
+            <div class="inline-form">
+              <input id="base-product-folder" placeholder="粘贴 NAS 商品文件夹路径，如 \\Juns\产品编辑部\...\AL0115抱熊小黄人" />
+              <button id="browse-nas-folder-btn" class="secondary" type="button">浏览…</button>
+              <input id="local-base-product-folder-upload" type="file" accept=".jpg,.jpeg,.png,.webp,.mp4,.mov,.avi,.mkv" webkitdirectory directory multiple hidden />
+            <!-- Category dropdown removed — the category is inferred from the folder path
+                   and the store template picks the marketplace category downstream. -->
+              <select id="base-product-category" hidden></select>
+            </div>
+            <p id="base-product-result" class="muted"></p>
+            <p id="local-base-product-upload-status" class="muted" hidden></p>
+            <!-- 本地导入队列：连续选择多个目录时，每个商品目录排在这里串行导入。 -->
+            <div id="local-import-queue" class="local-import-queue" hidden>
+              <div class="local-import-queue-head">
+                <span id="local-import-queue-summary" class="local-import-queue-summary"></span>
+                <span class="local-import-queue-head-actions">
+                  <button type="button" id="local-import-queue-clear" class="chip" hidden>清空待处理</button>
+                  <button type="button" id="local-import-queue-close" class="chip" title="收起队列（有新任务会自动再展开）">关闭</button>
+                </span>
+              </div>
+              <p class="muted local-import-queue-hint">本地与 NAS 导入都排在这里：本地可连续点「＋ 添加文件夹」逐个加入，或把<b>多个商品文件夹一起拖进基础商品面板</b>批量加入；NAS 从「从 NAS 创建 / 浏览…」选中的目录也会进队列。导入失败或 AI 识别出错的行右侧可点「重试」。</p>
+              <ol id="local-import-queue-list" class="local-import-queue-list"></ol>
+            </div>
+            <div id="base-product-batch-bar" class="base-product-batch-bar" hidden>
+              <span id="base-product-batch-count" class="base-product-batch-count">已选 0 个</span>
+              <button type="button" class="chip" data-base-batch-action="select-all">全选当前列表</button>
+              <button type="button" class="chip" data-base-batch-action="clear">清除勾选</button>
+              <span class="base-product-batch-divider" aria-hidden="true"></span>
+              <span class="base-product-batch-label">AI 重识别</span>
+              <button type="button" class="chip chip--ai" data-base-batch-action="retry-title" title="只对勾选商品重新生成英文标题，不改详情和颜色图">重新识别标题</button>
+              <button type="button" class="chip chip--ai" data-base-batch-action="retry-description" title="只对勾选商品重新生成详情，不改标题和颜色图">重新识别详情</button>
+              <button type="button" class="chip chip--ai" data-base-batch-action="retry-colors" title="对勾选商品重新识别全部颜色图的颜色（含已命名的颜色图）">重新识别颜色图</button>
+              <button type="button" class="chip danger-ghost" data-base-batch-action="delete">批量删除</button>
+            </div>
+            <div class="base-product-filter-bar">
+              <div class="base-product-filter-group">
+                <span class="base-product-filter-label">时间</span>
+                <div id="base-product-filter-time" class="chip-row" role="group" aria-label="按时间筛选">
+                  <button type="button" class="chip chip--active" data-base-time-filter="today">今天</button>
+                  <button type="button" class="chip" data-base-time-filter="yesterday">昨天</button>
+                  <button type="button" class="chip" data-base-time-filter="week">最近一周</button>
+                  <!-- 「全部」不限时间窗：看历史商品、跨天核对时不用来回切今天/昨天/一周。 -->
+                  <button type="button" class="chip" data-base-time-filter="all">全部</button>
+                </div>
+              </div>
+              <div class="base-product-filter-group">
+                <span class="base-product-filter-label">分类</span>
+                <!-- 阶段分类（首次导入 / 未复制 / 待执行 / 已完成）由 app.js 拼在这行最前面，
+                     后面接「商品类目」第一级；两组共用同一个单选筛选状态。 -->
+                <div id="base-product-filter-category" class="chip-row" role="group" aria-label="按分类筛选（阶段 + 商品类目）"></div>
+              </div>
+            </div>
+            <div id="base-product-cards" class="product-card-grid"></div>
+          </div>
+        </section>
+
+        <section id="templates" class="view">
+          <div class="panel">
+            <div class="panel-head">
+              <div>
+                <span class="eyebrow">STORE TEMPLATES</span>
+                <h2>店铺模板</h2>
+              </div>
+              <div class="actions compact">
+                <label class="template-account-field">马帮账号<select id="store-template-account"></select></label>
+                <button id="mabang-page-import-btn" type="button">从马帮当前页导入</button>
+                <button id="new-store-template-btn" type="button">新建模板</button>
+              </div>
+            </div>
+            <p id="store-template-list-result" class="muted"></p>
+            <div id="store-template-card-grid" class="template-card-grid"></div>
+          </div>
+        </section>
+
+        <div id="store-templates-tab" hidden>
+          <details class="category-version-admin"><summary>类目规则版本</summary><div class="category-version-content"><div class="panel-head"><span class="muted">有效采集后自动更新，无需人工审核</span><button id="refresh-category-versions-btn" type="button">刷新版本</button></div><p id="category-version-result" class="muted"></p><div class="table-wrap"><table><thead><tr><th>版本</th><th>状态</th><th>来源</th><th>差异</th><th>字段数</th></tr></thead><tbody id="category-version-table"></tbody></table></div></div></details>
+          <div class="table-wrap" hidden><table><tbody id="store-template-table"></tbody></table></div>
+        </div>
+
+        <dialog id="store-template-editor-dialog" class="workflow-dialog store-template-editor">
+          <div class="panel-head">
+            <div>
+              <span class="eyebrow">TEMPLATE EDITOR</span>
+              <h2 id="store-template-editor-title">编辑店铺模板</h2>
+            </div>
+            <button type="button" data-close-dialog="store-template-editor-dialog" aria-label="关闭">×</button>
+          </div>
+          <div class="store-template-workspace">
+            <section class="store-template-section" data-template-section="template-basics">
+              <div class="template-section-head"><h3>模板基础</h3><p>选择店铺并定义可复用的模板名称与描述方案。</p></div>
+              <div class="template-section-grid">
+                <label>刊登模式<select id="store-template-listing-mode"><option value="site">站点商品</option><option value="cnsc_global">CNSC 全球商品</option></select></label>
+                <label>店铺<select id="store-template-store"></select></label>
+                <label>模板名<input id="store-template-name" value="Mens Tee" /></label>
+                <label class="labeled-inline">描述模板版本
+                  <div class="labeled-inline-row">
+                    <select id="store-template-description-profile"></select>
+                    <button id="manage-description-profiles-btn" type="button" class="secondary" title="到设置里编辑或新增描述方案">+ 管理</button>
+                  </div>
+                </label>
+                <label class="wide">描述模板（固定描述）
+                  <textarea id="store-template-description" rows="6" placeholder="填写后，所有复制到该店铺模板的详情统一使用这份固定描述（可在这里编辑）。留空则使用基础商品自己的详情。"></textarea>
+                  <small class="muted">所有用此模板刊登的商品详情都用上面这份文案；副本生成后仍可在副本编辑页单独修改。</small>
+                </label>
+              </div>
+            </section>
+
+            <section id="cnsc-global-section" class="store-template-section" hidden>
+              <div class="template-section-head"><h3>CNSC 全球商品</h3><p>保存到 CNSC 待发布商品；站点价格仅作为后续分发准备，本次不会刊登站点。</p></div>
+              <div class="template-section-grid transaction-grid">
+                <label>全球商品店铺<select id="store-template-cnsc-store"></select></label>
+                <label>默认折扣（%OFF）<input id="store-template-default-site-discount-percent" type="number" min="0.01" max="99.99" step="0.01" value="40" /></label>
+                <label>standard 全球价（CNY）<input id="store-template-cnsc-global-standard" type="number" min="0.01" step="0.01" /></label>
+                <label>large 全球价（CNY）<input id="store-template-cnsc-global-large" type="number" min="0.01" step="0.01" /></label>
+                <label>standard 尺码<input id="store-template-cnsc-standard-sizes" value="XS,S,M,L" placeholder="XS,S,M,L" /></label>
+                <label>large 尺码<input id="store-template-cnsc-large-sizes" value="XL,XXL,XXXL" placeholder="XL,XXL,XXXL" /></label>
+                <label>泰国仓库存<input id="store-template-warehouse-th" type="number" min="0" step="1" /></label>
+                <label>广州仓库存<input id="store-template-warehouse-cn-gz" type="number" min="0" step="1" /></label>
+                <label>菲律宾仓库存<input id="store-template-warehouse-ph" type="number" min="0" step="1" /></label>
+                <label class="wide">目标站点店铺<select id="store-template-target-sites" multiple size="6" aria-describedby="store-template-target-sites-help"></select><small id="store-template-target-sites-help" class="muted">按 Ctrl 或 Command 多选；SIP 店铺由 Shopee 自动分发，不加入手动选择。</small></label>
+                <div class="wide cnsc-target-config-wrap">
+                  <table class="cnsc-target-config-table">
+                    <thead><tr><th>站点店铺</th><th>折扣活动</th><th>%OFF</th><th>standard 价格 / 折扣价</th><th>large 价格 / 折扣价</th></tr></thead>
+                    <tbody id="store-template-target-store-config-body"><tr><td colspan="5" class="muted">请先选择目标站点店铺</td></tr></tbody>
+                  </table>
+                </div>
+                <label class="wide">站点价格表（TSV，按表头识别“价格 / 折扣价”，列顺序不限）<textarea id="store-template-price-matrix" rows="4" placeholder="TW 价格\tTW 折扣价\tPH 价格\tPH 折扣价"></textarea><small class="muted">本次仅保存，不提交站点；无表头粘贴按“识别顺序”对应站点，每站两列：售价、原价</small></label>
+                <div class="wide"><button id="store-template-price-preview-btn" type="button" class="secondary-button">解析价格表</button><button id="store-template-cnsc-site-order" type="button" class="secondary-button">识别顺序</button><span id="store-template-cnsc-site-order-display" class="muted"></span><pre id="store-template-price-preview" class="muted"></pre></div>
+              </div>
+            </section>
+
+            <section class="store-template-section" data-template-section="template-category">
+              <div class="template-section-head"><h3>类目与活动</h3><p>类目必填属性和促销活动均与当前店铺绑定。</p></div>
+              <div class="template-section-grid">
+                <div class="marketplace-category-picker wide">
+                  <label>平台类目</label>
+                  <button id="open-store-template-category-dialog" type="button">选择全部类目</button>
+                  <input id="store-template-category-path" readonly placeholder="尚未选择" />
+                  <input id="store-template-category-id" type="hidden" />
+                  <select id="store-template-category-profile" hidden></select>
+                </div>
+                <label>店铺促销活动<select id="store-template-promotion"><option value="">活动未配置</option></select></label>
+              </div>
+              <div class="category-ai-row">
+                <button id="store-template-ai-attributes-btn" type="button" class="secondary-button">AI 推荐属性值</button>
+                <span id="store-template-ai-attributes-status" class="muted">按模板上下文为每个属性推荐一个值（枚举属性只从选项里选）；已填的属性保留。</span>
+              </div>
+              <div id="store-template-category-fields" class="category-field-grid" aria-live="polite"></div>
+              <p id="store-template-category-summary" class="muted"></p>
+            </section>
+
+            <section class="store-template-section" data-template-section="template-transaction">
+              <div class="template-section-head"><h3>交易信息</h3><p>站点商品售价默认按原价六折预填，可手动改成别的价；自动化按这里填写的售价填写马帮。按尺码设置的行：原价留空＝继承这里，售价留空＝按同一折扣比例换算，填了就按填的走。CNSC 全球商品使用上方独立的人民币价格。</p></div>
+              <div class="template-section-grid transaction-grid">
+                <label>原价<input id="store-template-normal-price" type="number" min="0" step="0.01" /></label>
+                <label>六折售价<input id="store-template-sale-price" type="number" min="0" step="0.01" placeholder="留空＝按原价六折" /></label>
+                <label>库存<input id="store-template-stock" type="number" min="0" step="1" /></label>
+                <label>重量（kg）<input id="store-template-weight-kg" type="number" min="0" step="0.001" /></label>
+                <label>包裹长度（cm）<input id="store-template-package-length-cm" type="number" min="0" step="0.1" /></label>
+                <label>包裹宽度（cm）<input id="store-template-package-width-cm" type="number" min="0" step="0.1" /></label>
+                <label>包裹高度（cm）<input id="store-template-package-height-cm" type="number" min="0" step="0.1" /></label>
+              </div>
+            </section>
+
+            <section class="store-template-section" data-template-section="template-variants">
+              <div class="template-section-head"><h3>规格与 SKU</h3><p>勾选所需尺码；可为单独尺码设置不同原价和六折售价，留空＝自动换算（占位符显示自动值）。</p></div>
+              <div class="template-section-grid">
+                <fieldset id="store-template-size-options" class="wide"><legend>尺码</legend></fieldset>
+                <div id="store-template-size-price-overrides" class="wide"></div>
+                <label>自定义码数<input id="store-template-custom-size" placeholder="输入后回车添加" /></label>
+                <label>变体规则<select id="store-template-variation-rule"><option value="color_size">颜色 x 尺码</option></select></label>
+                <label class="wide">SKU 模板<input id="store-template-sku-template" value="{main_sku}_{color}||{size}" /></label>
+                <label class="wide checkbox-line" id="store-template-strip-parentheses-line"><input id="store-template-strip-parentheses" type="checkbox" checked /> SKU 去掉尺码里的括号补充值（130cm(21-26kg) → 130cm，仅 SKU 编码，页面尺码不变）</label>
+              </div>
+              <div class="template-section-head default-sku-head"><h3>默认 SKU（白T恤）</h3><p>仅本土店铺：启用后在颜色轴最后追加一个白 T 恤颜色，跟随上方的尺码展开，图片/售价/折扣价/SKU 单独设置；按尺码设置价格可单独调整（留空＝自动），只作用于该尺码。</p></div>
+              <div class="template-section-grid" id="store-template-default-sku-block">
+                <label class="wide checkbox-line"><input id="store-template-default-sku-enabled" type="checkbox" /> 启用默认 SKU（白T恤）</label>
+                <label>颜色名称<input id="store-template-default-sku-color" placeholder="例如 PureWhite" /></label>
+                <label>SKU<input id="store-template-default-sku-code" placeholder="例如 AL9999-PureWhite（可含 {size}）" /></label>
+                <label>售价<input id="store-template-default-sku-normal-price" type="number" min="0" step="0.01" /></label>
+                <label>折扣价<input id="store-template-default-sku-sale-price" type="number" min="0" step="0.01" /></label>
+                <div id="store-template-default-sku-size-prices" class="wide"></div>
+                <div class="wide default-sku-image-control">
+                  <span>颜色图</span>
+                  <div class="size-chart-preview-wrap">
+                    <img id="store-template-default-sku-preview" alt="默认 SKU 图片预览" hidden />
+                    <span id="store-template-default-sku-empty" class="muted">未上传</span>
+                  </div>
+                  <div class="size-chart-picker">
+                    <button id="store-template-default-sku-picker-btn" type="button" data-open-file-picker="store-template-default-sku-upload">选择图片</button>
+                    <span id="store-template-default-sku-file-name" class="muted">PNG / JPEG / WebP · 建议 &lt;2MB</span>
+                    <input id="store-template-default-sku-upload" class="file-input-native" type="file" accept="image/png,image/jpeg,image/webp" tabindex="-1" />
+                  </div>
+                </div>
+                <label class="wide">或填写图片路径<input id="store-template-default-sku-path" placeholder="本地/NAS 绝对路径；填写后优先于上传图片" /></label>
+              </div>
+            </section>
+
+            <section class="store-template-section" data-template-section="template-media">
+              <div class="template-section-head"><h3>素材与水印</h3><p>水印由马帮处理，主图仅作用于第 1 张，产品图作用于后续图片。</p></div>
+              <div class="template-section-grid media-grid">
+                <div class="wide size-chart-control">
+                  <span>模板尺码图</span>
+                  <select id="store-template-size-chart-source">
+                    <option value="upload">上传图片</option>
+                    <option value="template">选择模板</option>
+                  </select>
+                  <select id="store-template-size-chart-template" hidden><option value="">选择已有尺码图</option></select>
+                  <div class="size-chart-preview-wrap">
+                    <img id="store-template-size-chart-preview" alt="尺码图预览" hidden />
+                    <span id="store-template-size-chart-empty" class="muted">未上传</span>
+                  </div>
+                  <div class="size-chart-picker">
+                    <button id="store-template-size-chart-picker-btn" type="button" data-open-file-picker="store-template-size-chart-upload">选择图片</button>
+                    <span id="store-template-size-chart-file-name" class="muted">PNG / JPEG / WebP · 建议 &lt;2MB</span>
+                    <input id="store-template-size-chart-upload" class="file-input-native" type="file" accept="image/png,image/jpeg,image/webp" tabindex="-1" />
+                  </div>
+                </div>
+                <!-- 本土专属开关（默认开）：产品图区最后一张放尺码表。跨境没有这条规则，隐藏。 -->
+                <label class="wide checkbox-line" id="store-template-size-chart-last-image-line">
+                  <input id="store-template-size-chart-last-image" type="checkbox" checked />
+                  产品图最后一张放尺码表（满 9 张时替换第 9 张，不足 9 张追加到最后；详情图不会重复插尺码表）
+                </label>
+                <div class="wide" data-template-default-video>
+                  <span>默认视频 ID（本土）</span>
+                  <input id="store-template-default-video-id" placeholder="留空＝每次执行上传商品视频；填写后自动化按视频 ID 直接选择" />
+                  <p class="muted">可直接粘贴马帮视频 ID（如 sg-11110106-6vce5-mtj6id4j4i6ef7）；留空时首次自动化上传成功后会自动把视频 ID 记到这里，之后不再重复上传。视频标题统一用主 SKU。</p>
+                </div>
+                <!-- 水印：马帮原生水印模板 + 应用范围。目录按店铺采集；采集不到时可以手动填，
+                     配置永远不会因为「目录没加载」被静默清掉。 -->
+                <div class="wide watermark-block">
+                  <div class="watermark-catalog-bar">
+                    <div class="watermark-catalog-title">
+                      <span class="watermark-catalog-label">水印目录</span>
+                      <span id="store-template-watermark-catalog-status" class="watermark-catalog-status muted">未采集</span>
+                    </div>
+                    <div class="watermark-catalog-actions">
+                      <button id="store-template-watermark-collect-btn" type="button" class="secondary-button">采集/更新水印</button>
+                    </div>
+                  </div>
+                  <div class="watermark-grid">
+                    <div class="watermark-selection">
+                      <div class="watermark-selection-head">
+                        <span class="watermark-role-title">主图水印</span>
+                        <span class="watermark-role-hint">只作用于第 1 张（主图）</span>
+                      </div>
+                      <div class="watermark-picker" data-watermark-picker="main">
+                        <input type="hidden" id="store-template-main-watermark" value="" data-watermark-name="" />
+                        <button type="button" id="store-template-main-watermark-trigger" class="watermark-trigger" data-watermark-trigger="main" aria-haspopup="listbox" aria-expanded="false" aria-controls="store-template-main-watermark-menu">
+                          <img class="watermark-trigger-thumb" data-watermark-trigger-thumb alt="" hidden />
+                          <span class="watermark-trigger-label" data-watermark-trigger-label>选择水印模板…</span>
+                          <span class="watermark-trigger-caret" aria-hidden="true"></span>
+                        </button>
+                        <div id="store-template-main-watermark-menu" class="watermark-menu" data-watermark-menu="main" role="listbox" aria-label="主图水印" hidden></div>
+                        <p class="watermark-empty-hint" data-watermark-empty="main" hidden>当前店铺还没有水印目录：点右上角「采集/更新水印」（采集浏览器要停在这个店铺的商品编辑页），或在下面手动填写模板。</p>
+                      </div>
+                      <div id="store-template-main-watermark-preview" class="watermark-choice-preview"><span class="watermark-choice-none">关闭（不加水印）</span></div>
+                      <div class="watermark-positions" data-watermark-role="main">
+                        <span class="watermark-positions-label">应用范围</span>
+                        <div class="watermark-mode-row">
+                          <label class="watermark-mode-option"><input type="radio" name="store-template-main-watermark-mode" value="auto" checked /> 默认（第 1 张）</label>
+                          <label class="watermark-mode-option"><input type="radio" name="store-template-main-watermark-mode" value="custom" /> 自定义</label>
+                        </div>
+                        <div class="watermark-position-checks" data-watermark-role="main" hidden></div>
+                      </div>
+                      <details class="watermark-manual">
+                        <summary>手动填写模板</summary>
+                        <p class="muted">采集不到目录时用：直接填马帮水印模板的 ID 和名称，自动化会按 ID + 名称点菜单（对不上就只报警告，不会乱点别的）。</p>
+                        <div class="watermark-manual-grid">
+                          <label>模板 ID<input type="text" data-watermark-manual-id="main" placeholder="例如 1234" /></label>
+                          <label>模板名称<input type="text" data-watermark-manual-name="main" placeholder="与马帮菜单里显示的一致" /></label>
+                          <button type="button" class="secondary-button" data-watermark-manual-apply="main">用这两个值</button>
+                          <button type="button" class="secondary-button" data-watermark-manual-clear="main">清除水印</button>
+                        </div>
+                      </details>
+                    </div>
+                    <div class="watermark-selection">
+                      <div class="watermark-selection-head">
+                        <span class="watermark-role-title">产品图水印</span>
+                        <span class="watermark-role-hint">作用于第 2 张起的产品图</span>
+                      </div>
+                      <div class="watermark-picker" data-watermark-picker="product">
+                        <input type="hidden" id="store-template-product-watermark" value="" data-watermark-name="" />
+                        <button type="button" id="store-template-product-watermark-trigger" class="watermark-trigger" data-watermark-trigger="product" aria-haspopup="listbox" aria-expanded="false" aria-controls="store-template-product-watermark-menu">
+                          <img class="watermark-trigger-thumb" data-watermark-trigger-thumb alt="" hidden />
+                          <span class="watermark-trigger-label" data-watermark-trigger-label>选择水印模板…</span>
+                          <span class="watermark-trigger-caret" aria-hidden="true"></span>
+                        </button>
+                        <div id="store-template-product-watermark-menu" class="watermark-menu" data-watermark-menu="product" role="listbox" aria-label="产品图水印" hidden></div>
+                        <p class="watermark-empty-hint" data-watermark-empty="product" hidden>当前店铺还没有水印目录：点右上角「采集/更新水印」（采集浏览器要停在这个店铺的商品编辑页），或在下面手动填写模板。</p>
+                      </div>
+                      <div id="store-template-product-watermark-preview" class="watermark-choice-preview"><span class="watermark-choice-none">关闭（不加水印）</span></div>
+                      <div class="watermark-positions" data-watermark-role="product">
+                        <span class="watermark-positions-label">应用范围</span>
+                        <div class="watermark-mode-row">
+                          <label class="watermark-mode-option"><input type="radio" name="store-template-product-watermark-mode" value="auto" checked /> 默认（第 2 张起）</label>
+                          <label class="watermark-mode-option"><input type="radio" name="store-template-product-watermark-mode" value="custom" /> 自定义</label>
+                        </div>
+                        <div class="watermark-position-checks" data-watermark-role="product" hidden></div>
+                      </div>
+                      <details class="watermark-manual">
+                        <summary>手动填写模板</summary>
+                        <p class="muted">采集不到目录时用：直接填马帮水印模板的 ID 和名称，自动化会按 ID + 名称点菜单（对不上就只报警告，不会乱点别的）。</p>
+                        <div class="watermark-manual-grid">
+                          <label>模板 ID<input type="text" data-watermark-manual-id="product" placeholder="例如 1234" /></label>
+                          <label>模板名称<input type="text" data-watermark-manual-name="product" placeholder="与马帮菜单里显示的一致" /></label>
+                          <button type="button" class="secondary-button" data-watermark-manual-apply="product">用这两个值</button>
+                          <button type="button" class="secondary-button" data-watermark-manual-clear="product">清除水印</button>
+                        </div>
+                      </details>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </section>
+          </div>
+          <p id="store-template-result" class="muted"></p>
+          <div class="actions">
+            <button id="save-as-store-template-btn" type="button" disabled>另存为模板</button>
+            <button id="create-store-template-btn">保存模板</button>
+          </div>
+        </dialog>
+        <dialog id="store-template-category-dialog" class="workflow-dialog">
+          <div class="panel-head"><h2>选择平台类目</h2><button type="button" data-close-dialog="store-template-category-dialog" aria-label="关闭">×</button></div>
+          <div class="marketplace-category-picker">
+                  <input id="store-template-category-search" type="search" autocomplete="off" placeholder="搜索类目名称或编号" aria-controls="store-template-category-results" aria-expanded="false" />
+                  <div id="store-template-category-breadcrumbs" class="marketplace-category-breadcrumbs" aria-label="平台类目层级"></div>
+                  <div id="store-template-category-results" class="marketplace-category-results" role="listbox" hidden></div>
+                  <div id="store-template-category-empty" class="marketplace-category-empty" hidden>
+                    <p><strong>此站点还没有采集平台类目树。</strong></p>
+                    <p class="muted">类目数据来自马帮。请打开马帮新建商品页选好类目，再点下方按钮反射到这里。之后此站点所有模板共享这份类目树，不用重复采。</p>
+                    <div class="actions">
+                      <button id="category-dialog-import-from-mabang-btn" type="button">从马帮当前页导入类目</button>
+                    </div>
+                  </div>
+                  <div class="marketplace-category-status-row">
+                    <span id="store-template-category-picker-status" class="muted"></span>
+                    <button id="collect-selected-category-profile-btn" type="button" hidden>采集必填项</button>
+                  </div>
+          </div>
+        </dialog>
+
+        <dialog id="copy-template-picker-dialog" class="workflow-dialog"><div class="panel-head"><h2 id="copy-template-picker-title">选择店铺模板</h2><button type="button" data-close-dialog="copy-template-picker-dialog" aria-label="关闭">×</button></div><div class="copy-template-mode-cards" role="tablist" aria-label="店铺模式">
+          <button type="button" class="copy-template-mode-card is-active" id="copy-template-mode-site" role="tab" aria-selected="true" data-copy-template-mode="site">
+            <span class="copy-template-mode-card-title">本土店铺</span>
+            <small id="copy-template-mode-site-count"></small>
+          </button>
+          <button type="button" class="copy-template-mode-card" id="copy-template-mode-cnsc" role="tab" aria-selected="false" data-copy-template-mode="cnsc">
+            <span class="copy-template-mode-card-title">跨境 CNSC</span>
+            <small id="copy-template-mode-cnsc-count"></small>
+          </button>
+        </div>
+        <input id="copy-template-search" type="search" placeholder="搜索店铺、模板或类目" /><div id="copy-template-picker-list" class="template-picker-list"></div><div class="actions"><button id="confirm-copy-template-picker" type="button">生成店铺刊登副本</button></div></dialog>
+
+        <dialog id="save-as-store-template-dialog" class="workflow-dialog compact-dialog">
+          <div class="panel-head"><h2>另存为店铺模板</h2><button type="button" data-close-dialog="save-as-store-template-dialog" aria-label="关闭">×</button></div>
+          <div class="form-grid compact-form">
+            <label>目标店铺<select id="save-as-store-template-store"></select></label>
+            <label>新模板名<input id="save-as-store-template-name" /></label>
+          </div>
+          <p id="save-as-store-template-summary" class="muted"></p>
+          <p id="save-as-store-template-result" class="muted"></p>
+          <div class="actions"><button id="confirm-save-as-store-template" type="button">另存模板</button></div>
+        </dialog>
+
+        <dialog id="cnsc-site-order-dialog" class="workflow-dialog compact-dialog">
+          <div class="panel-head"><h2>价格表识别顺序</h2><button type="button" data-close-dialog="cnsc-site-order-dialog" aria-label="关闭">×</button></div>
+          <p class="muted">无表头粘贴时，价格列按此顺序对应站点（每站两列：售价、原价）。默认与 CNSC 页面站点顺序一致；带站点表头的粘贴不受此顺序影响。</p>
+          <div class="form-grid compact-form">
+            <div class="wide">
+              <span class="cnsc-site-order-label">站点顺序（拖动站点块调整顺序，需包含全部 8 个站点）</span>
+              <div id="cnsc-site-order-chips" class="cnsc-site-order-chips"></div>
+              <small class="muted">从左到右即识别顺序；带站点表头的粘贴不受此顺序影响。</small>
+            </div>
+          </div>
+          <p id="cnsc-site-order-error" class="muted"></p>
+          <div class="actions">
+            <button id="cnsc-site-order-reset" type="button" class="secondary-button">恢复默认</button>
+            <button type="button" class="secondary-button" data-close-dialog="cnsc-site-order-dialog">取消</button>
+            <button id="cnsc-site-order-save" type="button">保存</button>
+          </div>
+        </dialog>
+
+        <dialog id="nas-browser-dialog" class="workflow-dialog">
+          <div class="panel-head"><h2>选择商品文件夹</h2><button type="button" data-close-dialog="nas-browser-dialog" aria-label="关闭">×</button></div>
+          <p class="muted nas-browser-root-hint">
+            NAS 根目录：<code id="nas-browser-root-display">—</code>
+            <button type="button" id="nas-browser-edit-root-btn" class="link-button">改默认路径</button>
+          </p>
+          <div id="nas-browser-breadcrumbs" class="nas-browser-breadcrumbs" aria-label="路径导航"></div>
+          <div class="nas-browser-toolbar">
+            <input id="nas-browser-filter" class="nas-browser-filter" type="search" placeholder="过滤当前层级（按名称）" autocomplete="off" spellcheck="false" />
+            <button id="nas-browser-refresh-btn" type="button" class="secondary" title="重新读取 NAS 当前文件夹（绕过缓存，NAS 新增/删除目录后点这里）">刷新本层</button>
+          </div>
+          <div id="nas-browser-list" class="nas-browser-list" role="listbox" aria-label="子目录列表"></div>
+          <p id="nas-browser-status" class="muted"></p>
+          <div id="nas-browser-selection" class="nas-browser-selection" hidden>
+            <div class="nas-browser-selection-head">
+              <strong>已选 <span id="nas-browser-selection-count">0</span> 个商品文件夹</strong>
+              <button id="nas-browser-clear-btn" type="button" class="link-button">全部清空</button>
+            </div>
+            <ul id="nas-browser-selection-list" class="nas-browser-selection-list"></ul>
+          </div>
+          <div class="actions">
+            <button id="nas-browser-up-btn" type="button" class="secondary">返回上一级</button>
+            <button id="nas-browser-add-btn" type="button" class="secondary">加入已选</button>
+            <button id="nas-browser-confirm-btn" type="button" disabled>确认创建</button>
+          </div>
+        </dialog>
+
+        <dialog id="mabang-page-import-dialog" class="workflow-dialog">
+          <div class="panel-head"><h2>从马帮当前页导入</h2><button type="button" data-close-dialog="mabang-page-import-dialog" aria-label="关闭">×</button></div>
+          <label class="mabang-import-account-field">马帮账号<select id="mabang-page-import-account"></select></label>
+          <p class="muted">点「服务器 Chrome 打开」会用所选账号的浏览器打开马帮，<strong>这一步会临时把窗口显示出来</strong>（方便你手动进商品编辑页）；采集完成后自动恢复无头。展开所选店铺 picker、必要时点开每站活动 → 回到本弹窗点「采集当前页」。</p>
+          <p class="muted">采集只读取当前页面，不会点击马帮的保存、保存并刊登、发布或提交。</p>
+          <div id="mabang-page-import-run-id-box" class="mabang-page-import-run-id" hidden>
+            <span>本次 Run ID：</span>
+            <code id="mabang-page-import-run-id-value">—</code>
+            <button type="button" class="secondary" id="mabang-page-import-copy-run-id-btn">复制</button>
+          </div>
+          <p id="mabang-page-import-result" class="muted"></p>
+          <div id="mabang-import-preview" class="mabang-import-preview" hidden>
+            <div id="mabang-import-mode" class="mabang-import-mode-row"></div>
+            <section class="mabang-import-preview-group"><h3>店铺与类目</h3><div id="mabang-import-store-category"></div></section>
+            <section class="mabang-import-preview-group"><h3>已选属性</h3><div id="mabang-import-attributes"></div></section>
+            <section class="mabang-import-preview-group"><h3>颜色与尺码</h3><div id="mabang-import-variation"></div></section>
+            <section class="mabang-import-preview-group"><h3>交易信息</h3><div id="mabang-import-transaction"></div></section>
+            <section id="mabang-import-selected-shops-group" class="mabang-import-preview-group"><h3>所选店铺 + 每站活动</h3><div id="mabang-import-selected-shops"></div></section>
+            <section id="mabang-import-promotions-group" class="mabang-import-preview-group"><h3>店铺促销活动</h3><div id="mabang-import-promotions"></div></section>
+            <section class="mabang-import-preview-group"><h3>已上传尺码图</h3><div id="mabang-import-size-chart-upload"></div></section>
+            <section class="mabang-import-preview-group"><h3>尺码图模板</h3><div id="mabang-import-size-chart-templates"></div></section>
+            <section class="mabang-import-preview-group"><h3>水印目录</h3><div id="mabang-import-watermarks"></div></section>
+            <div id="mabang-import-warnings" class="mabang-import-warnings" role="status"></div>
+          </div>
+          <div class="actions">
+            <a id="open-mabang-new-product-link" class="button-link secondary" target="_blank" rel="noopener noreferrer">服务器 Chrome 打开</a>
+            <button id="collect-mabang-page-import-btn" type="button" disabled>采集当前页</button>
+            <button id="confirm-mabang-page-import-btn" type="button" disabled>确认导入</button>
+          </div>
+        </dialog>
+        <section id="automation" class="view">
+          <div class="panel" data-automation-panel="copies">
+            <div class="panel-head">
+              <div>
+                <span class="eyebrow">STORE COPIES</span>
+                <h2>店铺刊登副本</h2>
+              </div>
+              <div class="listing-copy-head-actions">
+                <div class="listing-copy-head-actions-main">
+                  <button id="refresh-automation-view-btn" type="button" class="secondary-button" title="刷新副本与任务列表">刷新</button>
+                  <button id="batch-create-automation-jobs-btn" type="button">批量生成自动化任务</button>
+                </div>
+                <div class="listing-copy-head-actions-sub">
+                  <button id="select-all-listing-copies-btn" type="button" class="secondary-button">全选新建</button>
+                  <span class="muted">「全选新建」只勾选还没跑过的副本；失败/已完成请单条勾选。已完成区按完成时间分组，点分组标题可折叠隐藏</span>
+                </div>
+              </div>
+            </div>
+            <p id="listing-copy-batch-result" class="muted"></p>
+            <div class="table-wrap">
+              <table class="listing-copies-table">
+                <thead>
+                  <tr><th></th><th>图</th><th>主 SKU</th><th>店铺</th><th>模板</th><th>标题</th><th>SKU</th><th>价格</th><th>副本状态</th><th>自动化</th><th>操作</th></tr>
+                </thead>
+                <tbody id="store-listing-copy-table"></tbody>
+              </table>
+            </div>
+          </div>
+
+          <div class="panel" data-automation-panel="jobs" hidden>
+            <div class="panel-head">
+              <div>
+                <span class="eyebrow">AUTOMATION JOBS</span>
+                <h2>自动化任务</h2>
+              </div>
+              <div class="automation-job-head-actions">
+                <button id="refresh-automation-jobs-btn" type="button" class="secondary-button" title="刷新任务列表">刷新</button>
+                <span class="muted">单 worker 自动领取 ready 任务，完整填表后只保存草稿，永久禁止刊登或发布。</span>
+              </div>
+            </div>
+            <p id="automation-job-result" class="muted"></p>
+            <div class="table-wrap">
+              <table>
+                <thead>
+                  <tr><th></th><th>店铺 / 主 SKU</th><th>状态</th><th>阶段</th><th>缺口</th><th>最后错误</th><th>保存证据</th><th>更新时间</th><th>操作</th></tr>
+                </thead>
+                <tbody id="automation-job-table"></tbody>
+              </table>
+            </div>
+          </div>
+        </section>
+
+        <section id="file-management" class="view">
+          <div class="panel">
+            <div class="panel-head">
+              <h2>文件管理</h2>
+              <button id="scan-assets-btn">扫描文件</button>
+            </div>
+            <div class="inline-form">
+              <input id="asset-category" value="POD Mens T-Shirt" />
+              <input id="asset-root" value="sample_assets" />
+              <input id="asset-max-files" value="3000" />
+              <select id="asset-scan-mode">
+                <option value="auto">自动识别</option>
+                <option value="groups">上级目录批量</option>
+                <option value="recursive">当前目录递归</option>
+              </select>
+            </div>
+            <p id="scan-result" class="muted"></p>
+            <div id="file-group-list" class="file-group-list"></div>
+            <div id="file-grid" class="file-grid"></div>
+          </div>
+        </section>
+
+        <section id="plan" class="view">
+          <div class="panel">
+            <div class="panel-head">
+              <h2>项目计划</h2>
+              <span class="status ready">马帮 only</span>
+            </div>
+            <div id="project-plan-summary" class="plan-summary"></div>
+          </div>
+          <div class="panel"><h2>执行链路</h2><div id="project-runtime-chain" class="plan-chain"></div></div>
+        </section>
+        <section id="settings" class="view settings-view">
+          <div class="settings-layout">
+            <nav class="settings-nav" aria-label="设置分组">
+              <button class="settings-nav-item active" data-settings-group="ai">AI 模型</button>
+              <button class="settings-nav-item" data-settings-group="ai-generation">AI 生成</button>
+              <button class="settings-nav-item" data-settings-group="description">描述方案</button>
+              <button class="settings-nav-item" data-settings-group="mabang">马帮连接</button>
+              <button class="settings-nav-item" data-settings-group="worker">自动化 Worker</button>
+              <button class="settings-nav-item" data-settings-group="nas">NAS 素材</button>
+              <button class="settings-nav-item" data-settings-group="store-collection">店铺采集</button>
+              <button class="settings-nav-item" data-settings-group="display">界面显示</button>
+              <button class="settings-nav-item" data-settings-group="storage-cleanup">存储与清理</button>
+              <button class="settings-nav-item" data-settings-group="network">局域网访问</button>
+              <button class="settings-nav-item" data-settings-group="updates">版本更新</button>
+              <button class="settings-nav-item" data-settings-group="safety">系统安全</button>
+            </nav>
+            <div class="settings-content">
+              <section class="settings-group active" data-settings-panel="ai"><div class="panel-head"><div><h2>AI 模型连接</h2><p class="muted">模型密钥使用加密存储，保存后不回显。</p></div><button id="add-ai-connection-btn" type="button">新增连接</button></div><div id="settings-ai-connections" class="settings-connection-list"></div>
+                <div class="form-grid compact-form settings-ai-color-row">
+                  <label>颜色识别使用的 AI 连接
+                    <select id="settings-ai-color-connection"></select>
+                  </label>
+                </div>
+                <p class="muted small">SKU 图片的颜色识别单独走这个连接（与标题/描述解耦，可换成更便宜或更稳的视觉模型）。留空＝跟随默认连接。改完点页面底部「保存设置」。</p>
+              </section>
+              <section class="settings-group" data-settings-panel="ai-generation">
+                <div class="panel-head">
+                  <div>
+                    <span class="eyebrow">AI GENERATION</span>
+                    <h2>AI 自动生成</h2>
+                    <p class="muted">从 NAS 创建基础商品时，让 AI 根据产品图自动生成标题和描述（英文）。生成结果可在商品维护里编辑。</p>
+                  </div>
+                </div>
+                <div class="form-grid compact-form">
+                  <label class="toggle-field wide"><input id="settings-generate-title-on-import" type="checkbox" />导入时自动生成标题</label>
+                  <label class="toggle-field wide"><input id="settings-generate-description-on-import" type="checkbox" />导入时自动生成描述</label>
+                  <label class="toggle-field wide"><input id="settings-fill-attributes-into-description" type="checkbox" />导入时自动识别商品属性并填入详情描述</label>
+                </div>
+                <p class="muted small">用默认 AI 模型连接，需要视觉能力（Claude 4 系列 / GPT-4o / Gemini）。生成失败不会阻断创建，只是空标题/描述，可以手动重新生成。开启属性识别后，AI 会从产品图识别材质、风格、适用季节等属性，按「属性名 : 值」格式追加到详情描述末尾（例如卫衣的 Material : Polyester / Item Type : Hoodies），同时保存到商品属性里。</p>
+              </section>
+              <section class="settings-group" data-settings-panel="ai-generation">
+                <div class="panel-head">
+                  <div>
+                    <span class="eyebrow">MAIN SKU</span>
+                    <h2>主 SKU 自动编号</h2>
+                    <p class="muted">开启后每次导入商品自动分配下一个主 SKU（前缀 + 自增编号），文件夹名里的编号会被覆盖。编号可随时在这里改。</p>
+                  </div>
+                </div>
+                <div class="form-grid compact-form">
+                  <label class="toggle-field wide"><input id="settings-sku-auto-assign" type="checkbox" />导入时自动分配主 SKU</label>
+                  <label>前缀（如 FL / D）<input id="settings-sku-prefix" placeholder="FL" maxlength="8" /></label>
+                  <label>编号位数<input id="settings-sku-number-width" type="number" min="1" max="8" step="1" /></label>
+                  <label>下一个编号<input id="settings-sku-next-number" type="number" min="1" step="1" /></label>
+                </div>
+                <p class="muted small">例如前缀 FL、位数 4、下一编号 21，导入后商品主 SKU 依次为 FL0021、FL0022……编号自动跳过已存在的 SKU。</p>
+              </section>
+              <section class="settings-group" data-settings-panel="description"><div class="panel-head"><div><h2>描述生成方案</h2><p class="muted">方案 = 描述的「配方」。设为默认后，新店铺副本自动用它生成描述；也可以在店铺副本编辑页手动换方案重生成。</p></div><button id="add-description-profile-btn" type="button">新增方案</button></div><div id="settings-description-profiles" class="settings-connection-list"></div><p class="muted small">使用链路：设置里建方案并「设为默认」→ 商品「复制到店铺模板」时自动带入 → 副本编辑页可换方案并点「重新生成描述」。固定内容（开场/售后/发货承诺）所有商品共用，AI 只写商品相关部分，避免平台判重复内容。</p></section>
+              <section class="settings-group" data-settings-panel="mabang"><div class="panel-head"><h2>马帮连接</h2><button id="test-mabang-settings-btn" type="button">测试配置</button></div><div class="form-grid compact-form"><label>工作台地址<input id="settings-mabang-url" /></label><label>自动登录账号<input id="settings-mabang-account" autocomplete="off" spellcheck="false" /></label><label>自动登录密码<input id="settings-mabang-password" type="password" autocomplete="new-password" placeholder="留空则不修改" /></label><label class="toggle-field"><input id="settings-mabang-headless" type="checkbox" />无头启动采集/Worker 浏览器</label></div><p id="settings-mabang-login-status" class="muted"></p><p class="muted small">绑定后，启动自动化浏览器和 Worker 遇到马帮登录页时会自动填写登录；密码加密存储、保存后不回显。无头模式不显示浏览器窗口、适合无人值守跑批；遇到滑块/安全验证时需切回窗口模式人工完成。</p><p id="settings-mabang-status" class="muted"></p><div class="settings-subsection"><div class="panel-head"><div><h2>马帮账号</h2><p class="muted">每个账号独立登录、独立采集浏览器；店铺按账号归属，账号之间没有主次之分。</p></div><button id="add-mabang-account-btn" type="button">新增账号</button></div><div id="settings-mabang-account-list" class="settings-connection-list"></div></div></section>
+              <section class="settings-group" data-settings-panel="worker"><div class="panel-head"><div><h2>自动化 Worker</h2><p id="settings-worker-status" class="worker-status"></p></div><span id="settings-worker-restart" class="status"></span></div><div class="form-grid compact-form"><label>领取间隔（秒）<input id="settings-worker-poll-seconds" type="number" min="0.1" step="0.1" /></label><label>任务租约（秒）<input id="settings-worker-lease-seconds" type="number" min="1" step="1" /></label><label>最大重试次数<input id="settings-worker-max-attempts" type="number" min="1" step="1" /></label><label>每账号并行槽位<input id="settings-worker-slots" type="number" min="1" max="4" step="1" /><span class="muted">1 = 一次一单；2 起同一账号再开一只浏览器（独立端口与登录），可同时上架多单，保存后立即生效。没有店铺的账号只会开 1 个 Worker。</span></label><label class="toggle-field"><input id="settings-worker-auto-restart" type="checkbox" />Worker 崩溃后自动重启</label><label class="toggle-field"><input id="settings-worker-on-demand" type="checkbox" />按需启动：平时关闭，有任务才唤醒</label><label>空闲自动关闭（分钟）<input id="settings-worker-idle-minutes" type="number" min="0" step="1" /><span class="muted">0 = 不自动关闭。执行完最后一单起算；关闭时连该账号的采集浏览器一起关。</span></label></div><div class="settings-connection-actions"><button id="worker-start-btn" type="button">启动</button><button id="worker-pause-btn" type="button">暂停</button><button id="worker-restart-btn" type="button">重启</button><button id="worker-logs-btn" type="button">刷新日志</button><button id="worker-browser-btn" class="secondary" type="button">启动自动化浏览器</button></div><p id="settings-worker-browser-status" class="muted"></p><div id="settings-worker-accounts" class="settings-connection-list"></div><pre id="settings-worker-logs" class="worker-log" hidden></pre></section>
+              <section class="settings-group" data-settings-panel="nas">
+                <div class="panel-head">
+                  <div>
+                    <h2>NAS 素材目录</h2>
+                    <p class="muted">商品维护"浏览"按钮从这里开始展开；执行 NAS 扫描时也用这个作根。</p>
+                  </div>
+                  <button id="test-nas-settings-btn" type="button">检测目录</button>
+                </div>
+                <label class="form-field-wide">
+                  <span class="form-field-label">NAS 默认路径</span>
+                  <input
+                    id="settings-nas-root"
+                    placeholder="\\Juns\产品编辑部\...\商品分组"
+                    autocomplete="off"
+                    spellcheck="false"
+                    class="mono"
+                  />
+                  <small class="muted">支持 UNC 路径（<code>\\host\share\...</code>）或本机绝对路径。改完点右上"保存设置"生效。</small>
+                </label>
+                <div class="form-grid compact-form">
+                  <label>扫描方式<select id="settings-nas-scan-mode"><option value="auto">自动识别</option><option value="groups">按商品分组</option><option value="recursive">递归扫描</option></select></label>
+                  <label>最大扫描文件数<input id="settings-nas-max-files" type="number" min="1" step="1" /></label>
+                </div>
+                <p id="settings-nas-status" class="muted"></p>
+              </section>
+              <section class="settings-group" data-settings-panel="store-collection"><div class="panel-head"><div><h2>店铺采集</h2><p class="muted">定时采集会在完成店铺页导航校验后启用；当前仍可保存采集策略。</p></div></div><div class="form-grid compact-form"><label class="toggle-field"><input id="settings-collection-enabled" type="checkbox" />启用店铺采集</label><label>采集周期（分钟）<input id="settings-collection-interval" type="number" min="1" step="1" /></label><label>最大重试次数<input id="settings-collection-max-attempts" type="number" min="1" step="1" /></label><label class="toggle-field"><input id="settings-auto-focus-import" type="checkbox" />采集完成后自动跳转到待补字段</label></div><div id="settings-store-collection-status" class="settings-connection-list"></div></section>
+              <section class="settings-group" data-settings-panel="display">
+                <div class="panel-head">
+                  <div>
+                    <span class="eyebrow">DISPLAY MODE</span>
+                    <h2>界面显示</h2>
+                    <p class="muted">控制页面显示哪些刊登模式。关闭「跨境模式」后只显示本土（站点商品）版本，跨境相关界面隐藏；已保存的跨境模板、副本与自动化任务不受影响，重新开启即可恢复显示。</p>
+                  </div>
+                </div>
+                <div class="form-grid compact-form">
+                  <label class="toggle-field wide"><input id="settings-cross-border-mode" type="checkbox" />跨境模式（CNSC 全球商品）</label>
+                </div>
+                <p class="muted small">关闭后：店铺模板与刊登副本列表只显示本土版本；「复制到店铺模板」不再显示跨境卡片；模板编辑器的刊登模式只有「站点商品」；基础商品维护的「站点价格」区整个隐藏（含产品类目、尺码表、站点价格表，本土在店铺模板维护）。跨境数据与后台功能完全保持不变。</p>
+              </section>
+              <section id="settings-storage-cleanup" class="settings-group" data-settings-panel="storage-cleanup">
+                <div class="panel-head storage-head">
+                  <div>
+                    <span class="eyebrow">STORAGE &amp; CLEANUP</span>
+                    <h2>存储与清理</h2>
+                    <p class="muted">清理可再生成的缓存和过期运行文件，不会删除商品资料、备份或马帮登录状态。商品素材只处理本地上传的素材：NAS 素材、未完成上款与在途任务的商品一律跳过。</p>
+                  </div>
+                  <button id="settings-storage-refresh-btn" type="button" class="secondary">刷新占用</button>
+                </div>
+
+                <div id="settings-storage-usage" class="storage-cleanup-list"><p class="muted">正在读取存储占用…</p></div>
+
+                <div class="storage-cleanup-options">
+                  <section class="storage-policy-card">
+                    <div class="storage-policy-head">
+                      <div>
+                        <h3>自动清理</h3>
+                        <p class="muted small">每天扫描一次，按下面的保留天数删除过期文件。</p>
+                      </div>
+                      <label class="toggle-field"><input id="settings-storage-auto-enabled" type="checkbox" />每天自动清理过期文件</label>
+                    </div>
+                    <div class="form-grid compact-form storage-field-grid">
+                      <label>临时文件保留（天）<input id="settings-storage-temp-retention" type="number" min="1" max="3650" step="1" /></label>
+                      <label>截图保留（天）<input id="settings-storage-screenshot-retention" type="number" min="1" max="3650" step="1" /></label>
+                      <label>导出保留（天）<input id="settings-storage-export-retention" type="number" min="1" max="3650" step="1" /></label>
+                      <label>日志保留（天）<input id="settings-storage-log-retention" type="number" min="1" max="3650" step="1" /></label>
+                      <label>素材保留（天）<input id="settings-storage-assets-retention" type="number" min="1" max="3650" step="1" /></label>
+                    </div>
+                  </section>
+
+                  <section class="storage-policy-card">
+                    <div class="storage-policy-head">
+                      <div>
+                        <h3>商品素材压缩</h3>
+                        <p class="muted small">上架完成后把本地 PNG 素材转成同名 JPEG，原图不可恢复。</p>
+                      </div>
+                      <label class="toggle-field"><input id="settings-storage-compact-enabled" type="checkbox" />上架完成后自动压缩商品素材</label>
+                    </div>
+                    <div class="form-grid compact-form storage-field-grid">
+                      <label>完成后延后压缩（天）<input id="settings-storage-compact-delay" type="number" min="1" max="3650" step="1" /></label>
+                      <label>压缩长边（像素）<input id="settings-storage-compact-edge" type="number" min="200" max="4000" step="50" /></label>
+                      <label>JPEG 质量（50~95）<input id="settings-storage-compact-quality" type="number" min="50" max="95" step="1" /></label>
+                    </div>
+                  </section>
+                </div>
+
+                <div class="settings-actions storage-cleanup-actions">
+                  <div class="storage-action-feedback">
+                    <p id="settings-storage-selection" class="muted storage-selection"></p>
+                    <p id="settings-storage-result" class="muted"></p>
+                    <p id="settings-storage-compact-result" class="muted"></p>
+                  </div>
+                  <div class="storage-action-buttons">
+                    <button id="settings-storage-compact-btn" type="button" class="secondary">立即压缩素材</button>
+                    <button id="settings-storage-clean-btn" type="button">清理所选项目</button>
+                  </div>
+                </div>
+              </section>
+              <section class="settings-group" data-settings-panel="network">
+                <div class="panel-head">
+                  <div>
+                    <span class="eyebrow">LAN ACCESS</span>
+                    <h2>局域网访问</h2>
+                    <p class="muted">让同一局域网的电脑、平板或手机用本机 IP 打开系统。多台设备可以同时使用，服务已启用连接复用与并发读缓存。改完点本组底部「应用网络设置」，无需重启 API。</p>
+                  </div>
+                  <span id="settings-network-state" class="status">读取中</span>
+                </div>
+                <div class="lan-access-hero">
+                  <label class="toggle-field wide"><input id="settings-network-lan-enabled" type="checkbox" />允许局域网设备访问（监听 0.0.0.0）</label>
+                  <div class="form-grid compact-form">
+                    <label>监听端口<input id="settings-network-port" readonly /></label>
+                    <label>当前监听<input id="settings-network-bind" readonly /></label>
+                  </div>
+                </div>
+                <div class="settings-subsection">
+                  <div class="panel-head">
+                    <div><h3>访问地址</h3><p class="muted">同一局域网的设备用下面任意一个地址打开；多网卡会逐个列出，优先物理网卡。VPN/虚拟网卡若被 Windows 归为「公用网络」，可能被防火墙拦截；优先用物理网卡地址。</p></div>
+                    <button id="settings-network-refresh-btn" type="button" class="secondary">刷新地址</button>
+                  </div>
+                  <div id="settings-network-urls" class="lan-address-list"><p class="muted">正在读取网卡地址…</p></div>
+                </div>
+                <div class="settings-subsection" id="settings-network-firewall-section">
+                  <div class="panel-head">
+                    <div><h3>Windows 防火墙</h3><p id="settings-network-firewall-hint" class="muted">正在检查…</p></div>
+                    <button id="settings-network-firewall-btn" type="button" class="secondary">开放防火墙端口</button>
+                  </div>
+                  <p id="settings-network-firewall-result" class="muted"></p>
+                </div>
+                <p id="settings-network-hints" class="muted small"></p>
+                <p class="muted small">局域网访问没有登录校验，任何能连到这台机器的设备都能操作；请只在可信网络开启。防火墙规则默认只放行专用/域网络和本地子网。</p>
+                <div class="settings-actions">
+                  <p id="settings-network-result" class="muted"></p>
+                  <button id="settings-network-apply-btn" type="button">应用网络设置</button>
+                </div>
+              </section>
+              <section class="settings-group" data-settings-panel="updates">
+                <div class="panel-head">
+                  <div>
+                    <span class="eyebrow">GITHUB RELEASES</span>
+                    <h2>版本更新</h2>
+                    <p class="muted">从配置的 GitHub 仓库读取最新 Release，确认后下载、校验并自动替换文件重启。更新不会改动 data/ 与 storage/ 里的业务数据；替换前的旧文件先备份到 storage/updates/backups/，任一步失败自动回滚。</p>
+                  </div>
+                  <span id="settings-updates-state" class="status">读取中</span>
+                </div>
+                <div class="updates-version-card">
+                  <div>
+                    <span class="muted small">当前版本</span>
+                    <strong id="settings-updates-current-version" class="updates-version">-</strong>
+                  </div>
+                  <div class="settings-connection-actions">
+                    <button id="settings-updates-check-btn" type="button" class="secondary" disabled>检查更新</button>
+                    <button id="settings-updates-apply-btn" type="button" disabled>立即更新</button>
+                  </div>
+                </div>
+                <p id="settings-updates-result" class="muted"></p>
+                <div class="settings-subsection">
+                  <div class="panel-head">
+                    <div>
+                      <h3>更新配置</h3>
+                      <p class="muted">仓库写 owner/name 或 GitHub 仓库地址；私有仓库必须填 Token（需要 repo 权限）。Token 加密存储、保存后不回显，留空表示保留原值。本组配置用这里的「保存更新配置」保存（页面底部的「保存设置」不含本组）。</p>
+                    </div>
+                    <button id="settings-updates-save-btn" type="button">保存更新配置</button>
+                  </div>
+                  <div class="form-grid compact-form">
+                    <label>GitHub 仓库<input id="settings-updates-repo" placeholder="owner/ai-listing-system" autocomplete="off" spellcheck="false" /></label>
+                    <label>GitHub Token<input id="settings-updates-token" type="password" placeholder="留空则不修改" autocomplete="new-password" /></label>
+                    <label>GitHub API 地址<input id="settings-updates-api-url" placeholder="https://api.github.com" autocomplete="off" spellcheck="false" /></label>
+                    <label class="toggle-field"><input id="settings-updates-include-prerelease" type="checkbox" />把预发布版本也算作更新</label>
+                    <label class="toggle-field"><input id="settings-updates-auto-check" type="checkbox" checked />打开系统时自动检查更新</label>
+                  </div>
+                </div>
+                <div id="settings-updates-latest" class="updates-latest" hidden>
+                  <div class="updates-latest-head">
+                    <div class="updates-latest-title">
+                      <span class="muted small">最新版本</span>
+                      <strong id="settings-updates-latest-version">-</strong>
+                      <span id="settings-updates-latest-meta" class="muted small"></span>
+                    </div>
+                    <a id="settings-updates-latest-link" class="updates-latest-link" target="_blank" rel="noreferrer" hidden>在 GitHub 查看</a>
+                  </div>
+                  <p id="settings-updates-notes" class="muted small updates-notes"></p>
+                </div>
+                <div class="settings-subsection">
+                  <div class="panel-head">
+                    <div>
+                      <h3>发布版本</h3>
+                      <p class="muted">把当前代码打包成安装包，提交版本号、打 tag、推送到 GitHub，并创建 Release（含 zip 与 sha256 资产）。发布前请确认工作区没有未提交的改动。</p>
+                    </div>
+                    <span id="settings-release-status" class="status"></span>
+                  </div>
+                  <div class="form-grid compact-form">
+                    <label>新版本号<input id="settings-release-version" placeholder="1.2.0" autocomplete="off" spellcheck="false" /></label>
+                    <label>版本递增<select id="settings-release-bump"><option value="patch">patch（补丁）</option><option value="minor">minor（小版本）</option><option value="major">major（大版本）</option></select></label>
+                    <label class="wide release-notes-field">发布说明<textarea id="settings-release-notes" rows="4" placeholder="这一版改了什么。留空则用 docs/releases/v&lt;版本&gt;.md，再没有就用「发布 v&lt;版本&gt;」。"></textarea></label>
+                    <label class="toggle-field release-toggle-field"><input id="settings-release-prerelease" type="checkbox" />标记为预发布（pre-release）</label>
+                    <label class="toggle-field release-toggle-field"><input id="settings-release-dry-run" type="checkbox" />只构建安装包（dry-run，不提交、不推送）</label>
+                  </div>
+                  <div class="settings-connection-actions">
+                    <button id="settings-release-build-btn" type="button" class="secondary">构建安装包</button>
+                    <button id="settings-release-publish-btn" type="button" disabled>发布版本</button>
+                  </div>
+                  <pre id="settings-release-log" class="worker-log" hidden></pre>
+                </div>
+              </section>
+              <section class="settings-group" data-settings-panel="safety"><div class="panel-head"><h2>系统安全</h2><span class="status ready">不可修改</span></div><div class="safety-policy"><strong>只保存马帮草稿</strong><span>发布、刊登、保存并刊登、提交审核永久禁止。</span></div><label class="toggle-field"><input id="settings-save-draft-only" type="checkbox" checked disabled />只保存草稿</label><label class="toggle-field"><input id="settings-publish-allowed" type="checkbox" disabled />允许发布</label></section>
+              <div class="settings-actions"><p id="settings-result" class="muted"></p><button id="save-settings-btn" type="button">保存设置</button></div>
+            </div>
+          </div>
+        </section>
+      </main>
+    </div>
+    <dialog id="ai-connection-dialog" class="workflow-dialog compact-dialog">
+      <div class="panel-head"><h2>AI 模型连接</h2><button type="button" data-close-dialog="ai-connection-dialog" aria-label="关闭">×</button></div>
+      <div class="form-grid compact-form">
+        <label>连接名称<input id="ai-connection-name" autocomplete="off" /></label>
+        <label>协议<select id="ai-connection-protocol"><option value="anthropic_messages">Anthropic Messages</option><option value="openai_chat_completions">OpenAI Chat Completions 兼容</option><option value="chat_completions">Chat Completions（/chat/completions）</option></select></label>
+        <label>接口地址<input id="ai-connection-base-url" placeholder="https://api.example.com/v1" autocomplete="off" /></label>
+        <label>模型名称<input id="ai-connection-model-id" placeholder="例如 deepseek-chat" autocomplete="off" /></label>
+        <label id="ai-connection-version-field" hidden>Anthropic API 版本<input id="ai-connection-api-version" value="2023-06-01" autocomplete="off" /></label>
+        <label>超时（秒）<input id="ai-connection-timeout" type="number" min="1" value="60" /></label>
+        <label>API Key<input id="ai-connection-api-key" type="password" autocomplete="new-password" /></label>
+      </div>
+      <p id="ai-connection-result" class="muted"></p>
+      <div class="actions"><button id="save-ai-connection-btn" type="button">保存连接</button></div>
+    </dialog>
+
+    <dialog id="mabang-account-dialog" class="workflow-dialog compact-dialog">
+      <div class="panel-head"><h2>马帮账号</h2><button type="button" data-close-dialog="mabang-account-dialog" aria-label="关闭">×</button></div>
+      <p class="muted small dialog-note">采集浏览器端口与数据目录由系统按账号自动分配，各账号互相隔离（独立登录态），无需配置。</p>
+      <div class="form-grid compact-form">
+        <label>账号名称<input id="mabang-account-name" autocomplete="off" placeholder="例：账号A" /></label>
+        <label>登录账号<input id="mabang-account-login" autocomplete="off" spellcheck="false" /></label>
+        <label>登录密码<input id="mabang-account-password" type="password" autocomplete="new-password" placeholder="留空则不修改" /></label>
+        <label class="toggle-field"><input id="mabang-account-enabled" type="checkbox" checked />启用</label>
+      </div>
+      <p id="mabang-account-result" class="muted"></p>
+      <div class="actions"><button id="save-mabang-account-btn" type="button">保存账号</button></div>
+    </dialog>
+
+    <dialog id="description-profile-dialog" class="workflow-dialog compact-dialog">
+      <div class="panel-head"><h2>描述生成方案</h2><button type="button" data-close-dialog="description-profile-dialog" aria-label="关闭">×</button></div>
+      <p class="muted small profile-intro">方案决定「商品描述」怎么生成。流程：在这里建方案并设为默认 → 复制到店铺模板 → 店铺副本编辑页选方案、点「重新生成描述」。同一方案可反复用于所有商品，只有商品相关内容由 AI 每次现写。</p>
+      <p id="description-profile-legacy-notice" class="mode-help mode-help--warn muted small" hidden></p>
+
+      <div class="profile-basic-grid">
+        <label>方案名称<input id="description-profile-name" autocomplete="off" placeholder="例：Shopee PH · 通用描述" /></label>
+        <label>所属店铺<select id="description-profile-store"><option value="">全店通用（默认候选给所有店铺）</option></select></label>
+        <input type="hidden" id="description-profile-mode" value="sectioned" />
+      </div>
+
+      <div class="mode-help muted small">从上往下排列区块，拼装出商品描述。固定＝所有商品相同／字段＝自动取商品数据／AI＝每次自动生成。已预填默认示例，只需改写文字即可用。</div>
+
+      <div class="profile-field">
+        <div class="profile-block-title">分区结构</div>
+        <div id="description-profile-sections" class="profile-sections"></div>
+        <small class="field-hint">每区三选一：<b>固定</b>（所有商品相同，AI 不改）、<b>字段</b>（从商品数据映射：类目/颜色/尺码等）、<b>AI</b>（每次生成现写）。区头 = emoji + 标题。△▽ 调整顺序，点击区块展开编辑。</small>
+      </div>
+
+      <div class="profile-field">
+        <div class="profile-block-title">AI 生成指令</div>
+        <textarea id="description-profile-instructions" rows="6" placeholder="【语言】英文为主，可夹当地俚语。&#10;【篇幅】5–7 句。&#10;【必写】面料触感、版型、搭配场合。&#10;【禁止】不说「最/第一/官方」等绝对词；不编造未提供的参数。&#10;【emoji】每 2 句一个，只用 👕 🔥 ✨ 🎁。"></textarea>
+        <small class="field-hint">这些要求对方案里所有 AI 区块都生效。语言、语气、篇幅、禁用词都写在这里。用【方括号标签】+ 每行一条最稳。</small>
+      </div>
+
+      <div class="profile-preview-wrap">
+        <div id="description-profile-preview" class="profile-preview"></div>
+      </div>
+
+      <p id="description-profile-result" class="muted"></p>
+      <div class="actions">
+        <button id="save-description-profile-btn" type="button">保存方案</button>
+      </div>
+    </dialog>
+
+    <div id="image-lightbox" role="dialog" aria-modal="true" aria-label="放大图片"><img id="image-lightbox-img" alt="" /></div>
+    <div id="base-maintenance-modal" class="modal-backdrop" hidden>
+      <section class="modal-panel" role="dialog" aria-modal="true" aria-labelledby="base-maintenance-title">
+        <header class="maintenance-header">
+          <div class="maintenance-header-row">
+            <div class="maintenance-header-title">
+              <span id="base-maintenance-header-glyph" class="header-glyph header-glyph--idle" aria-hidden="true"></span>
+              <div>
+                <span class="eyebrow">BASE PRODUCT</span>
+                <h2 id="base-maintenance-title">基础商品维护</h2>
+              </div>
+            </div>
+            <div class="maintenance-header-actions">
+              <button id="base-maintenance-rollback-btn" class="maintenance-rollback" type="button" hidden>回档到编辑</button>
+              <button id="close-base-maintenance-btn" type="button">关闭</button>
+            </div>
+          </div>
+          <div class="maintenance-header-meta">
+            <span>MAIN SKU <strong id="base-maintenance-meta-sku">-</strong></span>
+            <span>COLORS <strong id="base-maintenance-meta-colors">0</strong></span>
+            <span>IMAGES <strong id="base-maintenance-meta-images">0</strong></span>
+            <span>COPIES <strong id="base-maintenance-meta-copies">0</strong></span>
+            <span>STATUS <strong id="base-maintenance-meta-status">-</strong></span>
+          </div>
+          <p id="base-maintenance-ai-error" class="maintenance-ai-error" hidden></p>
+          <button id="base-maintenance-ai-retry" type="button" class="secondary-button mini" hidden>重试 AI 识别</button>
+          <div id="base-maintenance-feedback" class="operation-feedback" role="status" aria-live="polite" hidden></div>
+        </header>
+
+        <div class="maintenance-body">
+          <aside class="maintenance-summary">
+            <div class="maintenance-summary-thumb" id="base-maintenance-summary-thumb" aria-hidden="true"></div>
+
+            <div class="maintenance-summary-section">
+              <span class="eyebrow">Automation</span>
+              <div class="maintenance-summary-auto">
+                <span id="base-maintenance-auto-glyph" class="row-glyph row-glyph--idle" aria-hidden="true"></span>
+                <span id="base-maintenance-auto-label">未开始</span>
+              </div>
+            </div>
+
+            <div class="maintenance-summary-section">
+              <span class="eyebrow">Store copies</span>
+              <ul id="base-maintenance-copy-list" class="maintenance-summary-copies"><li class="muted">尚未生成刊登副本</li></ul>
+            </div>
+
+            <input id="base-maintenance-status" type="hidden" />
+          </aside>
+
+          <div class="maintenance-main">
+            <div class="maintenance-scroll">
+              <section class="maintenance-section" id="maintenance-section-meta">
+                <div class="maintenance-section-head"><span class="eyebrow">META</span><h3>商品信息</h3></div>
+                <div class="form-grid compact-form">
+                  <label>商品名<input id="base-maintenance-name" /></label>
+                  <label>主 SKU<input id="base-maintenance-main-sku" /></label>
+                  <label class="wide">标题<input id="base-maintenance-title-input" /></label>
+                  <label class="wide">详情<textarea id="base-maintenance-description"></textarea></label>
+                </div>
+              </section>
+
+              <section class="maintenance-section" id="maintenance-section-images">
+                <div class="maintenance-section-head"><span class="eyebrow">IMAGES</span><h3>产品图顺序</h3></div>
+                <div id="base-image-order-list" class="image-order-list animated"></div>
+                <div class="maintenance-section-sub"><h4>可选产品图</h4></div>
+                <div class="size-chart-picker">
+                  <button id="base-product-image-picker-btn" type="button" data-open-file-picker="base-product-image-upload">上传自己的图片</button>
+                  <span class="muted">PNG / JPEG / WebP · 单张 ≤10 MiB · 可多选</span>
+                  <input id="base-product-image-upload" class="file-input-native" type="file" accept="image/png,image/jpeg,image/webp" multiple tabindex="-1" />
+                </div>
+                <p id="base-product-image-upload-result" class="muted">上传后自动加到产品图末尾，再点「保存维护内容」生效；也可以拖动排序或移除。</p>
+                <div id="base-image-picker" class="image-picker-grid"></div>
+              </section>
+
+<section class="maintenance-section" id="maintenance-section-colors">
+                <div class="maintenance-section-head">
+                  <span class="eyebrow">COLORS</span>
+                  <h3>颜色图</h3>
+                  <label class="toggle-field maintenance-follow-toggle" title="打开后颜色顺序跟随「产品图顺序」：拖动产品图会带动颜色顺序，拖动颜色也会把它的颜色图移到对应位置。未选颜色图（或该图不在产品图顺序里）的颜色排在最后。">
+                    <input id="base-color-follow-images" type="checkbox" />
+                    <span>颜色跟随产品图顺序</span>
+                  </label>
+                  <button id="add-base-color-btn" type="button" class="maintenance-section-action">添加颜色</button>
+                </div>
+                <div id="base-color-quick-pick" class="color-quick-pick"></div>
+                <div id="base-variant-image-map" class="variant-image-map"></div>
+                <p id="base-color-follow-hint" class="muted base-color-follow-hint"></p>
+              </section>
+
+              <section class="maintenance-section" id="maintenance-section-prices">
+                <div class="maintenance-section-head">
+                  <span class="eyebrow">PRICES</span>
+                  <h3>站点价格（按颜色/款式）</h3>
+                  <button id="base-price-collapse-btn" type="button" class="maintenance-section-action" title="收起/展开站点价格区" aria-expanded="true">收起 ▲</button>
+                  <button id="base-price-refresh-btn" type="button" class="maintenance-section-action">刷新</button>
+                </div>
+                <div id="base-price-collapsible">
+                <div class="base-price-category-block">
+                  <div class="maintenance-section-sub"><h4>产品类目（上架期望类目，来自马帮，不分店铺）</h4></div>
+                  <div class="marketplace-category-picker inline-picker">
+                    <input id="base-maintenance-category-path" readonly placeholder="尚未选择（上架期望类目，来自马帮类目，不分店铺）" />
+                    <button id="open-base-category-dialog" type="button">选择产品类目</button>
+                    <button id="clear-base-category-btn" type="button" class="secondary">清空</button>
+                    <input id="base-maintenance-category-id" type="hidden" />
+                    <input id="base-maintenance-category-store" type="hidden" />
+                  </div>
+                  <div class="category-ai-row">
+                    <button id="base-maintenance-ai-attributes-btn" type="button" class="secondary-button">AI 推荐必填项</button>
+                    <span id="base-maintenance-ai-attributes-status" class="muted">选类目后自动列出必填项；AI 按商品信息推荐每个属性的值。</span>
+                  </div>
+                  <div id="base-maintenance-category-fields" class="category-field-grid" aria-live="polite"></div>
+                  <div class="category-quick-toolbar">
+                    <span class="muted">快速类目模板：</span>
+                    <select id="base-category-template-select"><option value="">（选快速类目模板…）</option></select>
+                    <button id="base-category-template-save" type="button" class="secondary-button mini">存为模板</button>
+                    <button id="base-category-template-delete" type="button" class="secondary-button mini">删除模板</button>
+                    <span id="base-category-template-status" class="muted"></span>
+                  </div>
+                  <hr class="maintenance-section-divider" />
+                </div>
+                <div class="maintenance-section-sub"><h4>尺码表（AI 识别）</h4></div>
+                <div class="maintenance-sizechart">
+                  <div id="base-size-chart-preview" class="maintenance-sizechart-preview"><p class="muted">尚未选择尺码表图</p></div>
+                  <div class="maintenance-sizechart-controls">
+                    <label>尺码表图<select id="base-size-chart-image"><option value="">（从产品图中选择一张尺码表）</option></select></label>
+                    <button id="base-clear-size-chart" type="button" class="secondary-button mini">清除</button>
+                    <button id="base-recognize-sizes" type="button" class="secondary-button">AI 识别尺码</button>
+                    <span id="base-recognize-sizes-status" class="muted"></span>
+                  </div>
+                </div>
+                <div class="maintenance-section-sub">
+                  <h4>识别出的尺码</h4>
+                  <span class="maintenance-section-action-links">
+                    <button id="base-sizes-select-all" type="button" class="link-button">全选</button>
+                    <button id="base-sizes-clear" type="button" class="link-button">清空</button>
+                  </span>
+                </div>
+                <p class="muted size-pick-hint">点击尺码即可选择 / 取消（勾选 = 该码会上架）；尺码为固定选项，不需要时点掉即可。</p>
+                <div id="base-recognized-sizes" class="size-chip-list"></div>
+                <div class="maintenance-sizechart-add"><label>添加尺码<input id="base-add-size-input" placeholder="如 M 或 160/84A" /></label><button id="base-add-size-btn" type="button" class="secondary-button mini">添加</button></div>
+                <div class="maintenance-sizechart-templates">
+                  <label>尺码模板<select id="base-size-template-select"><option value="">（选模板快速勾选）</option></select></label>
+                  <button id="base-size-template-save" type="button" class="secondary-button mini">存为模板</button>
+                  <button id="base-size-template-delete" type="button" class="secondary-button mini">删除模板</button>
+                </div>
+                <p class="muted">复制到店铺时以目标模板的尺码为准生成 SKU；若商品勾选尺码与模板不一致，复制时会提醒确认。</p>
+                <hr class="maintenance-section-divider" />
+                <p class="maintenance-note maintenance-note--cnsc">跨境（CNSC）使用：以下各站点价格用于跨境店铺刊登。本土店铺可忽略，本土价格在店铺模板中维护。</p>
+                <p class="muted">按商品颜色/款式分行保存各站点价格（成本 + 每站售价/原价）。颜色行跟随上方「颜色图」区自动增删与排序（颜色图可拖动调整顺序）。粘贴价格表后点「解析价格表」预览，或逐格填写；保存维护内容时一并保存。档位编排与上架在店铺副本编辑器完成。</p>
+                <div class="base-price-toolbar">
+                  <button id="base-price-apply-all" type="button" class="secondary-button">覆盖全部 SKU：首行价格应用到全部颜色</button>
+                  <button id="base-price-cnsc-site-order" type="button" class="secondary-button mini">识别顺序</button>
+                  <span id="base-price-cnsc-site-order-display" class="muted"></span>
+                </div>
+                <div class="base-price-parse">
+                  <label>粘贴价格表（每行一个颜色/款式）<textarea id="base-price-paste" rows="4" placeholder="无表头：直接粘贴纯数字行（每行一个颜色/款式，行序与下方颜色行一致），每站两列（售价、原价），列顺序按“识别顺序”对应站点；或粘贴含站点表头的完整价格表（表头含站点码时列顺序不限）"></textarea><small class="muted">无表头时按“识别顺序”解析，每站两列：售价、原价（如 TW 315/525、PH 696/1160…）。行数少于颜色行数时，最后一行自动填充剩余行。</small></label>
+                  <button id="base-price-parse-btn" type="button" class="secondary-button">解析价格表</button>
+                  <pre id="base-price-preview" class="listing-copy-cnsc-price-preview" hidden></pre>
+                </div>
+                <div class="maintenance-section-sub"><h4>颜色 / 款式 → 站点价格</h4></div>
+                <div class="base-price-color-scroll">
+                  <table id="base-price-color-table" class="listing-copy-sku-table">
+                    <thead><tr><th>颜色 / 款式</th><th>成本价</th><th class="base-price-site-columns">站点价格（原价 / 售价）</th><th></th></tr></thead>
+                    <tbody></tbody>
+                  </table>
+                </div>
+                </div>
+              </section>
+
+              <section class="maintenance-section" id="maintenance-section-video">
+                <div class="maintenance-section-head"><span class="eyebrow">VIDEO</span><h3>商品视频</h3></div>
+                <div class="listing-copy-video-control">
+                  <video id="base-product-video-preview" controls preload="metadata" hidden></video>
+                  <div><p id="base-product-video-status" class="muted">视频缺失，不影响保存</p><label class="file-field">上传或替换<input id="base-product-video-upload" type="file" accept="video/mp4,.mp4" /></label></div>
+                </div>
+              </section>
+            </div>
+          </div>
+        </div>
+
+        <footer class="maintenance-footer">
+          <p id="base-image-editor-result" class="muted"></p>
+          <button id="save-base-image-order-btn">保存维护内容</button>
+        </footer>
+      </section>
+    </div>
+    <dialog id="base-category-dialog" class="workflow-dialog base-category-dialog">
+      <div class="panel-head"><h2>选择产品类目</h2><button type="button" data-close-dialog="base-category-dialog" aria-label="关闭">×</button></div>
+      <p class="muted">跟马帮一样逐级选择：点左侧类目，中列/右列出下级，直到选到叶子类目。也可直接搜索。</p>
+      <div class="category-cascader">
+        <div class="category-cascader-search">
+          <input id="base-category-search" type="search" autocomplete="off" placeholder="搜索类目名称或编号，回车查看结果" aria-controls="base-category-cascader" />
+        </div>
+        <div id="category-cascader-cols" class="category-cascader-cols">
+          <div class="category-cascader-col" data-cascader-depth="0">
+            <div class="category-cascader-col-head">全部分类</div>
+            <div class="category-cascader-list" data-cascader-list="0"></div>
+          </div>
+          <div class="category-cascader-col" data-cascader-depth="1">
+            <div class="category-cascader-col-head">选择下级</div>
+            <div class="category-cascader-list" data-cascader-list="1"></div>
+          </div>
+          <div class="category-cascader-col" data-cascader-depth="2">
+            <div class="category-cascader-col-head">选择叶子类目</div>
+            <div class="category-cascader-list" data-cascader-list="2"></div>
+          </div>
+        </div>
+        <div id="base-category-breadcrumbs" class="category-cascader-breadcrumbs" hidden></div>
+        <div id="base-category-empty" class="marketplace-category-empty" hidden>
+          <p><strong>没有找到匹配的马帮类目。</strong></p>
+          <p class="muted">类目来自马帮已同步的店铺类目树（跨店铺合并去重）。换个关键词试试；若列表仍为空，说明该店铺的类目目录尚未采集，需先从马帮采集类目树。</p>
+        </div>
+        <div class="marketplace-category-status-row">
+          <span id="base-category-picker-status" class="muted"></span>
+        </div>
+      </div>
+    </dialog>
+    <dialog id="listing-copy-editor-dialog" class="workflow-dialog listing-editor">
+      <div class="panel-head listing-editor-head">
+        <div>
+          <h2>检查店铺刊登副本</h2>
+          <p id="listing-copy-editor-meta" class="muted"></p>
+        </div>
+        <button type="button" data-close-dialog="listing-copy-editor-dialog" aria-label="关闭" title="关闭">×</button>
+      </div>
+
+      <div id="listing-copy-readiness-errors" class="readiness-errors"></div>
+
+      <div class="listing-editor-content">
+        <section id="listing-copy-basic-section" class="listing-editor-section">
+          <h3>基本信息</h3>
+          <div class="listing-editor-grid">
+            <label class="wide">商品标题<input id="listing-copy-title" /></label>
+            <label>描述生成方案<select id="listing-copy-description-profile"><option value="">请选择描述生成方案</option></select></label>
+            <label id="listing-copy-promotion-section">店铺促销活动<select id="listing-copy-promotion"><option value="">活动未配置</option></select></label>
+            <label class="wide">商品描述<textarea id="listing-copy-description" rows="12"></textarea></label>
+          </div>
+        </section>
+
+        <section id="listing-copy-images-section" class="listing-editor-section">
+          <div class="listing-editor-section-head"><h3>商品图</h3><span class="muted">首图为主图</span></div>
+          <div id="listing-copy-product-images" class="listing-copy-image-list"></div>
+        </section>
+
+        <section id="listing-copy-size-chart-section" class="listing-editor-section">
+          <h3>尺码图</h3>
+          <div class="listing-copy-size-chart-control">
+            <div class="listing-copy-size-chart-preview-wrap">
+              <img id="listing-copy-size-chart-preview" alt="尺码图" hidden />
+              <span id="listing-copy-size-chart-empty" class="muted">未配置</span>
+            </div>
+            <div class="listing-copy-media-upload">
+              <span class="listing-copy-media-label">尺码图文件</span>
+              <div class="listing-copy-media-actions">
+                <button id="listing-copy-size-chart-picker" type="button" data-open-file-picker="listing-copy-size-chart-upload">选择尺码图</button>
+                <span id="listing-copy-size-chart-file-name" class="muted">支持 PNG、JPEG、WebP</span>
+              </div>
+              <input id="listing-copy-size-chart-upload" class="file-input-native" type="file" accept="image/png,image/jpeg,image/webp" tabindex="-1" />
+            </div>
+          </div>
+          <!-- 本土副本可以在模板快照之外单独关掉/打开这一条。跨境隐藏。 -->
+          <label class="switch-line" id="listing-copy-size-chart-last-image-line">
+            <input id="listing-copy-size-chart-last-image" type="checkbox" checked />
+            产品图最后一张放尺码表（满 9 张时替换第 9 张，不足 9 张追加到最后；详情图不会重复插尺码表）
+          </label>
+        </section>
+
+        <section id="listing-copy-video-section" class="listing-editor-section">
+          <div class="listing-editor-section-head"><h3>商品视频</h3><span class="muted">仅支持 MP4，10–60 秒，最大 1280×1280，30 MB 以内</span></div>
+          <div class="listing-copy-video-control">
+            <video id="listing-copy-video-preview" controls preload="metadata" hidden></video>
+            <div class="listing-copy-media-upload">
+              <span class="listing-copy-media-label">商品视频</span>
+              <p id="listing-copy-video-status" class="muted">视频缺失，不影响保存</p>
+              <div class="listing-copy-media-actions">
+                <button id="listing-copy-video-picker" type="button" data-open-file-picker="listing-copy-video-upload">选择 MP4 视频</button>
+                <span id="listing-copy-video-file-name" class="muted">10-60 秒，最大 30 MB</span>
+                <button id="listing-copy-video-remove" type="button">删除视频</button>
+              </div>
+              <input id="listing-copy-video-upload" class="file-input-native" type="file" accept="video/mp4,.mp4" tabindex="-1" />
+            </div>
+          </div>
+        </section>
+
+        <section id="listing-copy-cnsc-section" class="listing-editor-section" hidden>
+          <div class="listing-editor-section-head">
+            <h3>跨境配置</h3>
+            <span class="muted">折扣活动 · %OFF · 价格档 · 站点价格矩阵</span>
+          </div>
+          <div class="listing-editor-grid">
+            <label>默认 %OFF<input id="listing-copy-cnsc-default-discount" type="number" min="0.01" max="99.99" step="0.01" placeholder="例如 40" /></label>
+          </div>
+          <details id="listing-copy-cnsc-target-details" class="listing-copy-cnsc-details">
+            <summary class="listing-copy-cnsc-target-summary">
+              <h4 class="listing-copy-cnsc-subhead"><span class="listing-copy-cnsc-chevron" aria-hidden="true">▸</span>目标站点折扣活动</h4>
+              <span id="listing-copy-cnsc-summary" class="muted listing-copy-cnsc-summary-text"></span>
+            </summary>
+            <div class="listing-copy-sku-scroll">
+              <table id="listing-copy-cnsc-target-table" class="listing-copy-sku-table">
+                <thead><tr><th>站点</th><th>店铺</th><th>折扣活动</th><th>%OFF</th></tr></thead>
+                <tbody></tbody>
+              </table>
+            </div>
+          </details>
+          <h4 class="listing-copy-cnsc-subhead">价格档 / 站点价格矩阵</h4>
+          <div class="listing-copy-cnsc-binding-bar">
+            <label>价格绑定模式
+              <select id="listing-copy-cnsc-binding-mode">
+                <option value="colors">按颜色分行（每行覆盖该颜色的全部尺码）</option>
+                <option value="sizes">按尺码分档</option>
+              </select>
+            </label>
+            <button id="listing-copy-cnsc-add-tier" type="button" class="secondary-button">新增价格档</button>
+            <button id="listing-copy-cnsc-site-order" type="button" class="secondary-button mini">识别顺序</button>
+            <span id="listing-copy-cnsc-site-order-display" class="muted"></span>
+          </div>
+          <div class="listing-copy-cnsc-parse">
+            <label>粘贴价格表（每行一档，行序与价格档一致）<textarea id="listing-copy-cnsc-price-matrix" rows="4" placeholder="可直接粘贴纯数字价格行，每站两列（售价、原价），列顺序按“识别顺序”对应站点；或粘贴含站点表头的完整价格表（表头含站点码时列顺序不限）"></textarea><small class="muted">无表头时按“识别顺序”解析，每站两列：售价、原价（如 TW 315/525、PH 696/1160…）。行数少于价格档时，最后一行自动填充剩余档位。</small></label>
+            <button id="listing-copy-cnsc-parse" type="button" class="secondary-button">解析价格表</button>
+            <pre id="listing-copy-cnsc-price-preview" class="listing-copy-cnsc-price-preview" hidden></pre>
+          </div>
+          <div id="listing-copy-cnsc-tier-coverage" class="muted listing-copy-cnsc-coverage" hidden></div>
+          <div class="listing-copy-sku-scroll">
+            <table id="listing-copy-cnsc-tier-table" class="listing-copy-sku-table">
+              <thead><tr><th>颜色/款式 / 价格档</th><th data-cnsc-tier-col="sizes">尺码（点选互斥分配）</th><th data-cnsc-tier-col="global">全球价（CNY）</th><th>站点价格（原价 / 售价）</th><th></th></tr></thead>
+              <tbody></tbody>
+            </table>
+          </div>
+        </section>
+
+        <section id="listing-copy-sku-section" class="listing-editor-section">
+          <div class="listing-editor-section-head">
+            <h3>SKU 明细</h3>
+            <button id="listing-copy-apply-stock" type="button" class="secondary-button">统一库存应用到全部 SKU</button>
+          </div>
+          <div id="listing-copy-warehouse-batch" class="listing-copy-warehouse-batch" hidden>
+            <span>批量仓库库存</span>
+            <label>泰国仓<input id="listing-copy-batch-stock-TH" type="number" min="0" step="1" placeholder="留空不修改" /></label>
+            <label>广州仓<input id="listing-copy-batch-stock-CN_GZ" type="number" min="0" step="1" placeholder="留空不修改" /></label>
+            <label>菲律宾仓<input id="listing-copy-batch-stock-PH" type="number" min="0" step="1" placeholder="留空不修改" /></label>
+            <button id="listing-copy-warehouse-batch-apply" type="button" class="secondary-button mini">应用到全部 SKU</button>
+            <small class="muted">只填写需要修改的仓库，留空的仓库保持原值。</small>
+          </div>
+          <div class="listing-copy-sku-scroll">
+            <table id="listing-copy-sku-table" class="listing-copy-sku-table">
+              <thead><tr><th>SKU</th><th>颜色</th><th>尺码</th><th>库存</th><th>原价</th><th>六折售价</th></tr></thead>
+              <tbody></tbody>
+            </table>
+          </div>
+        </section>
+
+        <section id="listing-copy-transaction-section" class="listing-editor-section">
+          <h3>交易信息</h3>
+          <div class="listing-transaction-grid">
+            <label id="listing-copy-stock-section">统一库存<input id="listing-copy-stock" type="number" min="0" step="1" /></label>
+            <label>重量（kg）<input id="listing-copy-weight-kg" type="number" min="0" step="0.001" /></label>
+            <label>包裹长度（cm）<input id="listing-copy-package-length-cm" type="number" min="0" step="0.1" /></label>
+            <label>包裹宽度（cm）<input id="listing-copy-package-width-cm" type="number" min="0" step="0.1" /></label>
+            <label>包裹高度（cm）<input id="listing-copy-package-height-cm" type="number" min="0" step="0.1" /></label>
+          </div>
+        </section>
+      </div>
+
+      <p id="listing-copy-save-result" class="muted listing-copy-save-result"></p>
+      <p id="listing-copy-last-run" class="listing-copy-last-run" hidden></p>
+      <div class="actions listing-editor-actions">
+        <button id="listing-copy-description-retry" type="button">重新生成描述</button>
+        <button id="listing-copy-save" type="button">保存副本</button>
+        <button id="listing-copy-create-job" type="button">生成自动化任务</button>
+      </div>
+    </dialog>
+
+    <dialog id="automation-job-detail-dialog" class="workflow-dialog automation-job-detail-dialog">
+      <div class="panel-head">
+        <div>
+          <div class="automation-job-detail-title-row">
+            <h2>自动化任务执行详情</h2>
+            <span id="automation-job-detail-live" class="automation-live-indicator"><span aria-hidden="true"></span>实时更新</span>
+          </div>
+          <p id="automation-job-detail-meta" class="muted"></p>
+        </div>
+        <button type="button" data-close-dialog="automation-job-detail-dialog" aria-label="关闭" title="关闭">×</button>
+      </div>
+      <div id="automation-job-detail-summary" class="automation-job-detail-summary"></div>
+      <section class="automation-job-detail-section" id="automation-job-detail-steps-section" hidden>
+        <h3>执行步骤（表单填充）</h3>
+        <ol id="automation-job-detail-steps" class="automation-job-steps"></ol>
+      </section>
+      <section class="automation-job-detail-section">
+        <h3>步骤结果</h3>
+        <div id="automation-job-detail-stages" class="automation-job-stages"></div>
+      </section>
+      <details class="automation-job-detail-section automation-job-detail-timeline-section">
+        <summary>执行时间线（默认收起，点开查看）</summary>
+        <ol id="automation-job-detail-timeline" class="automation-job-timeline"></ol>
+      </details>
+      <footer class="automation-manual-finish" role="group" aria-label="人工确认结果">
+        <p class="muted">人工确认这次执行的结果（可随时确认；只写审计，不改动执行器的保存证据）：</p>
+        <input id="automation-manual-note" type="text" placeholder="备注（可选，例如：在马帮看到草稿已保存）" />
+        <div class="automation-manual-finish-actions">
+          <button id="automation-manual-saved-btn" type="button">标记已完成</button>
+          <button id="automation-manual-failed-btn" type="button" class="danger">标记失败</button>
+        </div>
+      </footer>
+    </dialog>
+
+    <script src="/local-folder-batch.js?v=local-import-queue-v1"></script>
+    <script src="/app.js?v=color-quick-pick-v1&feature=desc-profile-base-detail-v2&feature=base-product-multiselect-v1&feature=description-media-v1&feature=local-folder-batch-v1&feature=local-import-queue-v1&feature=import-scoped-assets-v1&feature=product-image-upload-v2&feature=category-custom-option-v1&feature=base-product-stage-v1&feature=desc-required-spec-rows-v1&feature=field-not-editable-v1&feature=job-requeue-in-place-v1&feature=retry-no-detail-dialog-v1&feature=description-tail-insert-v1&feature=loader-retry-v1&feature=template-sale-price-editable-v1&feature=size-chart-template-label-v1&feature=size-chart-local-image-v1&feature=size-chip-drag-order-v1&feature=size-price-editable-v1&feature=copy-list-new-only-v1&feature=automation-live-steps-v3&feature=local-import-queue-v1&feature=base-product-time-all-v1&feature=jobs-sku-thumb-v1&feature=size-chart-last-image-v1&feature=watermark-redesign-v1&feature=mabang-account-list-v1&feature=worker-per-account-v1&feature=mabang-account-ui-v4&feature=import-headed-window-v1&feature=base-color-follow-images-v1&feature=page-import-worker-standby-v2&feature=store-template-duplicate-v1&feature=store-template-account-v1&feature=hide-fill-missing-batch-v1&feature=base-product-rerecognize-v1&feature=category-quick-template-values-v1&feature=github-updates-v1&feature=cross-border-mode-v1&feature=stale-select-text-fallback-v1&feature=cnsc-price-section-hide-v1&feature=color-quick-pick-v1"></script>
+  </body>
+</html>

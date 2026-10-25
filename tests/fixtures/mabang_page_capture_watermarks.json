@@ -1,0 +1,18 @@
+{
+  "source": "mabang_current_page",
+  "page": {"url": "https://www.mabangerp.com/index.php", "platform": "shopee", "country": "PH"},
+  "store_category_state": {
+    "store": {"id": "store-ph", "name": "PH 测试店铺"},
+    "category": {"id": "category-tee", "path": "男装>上衣>T恤", "id_path": ["men", "tops", "category-tee"], "is_leaf": true}
+  },
+  "category_attributes": [],
+  "sku_rows": [{"color": "black", "size": "S", "stock": 10}],
+  "transaction_information": {},
+  "promotion_options": [],
+  "watermark_catalog_loaded": true,
+  "watermark_templates": [
+    {"template_id": "wm-main", "name": "主图水印", "preview_url": "https://publish-cos.mabangerp.com/sanitized/main.png"},
+    {"template_id": "wm-product", "name": "podQ-7", "preview_url": "https://publish-cos.mabangerp.com/sanitized/product.png"}
+  ],
+  "provenance": {"watermarks": "vue:mabang-watermark-template-list"}
+}

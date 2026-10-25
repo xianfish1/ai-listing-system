@@ -1,0 +1,29 @@
+{
+  "platform": "shopee",
+  "country": "PH",
+  "marketplace_category_id": "900001",
+  "marketplace_category_path": "Baby & Kids Fashion > Tops",
+  "display_name": "Shopee PH Kids Tops",
+  "page_url": "https://www.mabangerp.com/index.php?category=900001",
+  "fields": [
+    {
+      "field_id": "age_group",
+      "label": "Age Group",
+      "type": "single_select",
+      "required": true,
+      "options": [{"value": "kids", "label": "Kids"}],
+      "default_value": "kids",
+      "automation": {"page_field_id": "age_group"}
+    },
+    {
+      "field_id": "height",
+      "label": "Suitable Height",
+      "type": "number",
+      "required": false,
+      "required_when": {"field": "age_group", "op": "eq", "value": "kids"},
+      "options": [],
+      "automation": {"page_field_id": "height"}
+    }
+  ],
+  "variation": {"required": true, "axes": ["size"]}
+}

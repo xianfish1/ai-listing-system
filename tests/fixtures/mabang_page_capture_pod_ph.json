@@ -1,0 +1,84 @@
+{
+  "source": "mabang_current_page",
+  "page": {
+    "url": "https://www.mabangerp.com/index.php",
+    "platform": "shopee",
+    "country": "PH"
+  },
+  "store_category_state": {
+    "store": {
+      "id": "2022625115",
+      "name": "POD菲律宾"
+    },
+    "category": {
+      "id": "100244",
+      "path": "男装(Men Clothes)>上衣(Tops)>T恤(T-Shirts)",
+      "id_path": ["100011", "100054", "100244"],
+      "is_leaf": true
+    }
+  },
+  "category_attributes": [
+    {
+      "field_id": "100134",
+      "label": "材料",
+      "type": "multi_select",
+      "required": true,
+      "options": [{"value": "1149", "label": "Cotton"}],
+      "selected_value": ["1149"]
+    },
+    {
+      "field_id": "100162",
+      "label": "图案",
+      "type": "multi_select",
+      "required": true,
+      "options": [{"value": "1486", "label": "Print"}],
+      "selected_value": ["1486"]
+    },
+    {
+      "field_id": "100168",
+      "label": "袖长",
+      "type": "single_select",
+      "required": true,
+      "options": [{"value": "1500", "label": "Short Sleeves"}],
+      "selected_value": "1500"
+    },
+    {
+      "field_id": "101004",
+      "label": "加大码",
+      "type": "single_select",
+      "required": true,
+      "options": [{"value": "5487", "label": "Yes"}],
+      "selected_value": "5487"
+    },
+    {
+      "field_id": "required-empty",
+      "label": "未选择必填项",
+      "type": "single_select",
+      "required": true,
+      "options": [],
+      "selected_value": ""
+    }
+  ],
+  "sku_rows": [
+    {"color": "black", "size": "S", "stock": 999, "weight_kg": "", "package_length_cm": "", "package_width_cm": "", "package_height_cm": ""},
+    {"color": "black", "size": "M", "stock": 999, "weight_kg": "", "package_length_cm": "", "package_width_cm": "", "package_height_cm": ""},
+    {"color": "black", "size": "L", "stock": 999, "weight_kg": "", "package_length_cm": "", "package_width_cm": "", "package_height_cm": ""},
+    {"color": "black", "size": "XL", "stock": 999, "weight_kg": "", "package_length_cm": "", "package_width_cm": "", "package_height_cm": ""},
+    {"color": "black", "size": "2XL", "stock": 999, "weight_kg": "", "package_length_cm": "", "package_width_cm": "", "package_height_cm": ""}
+  ],
+  "transaction_information": {
+    "stock": "",
+    "weight_kg": "",
+    "package_length_cm": "",
+    "package_width_cm": "",
+    "package_height_cm": ""
+  },
+  "promotion_options": [],
+  "provenance": {
+    "store_category": "vue:$refs.storeCategory",
+    "category_attributes": "vue:ProductAttributeInfo.attributesNew",
+    "sku_rows": "vue:vxe-table.tableData",
+    "transaction_information": "vue:$refs.transactionInformationModuleRef",
+    "promotions": "vue:$refs.transactionInformationModuleRef"
+  }
+}
