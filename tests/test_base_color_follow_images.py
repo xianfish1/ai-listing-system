@@ -210,17 +210,46 @@ def test_quick_color_pick_present_and_wired() -> None:
     assert "function addBaseColorWithName(" in script
     assert 'data-quick-color' in script
     assert "renderBaseColorQuickPick();" in script
+
+    # 「全选」：一键补齐未添加的常用色；9 色全加后按钮不渲染；批量路径只渲染一次。
+    assert "function addBaseColorsWithNames(" in script
+    assert "data-quick-color-select-all" in script
+    assert "BASE_QUICK_COLORS.map((entry) => entry.name)" in script
+    assert "addBaseColorsWithNames(BASE_QUICK_COLORS.map((entry) => entry.name))" in script
+    assert "const pending = BASE_QUICK_COLORS.filter(" in script, "9 色全加后全选按钮隐藏"
+    batch_fn = script[script.index("function addBaseColorsWithNames("):script.index("function addBaseColorWithName(")]
+    assert batch_fn.count("renderBaseVariantImageMap()") == 1, "批量添加只触发一次重渲染"
     quick_fn = script[script.index("function renderBaseColorQuickPick()"):script.index("function addBaseColorWithName(")]
     assert "disabled" in quick_fn, "已添加的颜色要置灰"
-    add_fn = script[script.index("function addBaseColorWithName("):script.index("function syncBaseColorInputs(")]
-    assert "toLowerCase()" in add_fn, "防重复比对要大小写不敏感"
+    # 防重复比对在批量函数里（addBaseColorWithName 是它的薄封装）。
+    assert "toLowerCase()" in batch_fn, "防重复比对要大小写不敏感"
 
     # 样式：色块 chip + 颜色圆点 + 置灰态。
     assert ".color-quick-chip" in styles
     assert ".color-quick-dot" in styles
     assert ".color-quick-chip:disabled" in styles
 
-    # 静态资源版本：app.js 与 styles.css 的缓存参数都带上这个 feature。
-    assert "app.js?v=color-quick-pick-v1" in html
-    assert "styles.css?v=color-quick-pick-v1" in html
+    # 静态资源版本：缓存参数存在，且本功能的 feature 链还在
+    # （不钉具体版本号——后续 bump 不该被迫改测试，09-19 起的惯例）。
+    assert "app.js?v=" in html
+    assert "styles.css?v=" in html
     assert "feature=color-quick-pick-v1" in html
+
+def test_color_dropdown_refreshes_when_product_images_change() -> None:
+    """上传/加图/移图后颜色图下拉立刻可选（2026-10-25 现场反馈：要保存重开才能选）。
+
+    三条改变「可选图片集合」的路径原来只靠 applyBaseColorFollowFromImages 的副作用
+    刷颜色图区，而它在「顺序没变/联动关」时早退——上传追加到末尾恰好不改变既有
+    颜色顺序，下拉就一直是旧选项。三处必须显式调 renderBaseVariantImageMap()。
+    """
+    script = APP.read_text(encoding="utf-8")
+
+    def _fn(header: str, end_header: str) -> str:
+        start = script.index(header)
+        return script[start: script.index(end_header, start)]
+
+    upload_fn = _fn("async function uploadBaseProductProductImages(", "// 商品维度的类目必填属性")
+    add_fn = _fn("function addBaseProductImage(", "function removeBaseProductImage(")
+    remove_fn = _fn("function removeBaseProductImage(", "// 操作员自上传商品图")
+    for label, body in (("上传", upload_fn), ("手动加图", add_fn), ("移图", remove_fn)):
+        assert "renderBaseVariantImageMap();" in body, f"{label}路径要补刷颜色图区"

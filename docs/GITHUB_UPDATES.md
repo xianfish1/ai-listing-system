@@ -66,7 +66,16 @@ GITHUB_API_URL=https://api.github.com
 
 - 优先级：环境变量 > 设置页运行时配置。
 - `GITHUB_API_URL` 默认 `https://api.github.com`；GitHub Enterprise 填 `https://<host>/api/v3`。
-- 环境变量里的 Token 是明文，只放在受控机器的 `.env`（已被忽略）或系统环境变量里，不要提交。
+- 环境变量可以写进项目根 `.env`（API、更新器与发布脚本启动时统一读取，真实环境变量优先，见 README「配置」）；`.env` 已被忽略不会提交。
+
+**分流代理（特殊网络需要）**：有的网络里 `github.com` 直连被墙必须走本地代理，而 `api.github.com` 直连可用、走共享代理出口反而被 GitHub 按 IP 拒（403）。此时在 `.env` 配：
+
+```text
+GITHUB_UPDATE_PROXY=http://127.0.0.1:7897
+GITHUB_UPDATE_DIRECT_HOSTS=api.github.com   # 默认值，可省略
+```
+
+效果：检查更新（api.github.com）直连；下载安装包（github.com / 对象存储）与发布时的 git 推送走代理。改完重启一次 API 生效。
 
 ### 1.4 验证配置
 
@@ -263,7 +272,8 @@ Get-ChildItem storage/updates/release_jobs
 | 现象 | 原因 | 处理 |
 | --- | --- | --- |
 | `401 GitHub 认证失败` | Token 无效、过期或填错 | 重新生成 Token，在设置页重填；留空保存不会清掉旧值 |
-| `403 权限不足（Token 或限流）` | Token 没有 Contents 写权限，或触到 API 限流 | 换有权限的 Token；等限流窗口过去再试 |
+| `403 权限不足（Token 或限流）` | Token 没有 Contents 写权限，或触到 API 限流 | 换有权限的 Token；等限流窗口过去再试。若配了 `GITHUB_UPDATE_PROXY`，还要确认 `api.github.com` 在 `GITHUB_UPDATE_DIRECT_HOSTS` 里直连（共享代理出口 IP 可能被 GitHub 拒） |
+| 检查更新超时 / 连不上，或推送报 `schannel`/TLS 中断 | `github.com` 直连被网络干扰 | 在 `.env` 配 `GITHUB_UPDATE_PROXY`（本地代理），见 1.3；改完重启 API |
 | `404 仓库或 Release 不存在` | 仓库名拼错、私有仓库 Token 无权、还没发过 Release | 核对仓库名与 Token 的仓库授权；先发布第一个版本 |
 | 检查到更新，「立即更新」却报没有 zip 资产 | Release 只写了说明，没传安装包 | 用 `publish_release.py` 重新发布，它会自动传 zip 与 `.sha256` |
 | `已经是最新版本`（409） | 选中的版本不比当前 `VERSION` 新 | 先点「检查更新」，确认版本号后再点「立即更新」 |

@@ -59,16 +59,18 @@ def test_existing_environment_wins(tmp_path, monkeypatch) -> None:
     assert os.environ["TEST_ENV_LOADER_PRECEDENCE"] == "from-env"
 
 
-def test_real_env_file_only_sets_port() -> None:
-    """本机 .env 约定：只放 API_PORT，绝不放 API_HOST（会锁设置页局域网开关）。"""
+def test_real_env_file_contract() -> None:
+    """本机 .env 约定：绝不放 API_HOST（会锁设置页局域网开关）；代理键存在。"""
 
     from services.api import settings
 
     assert (settings.PROJECT_ROOT / ".env").is_file()
-    text = (settings.PROJECT_ROOT / ".env").read_text(encoding="utf-8")
-    active = [
-        line.strip()
-        for line in text.splitlines()
-        if line.strip() and not line.strip().startswith("#")
-    ]
-    assert active == ["API_PORT=8788"], active
+    active = {}
+    for line in (settings.PROJECT_ROOT / ".env").read_text(encoding="utf-8").splitlines():
+        text = line.strip()
+        if text and not text.startswith("#") and "=" in text:
+            key, _, value = text.partition("=")
+            active[key.strip()] = value.strip()
+    assert "API_HOST" not in active, active.keys()
+    assert active.get("API_PORT") == "8788", active
+    assert "GITHUB_UPDATE_PROXY" in active, active.keys()

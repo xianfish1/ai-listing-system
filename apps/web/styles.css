@@ -1793,6 +1793,26 @@ td code {
   margin-right: 2px;
 }
 
+/* 「全选」：把未添加的常用色一次补齐；9 色都加上后整个按钮不渲染。 */
+.color-quick-select-all {
+  padding: 4px 12px;
+  border: 1px solid var(--indigo);
+  border-radius: 999px;
+  background: var(--indigo-soft);
+  color: var(--indigo-ink);
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 18px;
+  cursor: pointer;
+  transition: background 120ms ease, box-shadow 120ms ease;
+}
+
+.color-quick-select-all:hover,
+.color-quick-select-all:focus-visible {
+  background: #e3e6fd;
+  box-shadow: var(--shadow-sm);
+}
+
 .color-quick-chip {
   display: inline-flex;
   align-items: center;

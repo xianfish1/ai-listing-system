@@ -546,6 +546,13 @@ def _enrich_with_vision_listing(
     hints = payload.get("attribute_hints") if isinstance(payload.get("attribute_hints"), dict) else {}
     hints = {str(k): str(v) for k, v in hints.items() if str(v or "").strip()}
 
+    # 标题 Skill（Skills 管理页维护）：默认 Skill 自动生效，只影响标题部分；
+    # 热词按 Skill 的策略注入，策略为「不使用」或词库为空时都不占 prompt。
+    title_skill = storage.get_active_title_skill() if want_title else None
+    hot_words_for_title: list[str] = []
+    if title_skill and str(title_skill.get("hot_word_policy") or "").lower() != "off":
+        hot_words_for_title = storage.list_enabled_hot_words()
+
     try:
         gateway = ModelGateway(
             crypto=CredentialCrypto(settings.get_ai_credentials_master_key()),
@@ -574,6 +581,8 @@ def _enrich_with_vision_listing(
                     want_title=want_title,
                     want_description=want_description,
                     fill_attributes_into_description=fill_attributes,
+                    title_skill=title_skill,
+                    hot_words=hot_words_for_title,
                 )
             except Exception as exc:  # noqa: BLE001 - vision must never break create
                 result = None
@@ -3111,6 +3120,14 @@ class ApiHandler(BaseHTTPRequestHandler):
             self._json({"items": storage.list_description_profiles()})
             return
 
+        if path == "/api/title-skills":
+            self._json({"items": storage.list_title_skills()})
+            return
+
+        if path == "/api/hot-words":
+            self._json({"items": storage.list_hot_words()})
+            return
+
         if path == "/api/category-profiles/for-category":
             category_id = (query.get("category_id") or [""])[0].strip()
             platform = (query.get("platform") or ["shopee"])[0].strip().lower() or "shopee"
@@ -3882,6 +3899,37 @@ class ApiHandler(BaseHTTPRequestHandler):
                 self._json({"error": "Description profile not found"}, status=404)
                 return
             self._json(profile)
+            return
+
+        if path == "/api/title-skills":
+            try:
+                self._json(storage.create_title_skill(payload), status=201)
+            except ValueError as exc:
+                raise ApiRequestError(str(exc), 422) from exc
+            return
+
+        if path.startswith("/api/title-skills/") and path.endswith("/set-default"):
+            skill_id = path.strip("/").split("/")[2]
+            try:
+                skill = storage.set_default_title_skill(skill_id)
+            except ValueError as exc:
+                raise ApiRequestError(str(exc), 422) from exc
+            if not skill:
+                self._json({"error": "Title skill not found"}, status=404)
+                return
+            self._json(skill)
+            return
+
+        if path == "/api/hot-words":
+            # 支持单个 {word, tag} 或批量 {words: [...], tag}；批量按小写去重。
+            if isinstance(payload.get("words"), list):
+                result = storage.create_hot_words_batch(payload["words"], str(payload.get("tag") or ""))
+                self._json(result, status=201)
+                return
+            try:
+                self._json(storage.create_hot_word(payload), status=201)
+            except ValueError as exc:
+                raise ApiRequestError(str(exc), 422) from exc
             return
 
         if path == "/api/uploads/size-chart":
@@ -4715,6 +4763,30 @@ class ApiHandler(BaseHTTPRequestHandler):
             self._json(profile)
             return
 
+        if path.startswith("/api/title-skills/"):
+            skill_id = path.rsplit("/", 1)[-1]
+            try:
+                skill = storage.update_title_skill(skill_id, payload)
+            except ValueError as exc:
+                raise ApiRequestError(str(exc), 422) from exc
+            if not skill:
+                self._json({"error": "Title skill not found"}, status=404)
+                return
+            self._json(skill)
+            return
+
+        if path.startswith("/api/hot-words/"):
+            word_id = path.rsplit("/", 1)[-1]
+            try:
+                word = storage.update_hot_word(word_id, payload)
+            except ValueError as exc:
+                raise ApiRequestError(str(exc), 422) from exc
+            if not word:
+                self._json({"error": "Hot word not found"}, status=404)
+                return
+            self._json(word)
+            return
+
         self._json({"error": f"Unknown route: {path}"}, status=404)
 
     def _handle_delete(self) -> None:
@@ -4781,6 +4853,25 @@ class ApiHandler(BaseHTTPRequestHandler):
             result = storage.delete_description_profile(profile_id)
             if result is None:
                 self._json({"error": "Description profile not found"}, status=404)
+                return
+            self._json(result)
+            return
+        if path == "/api/hot-words":
+            self._json(storage.delete_all_hot_words())
+            return
+        if path.startswith("/api/title-skills/"):
+            skill_id = path.rsplit("/", 1)[-1]
+            result = storage.delete_title_skill(skill_id)
+            if result is None:
+                self._json({"error": "Title skill not found"}, status=404)
+                return
+            self._json(result)
+            return
+        if path.startswith("/api/hot-words/"):
+            word_id = path.rsplit("/", 1)[-1]
+            result = storage.delete_hot_word(word_id)
+            if result is None:
+                self._json({"error": "Hot word not found"}, status=404)
                 return
             self._json(result)
             return

@@ -9,7 +9,7 @@
     <link rel="preload" href="/fonts/inter-400-latin.woff2" as="font" type="font/woff2" crossorigin />
     <link rel="preload" href="/fonts/inter-500-latin.woff2" as="font" type="font/woff2" crossorigin />
     <link rel="stylesheet" href="/fonts.css?v=self-hosted-v1" />
-    <link rel="stylesheet" href="/styles.css?v=color-quick-pick-v1&feature=category-cascader-v1&feature=desc-profile-base-detail-v2&feature=base-product-multiselect-v1&feature=base-product-stage-v1&feature=local-import-queue-v1&feature=nas-import-queue-retry-v1&feature=copy-editor-errors-v1&feature=job-generation-feedback-v1&feature=fill-missing-attributes-v1&feature=multi-select-custom-value-v1&feature=copy-template-mode-cards-v1&feature=jobs-time-buckets-v1&feature=jobs-collapsed-by-default-v1&feature=ai-color-connection-v1&feature=size-chart-local-image-v1&feature=refresh-position-v1&feature=refresh-inline-v1&feature=jobs-sku-thumb-v1&feature=size-chart-last-image-v1&feature=switch-line-v1&feature=watermark-redesign-v1&feature=mabang-account-list-v1&feature=worker-per-account-v1&feature=mabang-account-ui-v4&feature=import-headed-window-v1&feature=base-color-follow-images-v1&feature=store-template-account-v1&feature=base-product-rerecognize-v1&feature=github-updates-v1&feature=category-cascader-v1" />
+    <link rel="stylesheet" href="/styles.css?v=color-quick-select-all-v1&feature=category-cascader-v1&feature=desc-profile-base-detail-v2&feature=base-product-multiselect-v1&feature=base-product-stage-v1&feature=local-import-queue-v1&feature=nas-import-queue-retry-v1&feature=copy-editor-errors-v1&feature=job-generation-feedback-v1&feature=fill-missing-attributes-v1&feature=multi-select-custom-value-v1&feature=copy-template-mode-cards-v1&feature=jobs-time-buckets-v1&feature=jobs-collapsed-by-default-v1&feature=ai-color-connection-v1&feature=size-chart-local-image-v1&feature=refresh-position-v1&feature=refresh-inline-v1&feature=jobs-sku-thumb-v1&feature=size-chart-last-image-v1&feature=switch-line-v1&feature=watermark-redesign-v1&feature=mabang-account-list-v1&feature=worker-per-account-v1&feature=mabang-account-ui-v4&feature=import-headed-window-v1&feature=base-color-follow-images-v1&feature=store-template-account-v1&feature=base-product-rerecognize-v1&feature=github-updates-v1&feature=category-cascader-v1&feature=skills-management-v1" />
   </head>
   <body>
     <div class="app">
@@ -40,6 +40,10 @@
           <button class="rail-item" data-view="plan" data-nav-key="plan" title="项目计划">
             <svg width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.5" viewBox="0 0 24 24"><path d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2m-6 9l2 2 4-4"/></svg>
             <span>计划</span>
+          </button>
+          <button class="rail-item" data-view="skills" data-nav-key="skills" title="Skills 管理">
+            <svg width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.5" viewBox="0 0 24 24"><path d="M5 3v4M3 5h4M6 17v4m-2-2h4m5-16l2.286 6.857L21 12l-5.714 2.143L13 21l-2.286-6.857L5 12l5.714-2.143L13 3z"/></svg>
+            <span>Skills</span>
           </button>
         </nav>
         <div class="rail-spacer"></div>
@@ -695,6 +699,38 @@
           </div>
           <div class="panel"><h2>执行链路</h2><div id="project-runtime-chain" class="plan-chain"></div></div>
         </section>
+
+        <section id="skills" class="view">
+          <div class="panel">
+            <div class="panel-head">
+              <div>
+                <h2>标题 Skills</h2>
+                <p class="muted">配置 AI 自动生成 Shopee 标题的规则：字数目标、补充规则、热词策略。默认 Skill 在导入和重试标题时自动套用；未配置时使用内置默认规则。</p>
+              </div>
+              <button id="add-title-skill-btn" type="button">新增 Skill</button>
+            </div>
+            <div id="title-skills-list" class="settings-connection-list"></div>
+          </div>
+          <div class="panel">
+            <div class="panel-head">
+              <div>
+                <h2>最新热词</h2>
+                <p class="muted">维护 Shopee 搜索热词词库。生成标题时按生效 Skill 的热词策略使用（在 Skill 里可切换：参考融入 / 尽量包含 / 不使用）。</p>
+              </div>
+              <span id="hot-words-stats" class="muted small"></span>
+            </div>
+            <div class="hot-words-adder">
+              <textarea id="hot-words-input" rows="3" placeholder="每行一个热词，例：&#10;oversized tee&#10;gift for mom"></textarea>
+              <div class="hot-words-adder-actions">
+                <input id="hot-words-tag" placeholder="标签（可选，如 品类/节日）" />
+                <button id="add-hot-words-btn" type="button">添加热词</button>
+                <button id="clear-hot-words-btn" type="button" class="ghost-danger">清空热词</button>
+              </div>
+            </div>
+            <div id="hot-words-list" class="hot-words-list"></div>
+          </div>
+        </section>
+
         <section id="settings" class="view settings-view">
           <div class="settings-layout">
             <nav class="settings-nav" aria-label="设置分组">
@@ -1024,6 +1060,40 @@
       <p id="description-profile-result" class="muted"></p>
       <div class="actions">
         <button id="save-description-profile-btn" type="button">保存方案</button>
+      </div>
+    </dialog>
+
+    <dialog id="title-skill-dialog" class="workflow-dialog compact-dialog">
+      <div class="panel-head"><h2>标题 Skill</h2><button type="button" data-close-dialog="title-skill-dialog" aria-label="关闭">×</button></div>
+      <p class="muted small profile-intro">Skill 决定 AI 生成 Shopee 标题的规则：字数目标、补充规则、热词策略。设为默认后，导入和重试标题都会自动套用；热词在「Skills 页 · 最新热词」里维护。</p>
+
+      <div class="profile-basic-grid">
+        <label>Skill 名称<input id="title-skill-name" autocomplete="off" placeholder="例：Shopee 标题 · 主推款" /></label>
+        <label>热词策略
+          <select id="title-skill-hot-word-policy">
+            <option value="reference">参考融入（相关才用）</option>
+            <option value="prefer">尽量包含（自然前提下多用）</option>
+            <option value="off">不使用热词</option>
+          </select>
+        </label>
+        <label>标题最少字数<input id="title-skill-min-chars" type="number" min="0" max="120" value="40" /></label>
+        <label>标题最多字数<input id="title-skill-max-chars" type="number" min="10" max="120" value="100" /></label>
+      </div>
+
+      <div class="profile-field">
+        <div class="profile-block-title">补充规则（每行一条，注入标题生成提示）</div>
+        <textarea id="title-skill-instructions" rows="6" placeholder="例：&#10;标题开头优先放品类词（如 Men T-Shirt）。&#10;包含适用场景词（Daily Wear / Party）。&#10;避免堆砌与商品无关的修饰词。"></textarea>
+        <small class="field-hint">写给 AI 的额外标题规则，中文写也可以。留空＝只用字数目标与热词策略。</small>
+      </div>
+
+      <div class="form-grid compact-form">
+        <label class="toggle-field wide"><input id="title-skill-enabled" type="checkbox" checked />启用</label>
+        <label class="toggle-field wide"><input id="title-skill-default" type="checkbox" />设为默认（生成标题时自动套用）</label>
+      </div>
+
+      <p id="title-skill-result" class="muted"></p>
+      <div class="actions">
+        <button id="save-title-skill-btn" type="button">保存 Skill</button>
       </div>
     </dialog>
 
@@ -1434,6 +1504,6 @@
     </dialog>
 
     <script src="/local-folder-batch.js?v=local-import-queue-v1"></script>
-    <script src="/app.js?v=color-quick-pick-v1&feature=desc-profile-base-detail-v2&feature=base-product-multiselect-v1&feature=description-media-v1&feature=local-folder-batch-v1&feature=local-import-queue-v1&feature=import-scoped-assets-v1&feature=product-image-upload-v2&feature=category-custom-option-v1&feature=base-product-stage-v1&feature=desc-required-spec-rows-v1&feature=field-not-editable-v1&feature=job-requeue-in-place-v1&feature=retry-no-detail-dialog-v1&feature=description-tail-insert-v1&feature=loader-retry-v1&feature=template-sale-price-editable-v1&feature=size-chart-template-label-v1&feature=size-chart-local-image-v1&feature=size-chip-drag-order-v1&feature=size-price-editable-v1&feature=copy-list-new-only-v1&feature=automation-live-steps-v3&feature=local-import-queue-v1&feature=base-product-time-all-v1&feature=jobs-sku-thumb-v1&feature=size-chart-last-image-v1&feature=watermark-redesign-v1&feature=mabang-account-list-v1&feature=worker-per-account-v1&feature=mabang-account-ui-v4&feature=import-headed-window-v1&feature=base-color-follow-images-v1&feature=page-import-worker-standby-v2&feature=store-template-duplicate-v1&feature=store-template-account-v1&feature=hide-fill-missing-batch-v1&feature=base-product-rerecognize-v1&feature=category-quick-template-values-v1&feature=github-updates-v1&feature=cross-border-mode-v1&feature=stale-select-text-fallback-v1&feature=cnsc-price-section-hide-v1&feature=color-quick-pick-v1"></script>
+    <script src="/app.js?v=color-dropdown-live-refresh-v1&feature=desc-profile-base-detail-v2&feature=base-product-multiselect-v1&feature=description-media-v1&feature=local-folder-batch-v1&feature=local-import-queue-v1&feature=import-scoped-assets-v1&feature=product-image-upload-v2&feature=category-custom-option-v1&feature=base-product-stage-v1&feature=desc-required-spec-rows-v1&feature=field-not-editable-v1&feature=job-requeue-in-place-v1&feature=retry-no-detail-dialog-v1&feature=description-tail-insert-v1&feature=loader-retry-v1&feature=template-sale-price-editable-v1&feature=size-chart-template-label-v1&feature=size-chart-local-image-v1&feature=size-chip-drag-order-v1&feature=size-price-editable-v1&feature=copy-list-new-only-v1&feature=automation-live-steps-v3&feature=local-import-queue-v1&feature=base-product-time-all-v1&feature=jobs-sku-thumb-v1&feature=size-chart-last-image-v1&feature=watermark-redesign-v1&feature=mabang-account-list-v1&feature=worker-per-account-v1&feature=mabang-account-ui-v4&feature=import-headed-window-v1&feature=base-color-follow-images-v1&feature=page-import-worker-standby-v2&feature=store-template-duplicate-v1&feature=store-template-account-v1&feature=hide-fill-missing-batch-v1&feature=base-product-rerecognize-v1&feature=category-quick-template-values-v1&feature=github-updates-v1&feature=cross-border-mode-v1&feature=stale-select-text-fallback-v1&feature=cnsc-price-section-hide-v1&feature=color-quick-pick-v1&feature=color-quick-select-all-v1&feature=color-dropdown-live-refresh-v1&feature=skills-management-v1"></script>
   </body>
 </html>

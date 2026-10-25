@@ -29,6 +29,8 @@ COLLECTIONS = [
     "ai_outputs",
     "ai_model_connections",
     "description_generation_profiles",
+    "title_skills",
+    "hot_words",
     "store_template_versions",
     "store_promotion_activities",
     "store_watermark_templates",

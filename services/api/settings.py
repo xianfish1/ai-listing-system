@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import sys
 import threading
 from pathlib import Path
 
@@ -47,7 +48,10 @@ def load_env_file(path: Path | None = None) -> dict[str, str]:
     return loaded
 
 
-load_env_file()
+if "pytest" not in sys.modules:
+    # 测试进程不加载本机 .env：否则本机配置（如 GITHUB_UPDATE_PROXY）会改变
+    # 测试里 git/HTTP 的行为断言。测试要用 .env 语义时显式调 load_env_file(path)。
+    load_env_file()
 
 
 def _path_from_env(name: str, default: str) -> Path:

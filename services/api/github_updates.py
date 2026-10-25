@@ -454,10 +454,52 @@ class _CrossHostAuthStripRedirectHandler(urllib.request.HTTPRedirectHandler):
 _HTTP_OPENER: Any = None
 
 
+def _github_proxy_settings() -> tuple[str, tuple[str, ...]]:
+    """读 GITHUB_UPDATE_PROXY / GITHUB_UPDATE_DIRECT_HOSTS，返回 (代理, 直连主机)。
+
+    典型分流场景（见 docs/GITHUB_UPDATES.md 1.3）：api.github.com 直连可用、
+    走共享代理反而被 GitHub 按 IP 拒（403）；而 github.com / Release 资产的
+    对象存储直连被墙、必须走本地代理。proxy_url 为空时维持系统默认行为。
+    """
+
+    proxy_url = (os.getenv("GITHUB_UPDATE_PROXY") or "").strip()
+    raw_hosts = (os.getenv("GITHUB_UPDATE_DIRECT_HOSTS") or "api.github.com").strip()
+    direct_hosts = tuple(host.strip().lower() for host in raw_hosts.split(",") if host.strip())
+    return proxy_url, direct_hosts
+
+
+class _SplitProxyHandler(urllib.request.ProxyHandler):
+    """http/https 统一走指定代理；direct_hosts 里的主机放回直连。
+
+    ProxyHandler 的机制是 proxy_open 里 set_proxy 把请求改写到代理地址再放回
+    处理器链；返回 None 且不改写即等于直连（与 proxy_bypass 的短路一致）。
+    """
+
+    def __init__(self, proxy_url: str, direct_hosts: tuple[str, ...]) -> None:
+        super().__init__({"http": proxy_url, "https": proxy_url})
+        self._direct_hosts = {host.lower() for host in direct_hosts}
+
+    def proxy_open(self, req, proxy, type):  # noqa: ANN001, A002 - urllib 回调签名
+        try:
+            host = (urllib.parse.urlsplit(req.full_url).hostname or "").lower()
+        except ValueError:
+            host = ""
+        if host and host in self._direct_hosts:
+            return None
+        return super().proxy_open(req, proxy, type)
+
+
 def _http_opener() -> Any:
     global _HTTP_OPENER
     if _HTTP_OPENER is None:
-        _HTTP_OPENER = urllib.request.build_opener(_CrossHostAuthStripRedirectHandler())
+        proxy_url, direct_hosts = _github_proxy_settings()
+        if proxy_url:
+            _HTTP_OPENER = urllib.request.build_opener(
+                _SplitProxyHandler(proxy_url, direct_hosts),
+                _CrossHostAuthStripRedirectHandler(),
+            )
+        else:
+            _HTTP_OPENER = urllib.request.build_opener(_CrossHostAuthStripRedirectHandler())
     return _HTTP_OPENER
 
 
@@ -1872,11 +1914,15 @@ def _push_with_token(
         env["GIT_CONFIG_COUNT"] = "1"
         env["GIT_CONFIG_KEY_0"] = "http.extraheader"
         env["GIT_CONFIG_VALUE_0"] = f"Authorization: basic {credential}"
+    # github.com 直连可能被墙：与 HTTP 客户端共用 GITHUB_UPDATE_PROXY 的分流约定，
+    # 推送也走同一代理（-c 只作用于本次命令，不污染仓库配置）。
+    proxy_url = (os.getenv("GITHUB_UPDATE_PROXY") or "").strip()
+    proxy_args: list[Any] = ["-c", f"http.proxy={proxy_url}"] if proxy_url else []
     _log(log, f"推送分支 {branch} 到 {remote}")
-    _run_git(["push", remote, branch], cwd=root, env=env, timeout=300.0)
+    _run_git([*proxy_args, "push", remote, branch], cwd=root, env=env, timeout=300.0)
     if tag:
         _log(log, f"推送标签 {tag} 到 {remote}")
-        _run_git(["push", remote, tag], cwd=root, env=env, timeout=300.0)
+        _run_git([*proxy_args, "push", remote, tag], cwd=root, env=env, timeout=300.0)
 
 
 def _run_release_tests(root: Path, *, log: Callable[[str], None] | None = None) -> None:

@@ -375,6 +375,8 @@ def _empty_store() -> dict[str, list[dict[str, Any]]]:
         "ai_outputs": [],
         "ai_model_connections": [],
         "description_generation_profiles": [],
+        "title_skills": [],
+        "hot_words": [],
         "store_template_versions": [],
         "store_promotion_activities": [],
         "store_watermark_templates": [],
@@ -1932,6 +1934,251 @@ def delete_description_profile(profile_id: str) -> dict[str, Any] | None:
             profiles[0]["is_default"] = True
         save(data)
         return {"id": profile_id, "deleted": True}
+
+
+# ---------------------------------------------------------------------------
+# 标题 Skill（Shopee 标题生成配置）与热词词库
+# ---------------------------------------------------------------------------
+
+# 与 vision_listing.TITLE_MAX_CHARS 一致：Shopee 标题的硬上限，Skill 只能更严。
+TITLE_SKILL_ABSOLUTE_MAX_CHARS = 120
+TITLE_SKILL_HOT_WORD_POLICIES = ("off", "reference", "prefer")
+
+_TITLE_SKILL_FIELDS = (
+    "name",
+    "enabled",
+    "is_default",
+    "instructions",
+    "title_min_chars",
+    "title_max_chars",
+    "hot_word_policy",
+)
+
+
+def _normalize_title_skill(item: dict[str, Any]) -> dict[str, Any]:
+    """按白名单归一并校验一个标题 Skill（create 前补默认值、update 前先合并原值）。"""
+    name = str(item.get("name") or "").strip()
+    if not name:
+        raise ValueError("标题 Skill 必须有名称")
+    try:
+        min_chars = int(item.get("title_min_chars", 40))
+        max_chars = int(item.get("title_max_chars", 100))
+    except (TypeError, ValueError):
+        raise ValueError("标题字数必须是数字") from None
+    if not 0 <= min_chars <= TITLE_SKILL_ABSOLUTE_MAX_CHARS:
+        raise ValueError(f"标题最少字数需在 0–{TITLE_SKILL_ABSOLUTE_MAX_CHARS} 之间")
+    if not 10 <= max_chars <= TITLE_SKILL_ABSOLUTE_MAX_CHARS:
+        raise ValueError(f"标题最多字数需在 10–{TITLE_SKILL_ABSOLUTE_MAX_CHARS} 之间")
+    if min_chars > max_chars:
+        raise ValueError("标题最少字数不能大于最多字数")
+    policy = str(item.get("hot_word_policy") or "reference").strip().lower()
+    if policy not in TITLE_SKILL_HOT_WORD_POLICIES:
+        raise ValueError("热词策略只能是不使用（off）、参考融入（reference）或尽量包含（prefer）")
+    return {
+        "name": name,
+        "enabled": bool(item.get("enabled", True)),
+        "is_default": bool(item.get("is_default")),
+        "instructions": str(item.get("instructions") or "").strip(),
+        "title_min_chars": min_chars,
+        "title_max_chars": max_chars,
+        "hot_word_policy": policy,
+    }
+
+
+def list_title_skills() -> list[dict[str, Any]]:
+    return [deepcopy(item) for item in load_store().get("title_skills", [])]
+
+
+def get_title_skill(skill_id: str) -> dict[str, Any] | None:
+    item = next((row for row in load_store().get("title_skills", []) if row.get("id") == skill_id), None)
+    return deepcopy(item) if item else None
+
+
+def get_active_title_skill() -> dict[str, Any] | None:
+    """生成标题时实际生效的 Skill：默认且启用的优先，其次首个启用项，没有则 None
+    （走内置 prompt，行为与没有 Skill 功能时完全一致）。"""
+    rows = load_store().get("title_skills", [])
+    item = next((row for row in rows if row.get("is_default") and row.get("enabled", True)), None)
+    if item is None:
+        item = next((row for row in rows if row.get("enabled", True)), None)
+    return deepcopy(item) if item else None
+
+
+def create_title_skill(payload: dict[str, Any]) -> dict[str, Any]:
+    normalized = _normalize_title_skill({key: payload.get(key) for key in _TITLE_SKILL_FIELDS})
+    now = utc_now()
+    item = {
+        **normalized,
+        "id": str(uuid.uuid4()),
+        "version": 1,
+        "created_at": now,
+        "updated_at": now,
+    }
+    with locked_store() as (data, save):
+        skills = data.setdefault("title_skills", [])
+        # 第一个 Skill 自动成为默认：建完即生效，操作员不用再点一次「设为默认」。
+        if item["is_default"] or not any(row.get("is_default") for row in skills):
+            for row in skills:
+                row["is_default"] = False
+            item["is_default"] = True
+        skills.append(item)
+        save(data)
+    return deepcopy(item)
+
+
+def update_title_skill(skill_id: str, payload: dict[str, Any]) -> dict[str, Any] | None:
+    with locked_store() as (data, save):
+        item = next((row for row in data.get("title_skills", []) if row.get("id") == skill_id), None)
+        if not item:
+            return None
+        merged = {**item, **{key: payload[key] for key in _TITLE_SKILL_FIELDS if key in payload}}
+        normalized = _normalize_title_skill(merged)
+        item.update(normalized)
+        if item["is_default"]:
+            for row in data.get("title_skills", []):
+                if row is not item:
+                    row["is_default"] = False
+        # 保证「列表非空时恰有一个默认」：取消默认且没有别的默认项时维持原默认。
+        if not any(row.get("is_default") for row in data.get("title_skills", [])):
+            item["is_default"] = True
+        item["version"] = int(item.get("version") or 1) + 1
+        item["updated_at"] = utc_now()
+        save(data)
+        return deepcopy(item)
+
+
+def set_default_title_skill(skill_id: str) -> dict[str, Any] | None:
+    with locked_store() as (data, save):
+        selected = next((row for row in data.get("title_skills", []) if row.get("id") == skill_id), None)
+        if not selected:
+            return None
+        if not selected.get("enabled", True):
+            raise ValueError("停用的标题 Skill 不能设为默认")
+        for row in data.get("title_skills", []):
+            row["is_default"] = row is selected
+        selected["updated_at"] = utc_now()
+        save(data)
+        return deepcopy(selected)
+
+
+def delete_title_skill(skill_id: str) -> dict[str, Any] | None:
+    skill_id = str(skill_id or "").strip()
+    if not skill_id:
+        return None
+    with locked_store() as (data, save):
+        skills = data.get("title_skills", [])
+        skill = next((row for row in skills if row.get("id") == skill_id), None)
+        if not skill:
+            return None
+        was_default = bool(skill.get("is_default"))
+        skills.remove(skill)
+        if was_default and skills:
+            heir = next((row for row in skills if row.get("enabled", True)), None) or skills[0]
+            heir["is_default"] = True
+        save(data)
+        return {"id": skill_id, "deleted": True}
+
+
+def _normalize_hot_word(item: dict[str, Any]) -> dict[str, Any]:
+    word = str(item.get("word") or "").strip()
+    if not word:
+        raise ValueError("热词不能为空")
+    if len(word) > 80:
+        raise ValueError("单个热词最多 80 个字符")
+    return {
+        "word": word,
+        "tag": str(item.get("tag") or "").strip()[:40],
+        "enabled": bool(item.get("enabled", True)),
+    }
+
+
+def list_hot_words() -> list[dict[str, Any]]:
+    return [deepcopy(item) for item in load_store().get("hot_words", [])]
+
+
+def list_enabled_hot_words() -> list[str]:
+    """按创建顺序返回启用的热词文本，供标题 prompt 注入。"""
+    return [
+        str(row.get("word") or "").strip()
+        for row in load_store().get("hot_words", [])
+        if row.get("enabled", True) and str(row.get("word") or "").strip()
+    ]
+
+
+def create_hot_word(payload: dict[str, Any]) -> dict[str, Any]:
+    normalized = _normalize_hot_word(payload)
+    with locked_store() as (data, save):
+        words = data.setdefault("hot_words", [])
+        if any(str(row.get("word") or "").strip().lower() == normalized["word"].lower() for row in words):
+            raise ValueError(f"热词已存在：{normalized['word']}")
+        item = {"id": str(uuid.uuid4()), **normalized, "created_at": utc_now()}
+        words.append(item)
+        save(data)
+        return deepcopy(item)
+
+
+def create_hot_words_batch(words: list[Any], tag: str = "") -> dict[str, int]:
+    """批量添加热词：空行跳过、按小写去重（含与库存重复），返回添加/跳过数量。"""
+    with locked_store() as (data, save):
+        rows = data.setdefault("hot_words", [])
+        existing = {str(row.get("word") or "").strip().lower() for row in rows}
+        normalized_tag = str(tag or "").strip()[:40]
+        total = 0
+        created = 0
+        now = utc_now()
+        for raw in words if isinstance(words, list) else []:
+            total += 1
+            word = str(raw or "").strip()
+            key = word.lower()
+            if not word or len(word) > 80 or key in existing:
+                continue
+            existing.add(key)
+            rows.append({"id": str(uuid.uuid4()), "word": word, "tag": normalized_tag, "enabled": True, "created_at": now})
+            created += 1
+        if created:
+            save(data)
+        return {"created": created, "skipped": total - created}
+
+
+def update_hot_word(word_id: str, payload: dict[str, Any]) -> dict[str, Any] | None:
+    with locked_store() as (data, save):
+        item = next((row for row in data.get("hot_words", []) if row.get("id") == word_id), None)
+        if not item:
+            return None
+        merged = {
+            "word": payload.get("word", item.get("word")),
+            "tag": payload.get("tag", item.get("tag")),
+            "enabled": payload.get("enabled", item.get("enabled", True)),
+        }
+        normalized = _normalize_hot_word(merged)
+        if normalized["word"].lower() != str(item.get("word") or "").strip().lower():
+            if any(
+                row is not item and str(row.get("word") or "").strip().lower() == normalized["word"].lower()
+                for row in data.get("hot_words", [])
+            ):
+                raise ValueError(f"热词已存在：{normalized['word']}")
+        item.update(normalized)
+        save(data)
+        return deepcopy(item)
+
+
+def delete_hot_word(word_id: str) -> dict[str, Any] | None:
+    with locked_store() as (data, save):
+        rows = data.get("hot_words", [])
+        item = next((row for row in rows if row.get("id") == word_id), None)
+        if not item:
+            return None
+        rows.remove(item)
+        save(data)
+        return {"id": word_id, "deleted": True}
+
+
+def delete_all_hot_words() -> dict[str, Any]:
+    with locked_store() as (data, save):
+        removed = len(data.get("hot_words", []))
+        data["hot_words"] = []
+        save(data)
+        return {"deleted": removed}
 
 
 def list_store_templates(account_id: str = "") -> list[dict[str, Any]]:

@@ -4869,20 +4869,37 @@ function renderBaseColorQuickPick() {
   const existing = new Set((state.editingBaseColors || [])
     .map((color) => String(color || "").trim().toLowerCase())
     .filter(Boolean));
-  target.innerHTML = `<span class="color-quick-pick-label muted">常用颜色：</span>` + BASE_QUICK_COLORS.map(({ name, swatch }) => {
+  // 9 个常用色都已在列表里时「全选」没有事可做，跟着隐藏。
+  const pending = BASE_QUICK_COLORS.filter(({ name }) => !existing.has(name.toLowerCase()));
+  const selectAll = pending.length
+    ? `<button type="button" class="color-quick-select-all" data-quick-color-select-all title="一键添加全部 ${pending.length} 个未添加的常用颜色">全选</button>`
+    : "";
+  target.innerHTML = `<span class="color-quick-pick-label muted">常用颜色：</span>${selectAll}` + BASE_QUICK_COLORS.map(({ name, swatch }) => {
     const added = existing.has(name.toLowerCase());
     return `<button type="button" class="color-quick-chip${added ? " is-added" : ""}" data-quick-color="${escapeHtml(name)}"${added ? " disabled" : ""} title="${added ? `${escapeHtml(name)} 已添加` : `添加 ${escapeHtml(name)}`}"><span class="color-quick-dot" style="background:${swatch}"></span><span class="color-quick-name">${escapeHtml(name)}</span>${added ? '<span class="color-quick-check" aria-hidden="true">✓</span>' : ""}</button>`;
   }).join("");
 }
 
-function addBaseColorWithName(name) {
+function addBaseColorsWithNames(names) {
   syncBaseColorInputs();
-  const color = String(name || "").trim();
-  if (!color) return;
-  if ((state.editingBaseColors || []).some((item) => String(item || "").trim().toLowerCase() === color.toLowerCase())) return;
-  state.editingBaseColors.push(color);
+  const existing = new Set((state.editingBaseColors || [])
+    .map((color) => String(color || "").trim().toLowerCase())
+    .filter(Boolean));
+  let addedCount = 0;
+  for (const name of names || []) {
+    const color = String(name || "").trim();
+    if (!color || existing.has(color.toLowerCase())) continue;
+    existing.add(color.toLowerCase());
+    state.editingBaseColors.push(color);
+    addedCount += 1;
+  }
+  if (!addedCount) return;
   renderBaseVariantImageMap();
   renderBasePriceColors();
+}
+
+function addBaseColorWithName(name) {
+  addBaseColorsWithNames([name]);
 }
 
 function syncBaseColorInputs() {
@@ -5274,6 +5291,8 @@ function addBaseProductImage(fileName) {
   renderBaseImageOrder();
   renderBaseImagePicker();
   applyBaseColorFollowFromImages();
+  // 可选图片集合变了，颜色图下拉同步（联动早退时也要刷）。
+  renderBaseVariantImageMap();
 }
 
 function removeBaseProductImage(index) {
@@ -5283,6 +5302,8 @@ function removeBaseProductImage(index) {
   renderBaseImagePicker();
   // 被移掉的可能正好是某个颜色的颜色图：那张颜色就变成「未匹配」，排到最后。
   applyBaseColorFollowFromImages();
+  // 可选图片集合变了，颜色图下拉同步（联动早退时也要刷）。
+  renderBaseVariantImageMap();
 }
 
 // 操作员自上传商品图：文件登记成该商品的素材（origin=manual_upload），并追加到
@@ -5333,6 +5354,9 @@ async function uploadBaseProductProductImages(files) {
   renderBaseImageOrder();
   renderBaseImagePicker();
   applyBaseColorFollowFromImages();
+  // 新图要立刻出现在颜色图下拉里：联动函数在「顺序没变/开关关」时会早退，
+  // 不刷颜色图区，上传的图就得等保存重开才能选（现场反馈的坑）。
+  renderBaseVariantImageMap();
   if (!result) return;
   const parts = [];
   if (uploaded.length) parts.push(`已上传 ${uploaded.length} 张并加到产品图末尾：${uploaded.map((item) => item.name).join("、")}`);
@@ -10770,6 +10794,7 @@ const VIEW_TITLES = {
   automation: "自动化",
   "file-management": "文件管理",
   plan: "项目计划",
+  skills: "Skills 管理",
   settings: "设置",
 };
 
@@ -11239,6 +11264,7 @@ const VIEW_LOADERS = {
   "automation": () => [loadAutomationJobs(), loadStoreListingCopies()],
   "file-management": () => [loadAssets()],
   "plan": () => [loadProjectPlan()],
+  "skills": () => [loadTitleSkills(), loadHotWords()],
   // 版本更新状态只在设置页用到；基础 loader 的数组字面量被
   // tests/test_lan_access_ui.py 原样断言，所以保留后再 concat 追加。
   "settings": () => [loadRuntimeSettings(), loadNetworkSettings()].concat(loadUpdateStatus()),
@@ -11254,6 +11280,158 @@ function refreshDataForView(id) {
       console.warn(`[view ${id}] ${failed.length} loader(s) failed`, failed.map((r) => r.reason?.message));
     }
   });
+}
+
+// ============================================================
+// Skills 管理（标题 Skill + 最新热词）
+// 标题 Skill 配置 AI 生成 Shopee 标题的规则（字数目标/补充规则/热词策略），
+// 默认 Skill 在导入与重试标题时由后端自动套用；热词是全局词库，按生效
+// Skill 的热词策略注入标题 prompt（参考融入 / 尽量包含 / 不使用）。
+// ============================================================
+
+const HOT_WORD_POLICY_LABELS = { reference: "热词:参考融入", prefer: "热词:尽量包含", off: "热词:不使用" };
+let editingTitleSkillId = "";
+
+async function loadTitleSkills() {
+  const data = await api("/api/title-skills");
+  state.titleSkills = data.items || [];
+  renderTitleSkills();
+}
+
+async function loadHotWords() {
+  const data = await api("/api/hot-words");
+  state.hotWords = data.items || [];
+  renderHotWords();
+}
+
+function renderTitleSkills() {
+  const list = $("title-skills-list");
+  if (!list) return;
+  const items = state.titleSkills || [];
+  list.innerHTML = items.length ? items.map((item) => {
+    const policy = HOT_WORD_POLICY_LABELS[item.hot_word_policy] || HOT_WORD_POLICY_LABELS.reference;
+    const summary = `${item.title_min_chars ?? 40}–${item.title_max_chars ?? 100} 字 · ${policy}${item.instructions ? " · 有补充规则" : ""}`;
+    return `
+    <div class="settings-connection-row">
+      <div><strong>${escapeHtml(item.name || "未命名 Skill")}</strong><span>${escapeHtml(summary)}</span></div>
+      <div class="settings-connection-actions"><span class="status ${item.is_default ? "ready" : ""}">${item.is_default ? "默认 Skill" : item.enabled === false ? "已停用" : "可用"}</span><button type="button" data-edit-title-skill="${escapeHtml(item.id || "")}">编辑</button>${item.is_default ? "" : `<button type="button" data-default-title-skill="${escapeHtml(item.id || "")}">设为默认</button>`}<button type="button" data-delete-title-skill="${escapeHtml(item.id || "")}">删除</button></div>
+    </div>`;
+  }).join("") : '<p class="muted">暂无标题 Skill。AI 生成标题目前使用内置默认规则（40–100 字、关键词优先）。点「新增 Skill」配置字数目标、补充规则与热词策略。</p>';
+}
+
+function renderHotWords() {
+  const list = $("hot-words-list");
+  if (!list) return;
+  const items = state.hotWords || [];
+  const enabledCount = items.filter((item) => item.enabled !== false).length;
+  const stats = $("hot-words-stats");
+  if (stats) stats.textContent = items.length ? `共 ${items.length} 个 · 启用 ${enabledCount} 个` : "";
+  list.innerHTML = items.length ? items.map((item) => `
+    <div class="hot-words-row${item.enabled === false ? " is-disabled" : ""}">
+      <label class="toggle-field"><input type="checkbox" data-toggle-hot-word="${escapeHtml(item.id || "")}"${item.enabled === false ? "" : " checked"} /><span>${escapeHtml(item.word || "")}</span></label>
+      <span class="hot-words-tag">${escapeHtml(item.tag || "")}</span>
+      <button type="button" data-delete-hot-word="${escapeHtml(item.id || "")}">删除</button>
+    </div>`).join("") : '<p class="muted">暂无热词。在上方输入框每行一个批量添加；生成标题时按生效 Skill 的策略使用。</p>';
+}
+
+function openTitleSkillDialog() {
+  editingTitleSkillId = "";
+  const dialog = $("title-skill-dialog");
+  if (!dialog) return;
+  $("title-skill-name").value = "";
+  $("title-skill-hot-word-policy").value = "reference";
+  $("title-skill-min-chars").value = "40";
+  $("title-skill-max-chars").value = "100";
+  $("title-skill-instructions").value = "";
+  $("title-skill-enabled").checked = true;
+  // 第一个 Skill 建完就能生效：后端也会把首个 Skill 自动设为默认，这里同步勾上。
+  $("title-skill-default").checked = !(state.titleSkills || []).length;
+  $("title-skill-result").textContent = "";
+  dialog.showModal();
+}
+
+function openTitleSkillEditor(skillId) {
+  const skill = (state.titleSkills || []).find((item) => item.id === skillId);
+  const dialog = $("title-skill-dialog");
+  if (!skill || !dialog) return;
+  editingTitleSkillId = skill.id;
+  $("title-skill-name").value = skill.name || "";
+  $("title-skill-hot-word-policy").value = skill.hot_word_policy || "reference";
+  $("title-skill-min-chars").value = String(skill.title_min_chars ?? 40);
+  $("title-skill-max-chars").value = String(skill.title_max_chars ?? 100);
+  $("title-skill-instructions").value = skill.instructions || "";
+  $("title-skill-enabled").checked = skill.enabled !== false;
+  $("title-skill-default").checked = Boolean(skill.is_default);
+  $("title-skill-result").textContent = "";
+  dialog.showModal();
+}
+
+function errorText(error) {
+  return typeof error === "string" ? error : error?.message || String(error);
+}
+
+async function saveTitleSkill() {
+  const name = ($("title-skill-name")?.value || "").trim();
+  const resultEl = $("title-skill-result");
+  if (!name) {
+    if (resultEl) resultEl.textContent = "请填写 Skill 名称。";
+    return;
+  }
+  const body = JSON.stringify({
+    name,
+    enabled: $("title-skill-enabled")?.checked !== false,
+    is_default: Boolean($("title-skill-default")?.checked),
+    hot_word_policy: $("title-skill-hot-word-policy")?.value || "reference",
+    title_min_chars: Number($("title-skill-min-chars")?.value || 40),
+    title_max_chars: Number($("title-skill-max-chars")?.value || 100),
+    instructions: ($("title-skill-instructions")?.value || "").trim(),
+  });
+  try {
+    if (editingTitleSkillId) {
+      await api(`/api/title-skills/${encodeURIComponent(editingTitleSkillId)}`, { method: "PUT", body });
+    } else {
+      await api("/api/title-skills", { method: "POST", body });
+    }
+  } catch (error) {
+    if (resultEl) resultEl.textContent = errorText(error);
+    return;
+  }
+  $("title-skill-dialog")?.close();
+  await loadTitleSkills();
+  showOperationFeedback("标题 Skill 已保存", "success");
+}
+
+async function setDefaultTitleSkill(skillId) {
+  await api(`/api/title-skills/${encodeURIComponent(skillId)}/set-default`, { method: "POST", body: "{}" });
+  await loadTitleSkills();
+  showOperationFeedback("已设为默认标题 Skill", "success");
+}
+
+async function addHotWords() {
+  const raw = ($("hot-words-input")?.value || "").trim();
+  const words = raw.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
+  if (!words.length) {
+    showOperationFeedback("请先在输入框里填写热词（每行一个）", "error");
+    return;
+  }
+  const tag = ($("hot-words-tag")?.value || "").trim();
+  const result = await api("/api/hot-words", { method: "POST", body: JSON.stringify({ words, tag }) });
+  if ($("hot-words-input")) $("hot-words-input").value = "";
+  await loadHotWords();
+  const skipped = result.skipped ? `，跳过 ${result.skipped} 个（重复或为空）` : "";
+  showOperationFeedback(`已添加 ${result.created || 0} 个热词${skipped}`, "success");
+}
+
+async function toggleHotWord(wordId, enabled) {
+  await api(`/api/hot-words/${encodeURIComponent(wordId)}`, { method: "PUT", body: JSON.stringify({ enabled }) });
+  await loadHotWords();
+}
+
+async function clearHotWords() {
+  if (!window.confirm("确认清空全部热词？此操作不可恢复。")) return;
+  await api("/api/hot-words", { method: "DELETE" });
+  await loadHotWords();
+  showOperationFeedback("热词已清空", "success");
 }
 
 // --- Automation live-polling (3s while on the automation view) ---
@@ -11783,6 +11961,7 @@ document.addEventListener("click", async (event) => {
   if (target.id === "add-base-color-btn") addBaseColor();
   const quickColorChip = target.closest("[data-quick-color]");
   if (quickColorChip) addBaseColorWithName(quickColorChip.dataset.quickColor || "");
+  if (target.closest("[data-quick-color-select-all]")) addBaseColorsWithNames(BASE_QUICK_COLORS.map((entry) => entry.name));
   if (target.id === "save-base-image-order-btn") saveBaseImageOrder();
   if (target.id === "close-base-image-editor-btn" || target.id === "close-base-maintenance-btn") closeBaseImageEditor();
   if (target.id === "base-maintenance-rollback-btn") await rollbackBaseProduct(state.editingBaseProductId || state.selectedBaseProductId);

@@ -341,6 +341,46 @@ Rules:
   the description brief; don't fabricate specifics."""
 
 
+def build_system_prompt(
+    title_skill: dict[str, Any] | None = None,
+    hot_words: list[str] | None = None,
+) -> str:
+    """标题 Skill 注入点：有 Skill 时在基础 prompt 后追加补充段（标题字数目标、
+    操作员补充规则、热词使用策略），没有 Skill 则原样返回基础 prompt——导入与
+    重试的行为在「未配置 Skill」时与以前完全一致。"""
+    if not title_skill:
+        return _SYSTEM_PROMPT
+    min_chars = int(title_skill.get("title_min_chars") or 40)
+    max_chars = int(title_skill.get("title_max_chars") or 100)
+    lines: list[str] = [
+        'Title skill supplement (applies to the "title" field only) — these rules '
+        "override the title length guidance above:",
+        f"- Title length target: {min_chars}-{max_chars} characters.",
+    ]
+    instructions = str(title_skill.get("instructions") or "").strip()
+    if instructions:
+        for raw in instructions.splitlines():
+            line = raw.strip()
+            if line:
+                lines.append(f"- {line}")
+    policy = str(title_skill.get("hot_word_policy") or "reference").strip().lower()
+    words = [str(word or "").strip() for word in (hot_words or []) if str(word or "").strip()]
+    if policy != "off" and words:
+        joined = ", ".join(words)
+        if policy == "prefer":
+            lines.append(
+                f"- Latest trending search keywords: {joined}. Prefer to include as many of "
+                "these as genuinely fit this product at natural positions; never force an "
+                "unrelated one."
+            )
+        else:
+            lines.append(
+                f"- Latest trending search keywords: {joined}. Weave in ONLY the ones that "
+                "genuinely fit this product; never force an unrelated one."
+            )
+    return _SYSTEM_PROMPT + "\n\n" + "\n".join(lines)
+
+
 def _build_user_prompt(
     base_product: dict[str, Any],
     attribute_hints: dict[str, str],
@@ -519,6 +559,8 @@ def generate_listing_from_images(
     want_description: bool = True,
     fill_attributes_into_description: bool = True,
     color_targets: list[str] | None = None,
+    title_skill: dict[str, Any] | None = None,
+    hot_words: list[str] | None = None,
 ) -> VisionListingResult:
     """Best-effort vision generation. Never raises — returns a result with `error`
     set on failure so callers can log and move on without breaking the create flow.
@@ -565,8 +607,10 @@ def generate_listing_from_images(
     prompt_product = base_product
     if target_names is not None:
         prompt_product = {**base_product, "recognized_colors": [], "variant_image_map": {}}
+    # 标题 Skill 只作用于会产出标题的文本趟；颜色趟不注入，避免挤占颜色指令的注意力。
+    active_skill = title_skill if (want_title and not color_only) else None
     request = GenerationRequest(
-        system=_SYSTEM_PROMPT,
+        system=build_system_prompt(active_skill, hot_words),
         user=_build_user_prompt(
             prompt_product,
             attribute_hints or {},
@@ -608,6 +652,12 @@ def generate_listing_from_images(
 
     if want_description and fill_attributes_into_description:
         description = with_attributes_block(description, attributes)
+
+    # Skill 定了更紧的标题上限时按它截断（_parse_result 已按 120 的平台上限截过一次）。
+    if want_title and active_skill:
+        skill_max = int(active_skill.get("title_max_chars") or 0)
+        if 0 < skill_max < len(title):
+            title = title[:skill_max]
 
     return VisionListingResult(
         title=title if want_title else "",

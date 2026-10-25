@@ -1786,3 +1786,60 @@ def test_publish_script_wires_config_and_run_release(tmp_path: Path, monkeypatch
     out = capsys.readouterr().out
     assert "dry_run 完成" in out
     assert '"version": "1.2.0"' in out
+
+
+# ---------------------------------------------------------------------------
+# 分流代理：GITHUB_UPDATE_PROXY / GITHUB_UPDATE_DIRECT_HOSTS
+# ---------------------------------------------------------------------------
+
+
+def test_proxy_settings_default_direct_hosts(monkeypatch) -> None:
+    monkeypatch.delenv("GITHUB_UPDATE_PROXY", raising=False)
+    monkeypatch.delenv("GITHUB_UPDATE_DIRECT_HOSTS", raising=False)
+    proxy, direct = gu._github_proxy_settings()
+    assert proxy == ""
+    assert direct == ("api.github.com",)
+
+
+def test_proxy_settings_custom(monkeypatch) -> None:
+    monkeypatch.setenv("GITHUB_UPDATE_PROXY", " http://127.0.0.1:7897 ")
+    monkeypatch.setenv("GITHUB_UPDATE_DIRECT_HOSTS", "api.github.com, GHE.example.com,")
+    proxy, direct = gu._github_proxy_settings()
+    assert proxy == "http://127.0.0.1:7897"
+    assert direct == ("api.github.com", "ghe.example.com")
+
+
+def test_split_proxy_handler_direct_host_stays_direct(monkeypatch) -> None:
+    import urllib.request
+
+    monkeypatch.setattr(urllib.request, "proxy_bypass", lambda host: False, raising=False)
+    handler = gu._SplitProxyHandler("http://127.0.0.1:7897", ("api.github.com",))
+    request = urllib.request.Request("https://api.github.com/repos/owner/name/releases")
+    assert handler.proxy_open(request, "http://127.0.0.1:7897", "https") is None
+    assert request.host == "api.github.com"  # 未被改写到代理 = 直连
+
+
+def test_split_proxy_handler_other_host_goes_via_proxy(monkeypatch) -> None:
+    import urllib.request
+
+    monkeypatch.setattr(urllib.request, "proxy_bypass", lambda host: False, raising=False)
+    handler = gu._SplitProxyHandler("http://127.0.0.1:7897", ("api.github.com",))
+    request = urllib.request.Request("https://objects.githubusercontent.com/pkg.zip")
+    assert handler.proxy_open(request, "http://127.0.0.1:7897", "https") is None
+    assert "127.0.0.1:7897" in request.host  # set_proxy 已把请求改写到代理
+
+
+def test_http_opener_uses_split_proxy_when_configured(monkeypatch) -> None:
+    monkeypatch.setenv("GITHUB_UPDATE_PROXY", "http://127.0.0.1:7897")
+    monkeypatch.setattr(gu, "_HTTP_OPENER", None)
+    opener = gu._http_opener()
+    assert any(isinstance(handler, gu._SplitProxyHandler) for handler in opener.handlers)
+    monkeypatch.setattr(gu, "_HTTP_OPENER", None)
+
+
+def test_http_opener_default_without_proxy_env(monkeypatch) -> None:
+    monkeypatch.delenv("GITHUB_UPDATE_PROXY", raising=False)
+    monkeypatch.setattr(gu, "_HTTP_OPENER", None)
+    opener = gu._http_opener()
+    assert not any(isinstance(handler, gu._SplitProxyHandler) for handler in opener.handlers)
+    monkeypatch.setattr(gu, "_HTTP_OPENER", None)
