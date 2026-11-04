@@ -31,6 +31,10 @@ MAX_IMAGE_BYTES = 3 * 1024 * 1024  # 3 MB per image keeps latency + cost bounded
 # （现场反馈「导入识别太慢」，这是导入路径上最大的一笔）。
 IMAGE_PROFILE_TEXT = {"edge": 1280, "quality": 85, "max_bytes": MAX_IMAGE_BYTES}
 IMAGE_PROFILE_COLOR = {"edge": 512, "quality": 70, "max_bytes": 400 * 1024, "always_downscale": True}
+# 单次视觉请求的图片总预算（base64 之后）：供应商普遍按 32MB/请求封顶，超了直接
+# 413 把整趟颜色识别打死（现场症状：8-9 张 3MB 原图 → 34.9MB → 全线回落到款式A/B/C）。
+# 留足余量给提示词与 JSON，超出就把图片分批发、结果合并。
+MAX_COLOR_REQUEST_BYTES = 10 * 1024 * 1024
 # AI 生图工具导出的商品图常常单张 4-5MB，直接跳过会让视觉识别拿不到任何图片、
 # 静默退化成「款式A/B/C」并把标题详情识别一起带坏。超过阈值先缩到最长边
 # VISION_IMAGE_EDGE 再发；Pillow 不可用时退回原始字节，但保留一个硬上限。
@@ -59,6 +63,26 @@ FIXED_PRODUCT_COLORS = (
     "Green",
 )
 FIXED_COLOR_PROMPT_LIST = ", ".join(FIXED_PRODUCT_COLORS)
+# 模型偶尔无视「never answer in Chinese」直接答中文色名。以前这类答复会被下游的
+# ASCII 门槛整条丢掉、全部回落成款式A/B/C；这里先归到色板，能救回来就救。
+_CHINESE_PALETTE = {
+    "杏色": "Apricot",
+    "紫色": "Purple",
+    "蓝色": "Blue",
+    "深蓝色": "Blue",
+    "浅蓝色": "Blue",
+    "天蓝色": "Blue",
+    "红色": "Red",
+    "黑色": "Black",
+    "白色": "White",
+    "米白": "White",
+    "粉色": "Pink",
+    "粉红色": "Pink",
+    "棕色": "Brown",
+    "咖啡色": "Brown",
+    "绿色": "Green",
+    "墨绿色": "Green",
+}
 # 近似色/同义写法归到色板上最接近的一个；色板里没有的颜色（灰/黄/橙/卡其…）保持
 # 原样，宁可让操作员看到再手动改，也不悄悄改成另一个颜色。
 _COLOR_SYNONYMS = {
@@ -134,6 +158,9 @@ class VisionListingResult:
     attributes: dict[str, str] | None = None
     color_translations: dict[str, str] | None = None
     title_candidates: list[dict[str, Any]] | None = None
+    # 非致命说明（例如 N 张颜色图缩图失败、分批发时有批失败）：调用方把它写进
+    # ai_generation_error，操作员才知道为什么还剩几行是「款式A/B/C」。
+    warnings: list[str] | None = None
 
     @property
     def ok(self) -> bool:
@@ -165,9 +192,22 @@ def _read_image(path: Path, *, profile: dict[str, Any] | None = None) -> Generat
         shrunk = _downscale_image(path, edge=int(profile["edge"]), quality=int(profile["quality"]))
         if shrunk:
             raw, media_type = shrunk, "image/jpeg"
+        elif profile.get("always_downscale") and len(raw) > max_bytes:
+            # 缩不了（缺 Pillow / 坏图）就别把原图塞进请求：几张 3MB 原图合起来会顶穿
+            # 供应商的 32MB 上限，整趟颜色识别 413 之后全线回落到款式A/B/C。
+            return None
         elif not profile.get("always_downscale") and len(raw) > MAX_IMAGE_BYTES_HARD:
             return None
     return GenerationImage(media_type=media_type, data_base64=base64.b64encode(raw).decode("ascii"))
+
+
+def _pillow_available() -> bool:
+    """缩图依赖 Pillow；缺了它颜色趟连图都发不出去，错误信息要能说清这一点。"""
+    try:
+        from PIL import Image  # noqa: F401
+    except ImportError:
+        return False
+    return True
 
 
 def _downscale_image(path: Path, *, edge: int = VISION_IMAGE_EDGE, quality: int = VISION_IMAGE_QUALITY) -> bytes | None:
@@ -255,6 +295,82 @@ def ordered_unnamed_variant_assets(assets: list[dict[str, Any]] | None) -> list[
     for asset in files:
         unique.setdefault(str(asset.get("file_name") or "").strip().lower(), asset)
     return sorted(unique.values(), key=lambda asset: storage.natural_name_key(asset.get("file_name")))
+
+
+def _compact_key(value: str) -> str:
+    """匹配用的紧凑写法：``A (1).png`` / ``A(1).png`` / ``A (1)`` 全部归一。"""
+    return re.sub(r"[^a-z0-9]+", "", str(value or "").lower())
+
+
+def _shared_digit_tokens(names: list[str]) -> set[str]:
+    """同一批里各文件名共用的数字段（``1 (1).png`` 的 ``1``）不能当颜色键：
+    拿它去匹配会让一批文件全配到同一个颜色上。"""
+    token_sets = [
+        set(re.findall(r"(?<![a-z0-9])\d+(?![a-z0-9])", Path(str(name)).stem.lower()))
+        for name in names
+    ]
+    shared: set[str] = set()
+    for index, tokens in enumerate(token_sets):
+        for token in tokens:
+            if any(token in other for other in token_sets[:index] + token_sets[index + 1:]):
+                shared.add(token)
+    return shared
+
+
+def match_color_translations(names: list[str], translations: dict[str, str]) -> dict[str, str]:
+    """把模型返回的 ``{键: 颜色}`` 对到真实文件名上，返回 ``{文件名: 颜色}``。
+
+    模型经常不按提示里的文件名逐字回：``A(1).png``（少空格）、``A (1)``（少后缀）、
+    ``#2``（用编号）、甚至把键值写反（``{"Brown": "A (1).png"}``）。这些都是
+    「认出来了但配不上」，以前一律静默回落成款式A/B/C，操作员只看到一堆款式却不知道
+    为什么。匹配顺序：整文件名 → 主干 → 独有数字 → 批内序号/#N → 紧凑写法 → 反向。
+    """
+    normalized: dict[str, str] = {}
+    original_keys: dict[str, str] = {}
+    for raw_key, raw_value in (translations or {}).items():
+        key = str(raw_key or "").strip()
+        value = " ".join(str(raw_value or "").split())
+        if key and value:
+            normalized.setdefault(key.lower(), value)
+            original_keys.setdefault(key.lower(), key)
+    targets = [str(name or "").strip() for name in names or [] if str(name or "").strip()]
+    if not normalized or not targets:
+        return {}
+
+    shared = _shared_digit_tokens(targets)
+    compact_index: dict[str, str] = {}
+    for key, value in normalized.items():
+        compact_index.setdefault(_compact_key(key), value)
+
+    # 反向映射：值看起来像本批的文件名时，键才是颜色名。
+    by_name = {_compact_key(name): name for name in targets}
+    reverse: dict[str, str] = {}
+    for key, value in normalized.items():
+        target = by_name.get(_compact_key(value))
+        if target:
+            reverse.setdefault(target, original_keys.get(key, key))
+
+    matched: dict[str, str] = {}
+    for position, name in enumerate(targets, start=1):
+        stem = Path(name).stem.lower()
+        candidates = [name.lower(), stem]
+        candidates.extend(
+            token
+            for token in re.findall(r"(?<![a-z0-9])\d+(?![a-z0-9])", stem)
+            if token not in shared
+        )
+        candidates.extend([str(position), f"#{position}"])
+        color = next((normalized[key] for key in candidates if normalized.get(key)), "")
+        if not color:
+            color = next(
+                (compact_index[_compact_key(key)] for key in candidates if compact_index.get(_compact_key(key))),
+                "",
+            )
+        if not color:
+            color = reverse.get(name, "")
+        if color:
+            matched[name] = color
+    return matched
 
 
 def _pick_image_paths(
@@ -551,6 +667,17 @@ def _palette_match(word: str) -> str:
     return _COLOR_SYNONYMS.get(key, "")
 
 
+def _chinese_palette_match(text: str) -> str:
+    """中文色名归色板：长写法优先（``深蓝色`` 先于 ``蓝色``），认不出返回 ""。"""
+    cleaned = " ".join(str(text or "").split())
+    if not cleaned:
+        return ""
+    for phrase in sorted(_CHINESE_PALETTE, key=len, reverse=True):
+        if phrase in cleaned:
+            return _CHINESE_PALETTE[phrase]
+    return ""
+
+
 def snap_color_to_palette(value: Any) -> str:
     """把模型给的颜色名归到固定色板，认不出来返回 ""（调用方保留原值）。
 
@@ -561,6 +688,9 @@ def snap_color_to_palette(value: Any) -> str:
     text = " ".join(str(value or "").split())
     if not text:
         return ""
+    chinese_hit = _chinese_palette_match(text)
+    if chinese_hit:
+        return chinese_hit
     hit = _palette_match(text)
     if hit:
         return hit
@@ -761,13 +891,31 @@ def generate_listing_from_images(
     loaded = [(path, image) for path in paths if (image := _read_image(path, profile=image_profile)) is not None]
     images = [image for _, image in loaded]
     if not images:
-        return VisionListingResult(title="", description="", model_id="", input_image_count=0, error="没有可用的产品图片")
+        hint = ""
+        if color_only and paths and not _pillow_available():
+            # 颜色趟必须缩图才发得出去：没有 Pillow 时全是「没有可用的产品图片」，
+            # 以前这里只说「没有可用的产品图片」，没人知道该装依赖。
+            hint = "（缺少 Pillow：颜色图无法缩图上传，请安装 Pillow 或换完整部署包）"
+        return VisionListingResult(
+            title="", description="", model_id="", input_image_count=0, error=f"没有可用的产品图片{hint}"
+        )
 
     # 重新识别颜色时不要把上一次的颜色结果再塞给模型：那正是这次要纠正的内容，
     # 留在提示里只会让模型照着旧名字答。
     prompt_product = base_product
     if target_names is not None:
         prompt_product = {**base_product, "recognized_colors": [], "variant_image_map": {}}
+    if color_only:
+        loaded_names = {path.name for path, _ in loaded}
+        return _color_pass_result(
+            gateway=gateway,
+            connection=connection,
+            base_product=prompt_product,
+            assets=assets,
+            attribute_hints=attribute_hints or {},
+            loaded=loaded,
+            skipped_names=[path.name for path in paths if path.name not in loaded_names],
+        )
     # 标题 Skill 只作用于会产出标题的文本趟；颜色趟不注入，避免挤占颜色指令的注意力。
     active_skill = title_skill if (want_title and not color_only) else None
     request = GenerationRequest(
@@ -874,6 +1022,136 @@ def generate_listing_from_images(
         attributes=attributes,
         color_translations=color_translations,
         title_candidates=title_candidates,
+    )
+
+
+def _split_color_batches(
+    loaded: list[tuple[Path, GenerationImage]], budget: int
+) -> list[list[tuple[Path, GenerationImage]]]:
+    """按请求体预算切批：一批里所有 base64 图合起来不超过 ``budget``。"""
+    batches: list[list[tuple[Path, GenerationImage]]] = []
+    current: list[tuple[Path, GenerationImage]] = []
+    size = 0
+    for item in loaded:
+        weight = len(item[1].data_base64)
+        if current and size + weight > budget:
+            batches.append(current)
+            current, size = [], 0
+        current.append(item)
+        size += weight
+    if current:
+        batches.append(current)
+    return batches
+
+
+def _color_pass_result(
+    *,
+    gateway: Any,
+    connection: dict[str, Any] | None,
+    base_product: dict[str, Any],
+    assets: list[dict[str, Any]],
+    attribute_hints: dict[str, str],
+    loaded: list[tuple[Path, GenerationImage]],
+    skipped_names: list[str],
+) -> VisionListingResult:
+    """颜色那一趟：按请求体预算分批发、把答复对到真实文件名、漏掉的图再补一次。
+
+    两个现场掉坑点在这里兜住：
+    1. 8~12 张原图一次发出去会顶穿供应商 32MB/请求上限，413 之后整趟失败、全部回落成
+       款式A/B/C（只有文件名里自带颜色的那几张幸存）；
+    2. 模型经常漏掉某个文件名（``A.png`` 和 ``A (1).png`` 这种主干重复的命名最容易），
+       漏的那张以前直接变款式。"""
+    names_all = [path.name for path, _ in loaded]
+    batches = _split_color_batches(loaded, MAX_COLOR_REQUEST_BYTES)
+    multi_batch = len(batches) > 1
+    merged: dict[str, str] = {}
+    errors: list[str] = []
+    model_id = str((connection or {}).get("model_id") or "")
+
+    def ask(batch: list[tuple[Path, GenerationImage]]) -> tuple[dict[str, str], str]:
+        names = [path.name for path, _ in batch]
+        request = GenerationRequest(
+            system=build_system_prompt(),
+            user=_build_user_prompt(base_product, attribute_hints, assets, names, color_only=True),
+            # Reasoning models spend thinking tokens out of this budget before any text.
+            max_tokens=8192,
+            temperature=0.4,
+            images=tuple(image for _, image in batch),
+            timeout_override_seconds=180,
+        )
+        generated = None
+        last_error = ""
+        for _ in range(2):  # one retry: empty replies are intermittent
+            try:
+                generated = gateway.generate(connection, request)
+                break
+            except Exception as exc:  # noqa: BLE001 - vision is best-effort
+                last_error = f"AI 调用失败: {exc}"
+        if generated is None:
+            return {}, last_error
+        try:
+            _title, _description, _attributes, translations = _parse_result(str(generated.text or ""))
+        except (ValueError, TypeError) as exc:
+            return {}, str(exc)
+        return translations, ""
+
+    def absorb(translations: dict[str, str], batch: list[tuple[Path, GenerationImage]]) -> None:
+        for raw_key, value in translations.items():
+            key = str(raw_key or "").strip()
+            if not key or not value:
+                continue
+            # 分批时编号是「批内序号」，合并会互相撞车；文件名才是稳定键。
+            if multi_batch and re.fullmatch(r"#?\s*\d+", key):
+                continue
+            merged.setdefault(key, value)
+        for name, color in match_color_translations([p.name for p, _ in batch], translations).items():
+            merged[name] = color
+
+    for batch in batches:
+        translations, error = ask(batch)
+        if error:
+            errors.append(error)
+            continue
+        absorb(translations, batch)
+
+    missing = [(path, image) for path, image in loaded if path.name not in merged]
+    if missing and len(missing) < len(loaded):
+        # 模型漏了键：只把没命名的那几张再发一次，别让它们直接变款式。
+        for batch in _split_color_batches(missing, MAX_COLOR_REQUEST_BYTES):
+            translations, error = ask(batch)
+            if error:
+                errors.append(error)
+                continue
+            absorb(translations, batch)
+
+    warnings: list[str] = []
+    if skipped_names:
+        warnings.append(
+            f"{len(skipped_names)} 张图读取或缩图失败，未参与颜色识别（{', '.join(skipped_names[:3])}）"
+        )
+    if errors:
+        warnings.append(f"{len(errors)} 批颜色识别失败：{errors[0]}")
+
+    unnamed = [name for name in names_all if name not in merged]
+    if unnamed and merged:
+        warnings.append(f"{len(unnamed)} 张图没拿到颜色（{', '.join(unnamed[:3])}）")
+
+    if not merged:
+        return VisionListingResult(
+            title="",
+            description="",
+            model_id=model_id,
+            input_image_count=len(loaded),
+            error="；".join(errors) or "AI 未返回颜色名称",
+            warnings=warnings,
+        )
+    return VisionListingResult(
+        title="",
+        description="",
+        model_id=model_id,
+        input_image_count=len(loaded),
+        color_translations=merged,
+        warnings=warnings,
     )
 
 

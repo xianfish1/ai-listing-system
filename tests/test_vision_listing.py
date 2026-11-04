@@ -43,9 +43,12 @@ class _StubGateway:
     def __init__(self, text: str) -> None:
         self.text = text
         self.last_request: GenerationRequest | None = None
+        # 颜色趟现在会给「模型漏掉的那几张」补发一次：断言首发内容看 requests[0]。
+        self.requests: list[GenerationRequest] = []
 
     def generate(self, connection: Any, request: GenerationRequest) -> _Generated:
         self.last_request = request
+        self.requests.append(request)
         return _Generated(text=self.text)
 
 
@@ -536,12 +539,15 @@ def test_import_colors_only_use_this_imports_assets(
 
     result = main._enrich_with_vision_listing(product, {})
 
-    assert gateway.last_request is not None
-    assert [image.media_type for image in gateway.last_request.images] == ["image/png", "image/png"]
-    assert [image.data_base64 for image in gateway.last_request.images] == [
+    assert gateway.requests, "颜色趟必须至少发一次"
+    first = gateway.requests[0]
+    assert [image.media_type for image in first.images] == ["image/png", "image/png"]
+    assert [image.data_base64 for image in first.images] == [
         base64.b64encode(new_main.read_bytes()).decode("ascii"),
         base64.b64encode(new_variant.read_bytes()).decode("ascii"),
     ]
+    # 补发只针对本次导入里没命名的图，旧的导入目录仍然不能混进来。
+    assert all(len(request.images) <= 2 for request in gateway.requests)
     assert result["variant_image_map"]
     assert old_variant.name not in result["variant_image_map"].values()
     assert set(result["variant_image_map"].values()) <= {new_main.name, new_variant.name}
@@ -1115,3 +1121,188 @@ def test_numbered_color_set_with_one_named_color_takes_the_rest(tmp_path: Path) 
     assert patch["variant_image_map"]["White"] == "A白色.png"
     # 9 张图 + 已有的 White：重复的 Apricot 让位（不覆盖已有绑定），颜色数不重复。
     assert len(patch["recognized_colors"]) == len(set(color.lower() for color in patch["recognized_colors"]))
+
+
+# --- 2026-11-04：颜色识别容错 -------------------------------------------------
+# 现场症状：A.png / A (1).png … A (7).png + A白色.jpg 的导入里，8 张全变成
+# 款式A-H，只有文件名带「白色」的那张留住了 White。三个真实原因都在这里钉住。
+
+
+def test_color_translation_keys_tolerate_spacing_and_suffix_variants() -> None:
+    """模型把键写成 A(1).png（少空格）/ A (1)（少后缀）也要认。"""
+    names = ["A.png", "A (1).png", "A (2).png"]
+
+    matched = vision_listing.match_color_translations(
+        names,
+        {"A.png": "Blue", "A(1).png": "Red", "A (2)": "Green"},
+    )
+
+    assert matched == {"A.png": "Blue", "A (1).png": "Red", "A (2).png": "Green"}
+
+
+def test_color_translation_keys_accept_reversed_mapping() -> None:
+    """模型把键值写反（颜色 → 文件名）时不能整批落空。"""
+    matched = vision_listing.match_color_translations(
+        ["A.png", "A (1).png"],
+        {"Black": "A.png", "Pink": "A (1).png"},
+    )
+
+    assert matched == {"A.png": "Black", "A (1).png": "Pink"}
+
+
+def test_color_translations_patch_uses_fuzzy_file_keys() -> None:
+    """导入写回时也要走同一套容错，否则 fuzzy 只在识别层生效。"""
+    patch = _color_translation_patch(
+        {"recognized_colors": [], "variant_image_map": {}},
+        {"A(1).png": "Blue", "A(2).png": "Red"},
+        assets=[
+            {"file_name": "A (1).png", "asset_type": "variant"},
+            {"file_name": "A (2).png", "asset_type": "variant"},
+        ],
+    )
+
+    assert patch == {
+        "recognized_colors": ["Blue", "Red"],
+        "variant_image_map": {"Blue": "A (1).png", "Red": "A (2).png"},
+    }
+
+
+def test_chinese_color_answers_snap_to_the_fixed_palette() -> None:
+    """模型偶尔无视英文要求：中文色名先归色板，别再被 ASCII 门槛整条丢掉。"""
+    assert vision_listing.snap_color_to_palette("白色") == "White"
+    assert vision_listing.snap_color_to_palette("深蓝色") == "Blue"
+    assert vision_listing.snap_color_to_palette("墨绿色") == "Green"
+    # 色板外的颜色仍然保留原话（灰/黄/橙不硬归类）。
+    assert vision_listing.snap_color_to_palette("灰色") == ""
+
+
+def test_color_pass_splits_batches_over_the_request_budget(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """一张批超过请求体预算就分批发，避免供应商 32MB 上限的 413 打死整趟。"""
+    assets = []
+    for name in ["A.png", "A (1).png", "A (2).png"]:
+        path = _write_image(tmp_path, name)
+        assets.append({"file_name": name, "file_path": str(path), "asset_type": "variant"})
+
+    texts = [
+        '{"color_translations": {"A.png": "Blue"}}',
+        '{"color_translations": {"A (1).png": "Red"}}',
+        '{"color_translations": {"A (2).png": "Green"}}',
+    ]
+
+    class _BatchGateway:
+        def __init__(self) -> None:
+            self.sizes: list[int] = []
+
+        def generate(self, connection, request):
+            self.sizes.append(len(request.images))
+            return _Generated(text=texts[min(len(self.sizes) - 1, len(texts) - 1)])
+
+    gateway = _BatchGateway()
+    # 单张图的 base64 就超过预算 → 每张图单独一批。
+    monkeypatch.setattr(vision_listing, "MAX_COLOR_REQUEST_BYTES", 10)
+
+    result = vision_listing.generate_listing_from_images(
+        gateway=gateway,
+        connection={"id": "conn", "model_id": "test-model"},
+        base_product={"id": "bp", "group_id": "G", "main_image": "", "product_images": []},
+        assets=assets,
+        want_title=False,
+        want_description=False,
+        fill_attributes_into_description=False,
+        color_targets=None,
+    )
+
+    assert gateway.sizes == [1, 1, 1]
+    assert result.ok
+    assert (result.color_translations or {}) == {"A.png": "Blue", "A (1).png": "Red", "A (2).png": "Green"}
+
+
+def test_color_pass_retries_the_images_the_model_omitted(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """模型漏掉某个文件名时，只补发漏掉的那几张，而不是让它们直接变款式。"""
+    assets = []
+    for name in ["A.png", "A (1).png"]:
+        path = _write_image(tmp_path, name)
+        assets.append({"file_name": name, "file_path": str(path), "asset_type": "variant"})
+
+    class _OmitFirstGateway:
+        def __init__(self) -> None:
+            self.calls: list[list[str]] = []
+
+        def generate(self, connection, request):
+            self.calls.append([line.split(" ", 1)[-1] for line in request.user.splitlines() if line.startswith("#")])
+            if len(self.calls) == 1:
+                return _Generated(text='{"color_translations": {"A (1).png": "Red"}}')
+            return _Generated(text='{"color_translations": {"A.png": "Blue"}}')
+
+    gateway = _OmitFirstGateway()
+    result = vision_listing.generate_listing_from_images(
+        gateway=gateway,
+        connection={"id": "conn", "model_id": "test-model"},
+        base_product={"id": "bp", "group_id": "G", "main_image": "", "product_images": []},
+        assets=assets,
+        want_title=False,
+        want_description=False,
+        fill_attributes_into_description=False,
+        color_targets=None,
+    )
+
+    assert gateway.calls == [["A.png", "A (1).png"], ["A.png"]]
+    assert (result.color_translations or {}) == {"A (1).png": "Red", "A.png": "Blue"}
+
+
+def test_color_pass_reports_unnamed_images_instead_of_silence(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """模型什么都配不上时必须留下说明，不能再静默给一串款式。"""
+    assets = []
+    for name in ["A.png", "A (1).png"]:
+        path = _write_image(tmp_path, name)
+        assets.append({"file_name": name, "file_path": str(path), "asset_type": "variant"})
+
+    gateway = _StubGateway('{"color_translations": {"nonexistent.png": "Blue"}}')
+    result = vision_listing.generate_listing_from_images(
+        gateway=gateway,
+        connection={"id": "conn", "model_id": "test-model"},
+        base_product={"id": "bp", "group_id": "G", "main_image": "", "product_images": []},
+        assets=assets,
+        want_title=False,
+        want_description=False,
+        fill_attributes_into_description=False,
+        color_targets=None,
+    )
+
+    assert result.ok
+    assert (result.color_translations or {}).get("nonexistent.png") == "Blue"
+    assert result.warnings
+    assert "没拿到颜色" in "；".join(result.warnings)
+
+
+def test_import_reports_leftover_style_labels_instead_of_silence(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """只剩款式占位时必须写进 ai_generation_error，操作员才知道为什么没颜色。"""
+    white = _write_image(tmp_path, "A白色.jpg")
+    unnamed = _write_image(tmp_path, "A.png")
+    assets = [
+        {"file_name": white.name, "file_path": str(white), "asset_type": "variant", "sku_option": "White"},
+        {"file_name": unnamed.name, "file_path": str(unnamed), "asset_type": "variant"},
+    ]
+    product = {
+        "id": "bp-style-warning",
+        "group_id": "G-STYLE",
+        "main_image": unnamed.name,
+        "recognized_colors": [],
+        "variant_image_map": {},
+        "variant_count": 2,
+    }
+    # 模型答了一个对不上的键：A.png 解析不出颜色 → 落款式A。
+    gateway = _StubGateway('{"color_translations": {"unrelated.png": "Blue"}}')
+
+    monkeypatch.setattr(storage, "get_runtime_configuration", lambda: {"ai_listing_generation": {}})
+    monkeypatch.setattr(storage, "get_default_ai_model_connection_private", lambda: {"id": "conn"})
+    monkeypatch.setattr(storage, "assets_for_group", lambda _group_id: assets)
+    monkeypatch.setattr(storage, "update_base_product", lambda _id, patch, **_kwargs: {**product, **patch})
+    monkeypatch.setattr(main, "ModelGateway", lambda **_kwargs: gateway)
+
+    result = main._enrich_with_vision_listing(product, {})
+
+    assert any(str(color).startswith("款式") for color in result["recognized_colors"])
+    assert "没认出颜色" in result["ai_generation_error"]

@@ -824,10 +824,24 @@ def _enrich_with_vision_listing(
             elif force_colors:
                 stages["colors"] = "failed"
                 color_errors.append("颜色识别失败: AI 未返回颜色名称")
+            if color_result is not None:
+                # 非致命说明（某批失败 / 缩图失败 / 漏了几张）：必须让操作员看见，
+                # 否则页面上就只剩几行莫名其妙的「款式A/B/C」。
+                color_errors.extend(str(item) for item in (color_result.warnings or []) if str(item).strip())
             if not color_patch and not force_colors:
                 color_patch = _color_translation_patch(product, {}, assets=assets)
             if color_patch:
                 patch.update(color_patch)
+                leftover = [
+                    str(label)
+                    for label in color_patch.get("recognized_colors") or []
+                    if str(label).startswith("款式")
+                ]
+                if leftover:
+                    color_errors.append(
+                        f"{len(leftover)} 张颜色图没认出颜色（{'、'.join(leftover[:3])}"
+                        f"{'…' if len(leftover) > 3 else ''} 占位），可对商品点「重新识别颜色图」重试"
+                    )
 
 
     need_text = bool(want_title or want_description)
@@ -911,6 +925,17 @@ def _color_translation_patch(
     # 顺序必须与发给模型的图片顺序一致（自然序：1 (2) 在 1 (10) 前），否则颜色会
     # 整体错位一格；列表里带上文件名是为了判断哪个数字段在各文件间共用。
     unnamed_assets = vision_listing.ordered_unnamed_variant_assets(assets)
+    # 模型常把键写成 A(1).png（少空格）、A (1)（少后缀）、#2（用编号）甚至键值写反。
+    # 先把答复对到真实文件名，后面按文件名精确查就不会整批落空、静默变款式A/B/C。
+    normalized.update(
+        {
+            name.lower(): color
+            for name, color in vision_listing.match_color_translations(
+                [str(asset.get("file_name") or "").strip() for asset in unnamed_assets],
+                translations,
+            ).items()
+        }
+    )
     # 未命名 SKU 图的颜色由这一次识别决定：商品上留着的上一次绑定（可能是错的）不能
     # 再带进来，否则重试只会把错配原样保留下来。
     unnamed_files = {str(asset.get("file_name") or "").strip().lower() for asset in unnamed_assets}
@@ -1038,6 +1063,15 @@ def _forced_color_translation_patch(
     # 文件名里各图共用的数字段（如 1 (1).png 的 1）不能当作颜色键。
     target_names = [str(asset.get("file_name") or "").strip() for asset in targets]
     positions = {name.lower(): index for index, name in enumerate(target_names, start=1)}
+    # 模型把键写成 A(1).png / A (1) / #2 / 反过来的键值，都先对到真实文件名。
+    from services.api import vision_listing
+
+    normalized.update(
+        {
+            name.lower(): color
+            for name, color in vision_listing.match_color_translations(target_names, translations).items()
+        }
+    )
     shared_tokens: set[str] = set()
     token_sets: list[set[str]] = []
     for name in target_names:
