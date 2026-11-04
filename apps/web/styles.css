@@ -381,6 +381,67 @@ textarea {
   color: #a5a0f5;
 }
 
+/* 侧栏全局更新提醒：摆在「设置」上面，只在有新版本 / 已下载待重启时出现。
+   深色 rail 上用一个淡紫胶囊强调；本工程没有全局 [hidden] 规则，必须自己写。 */
+.update-reminder {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  width: 100%;
+  margin-bottom: 8px;
+  padding: 9px 11px;
+  border: 1px solid rgba(129, 140, 248, 0.42);
+  border-radius: var(--radius-sm);
+  background: rgba(79, 70, 229, 0.24);
+  color: #e3e1ff;
+  font-size: 12.5px;
+  font-weight: 600;
+  line-height: 1.35;
+  text-align: left;
+  cursor: pointer;
+  transition: background 120ms ease, border-color 120ms ease;
+}
+
+.update-reminder[hidden] {
+  display: none;
+}
+
+.update-reminder:hover:not(:disabled) {
+  background: rgba(79, 70, 229, 0.38);
+  border-color: rgba(165, 160, 245, 0.7);
+}
+
+.update-reminder:disabled {
+  opacity: 0.7;
+  cursor: progress;
+}
+
+.update-reminder-dot {
+  width: 8px;
+  height: 8px;
+  flex: 0 0 auto;
+  border-radius: 50%;
+  background: #a5a0f5;
+  box-shadow: 0 0 0 3px rgba(165, 160, 245, 0.25);
+  animation: update-reminder-pulse 1.8s ease-in-out infinite;
+}
+
+@keyframes update-reminder-pulse {
+  0%,
+  100% {
+    box-shadow: 0 0 0 3px rgba(165, 160, 245, 0.25);
+  }
+  50% {
+    box-shadow: 0 0 0 6px rgba(165, 160, 245, 0.08);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .update-reminder-dot {
+    animation: none;
+  }
+}
+
 .main {
   padding: 28px clamp(20px, 3vw, 40px) 48px;
   min-width: 0;
@@ -426,74 +487,6 @@ h2 {
 
 .topbar #refresh-btn {
   flex: 0 0 auto;
-}
-
-.topbar-actions {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  flex: 0 0 auto;
-  flex-wrap: wrap;
-  justify-content: flex-end;
-}
-
-/* 顶栏全局更新提醒：只在「有新版本」或「已下载待重启」时出现。
-   注意本工程没有全局 [hidden] 规则，必须自己写，且权重高于 .update-reminder。 */
-.update-reminder {
-  display: inline-flex;
-  align-items: center;
-  gap: 8px;
-  padding: 8px 14px;
-  border: 1px solid #c8ccf4;
-  border-radius: 999px;
-  font-size: 13px;
-  font-weight: 600;
-  color: var(--indigo-ink);
-  background: var(--indigo-soft);
-  cursor: pointer;
-  white-space: nowrap;
-  transition: background 0.15s ease, border-color 0.15s ease, box-shadow 0.15s ease;
-}
-
-.update-reminder[hidden] {
-  display: none;
-}
-
-.update-reminder:hover:not(:disabled) {
-  background: #e3e6fd;
-  border-color: #b3b8ee;
-  box-shadow: var(--shadow-sm);
-}
-
-.update-reminder:disabled {
-  opacity: 0.72;
-  cursor: progress;
-}
-
-.update-reminder-dot {
-  width: 8px;
-  height: 8px;
-  flex: 0 0 auto;
-  border-radius: 50%;
-  background: var(--indigo);
-  box-shadow: 0 0 0 3px rgba(79, 70, 229, 0.18);
-  animation: update-reminder-pulse 1.8s ease-in-out infinite;
-}
-
-@keyframes update-reminder-pulse {
-  0%,
-  100% {
-    box-shadow: 0 0 0 3px rgba(79, 70, 229, 0.18);
-  }
-  50% {
-    box-shadow: 0 0 0 6px rgba(79, 70, 229, 0.06);
-  }
-}
-
-@media (prefers-reduced-motion: reduce) {
-  .update-reminder-dot {
-    animation: none;
-  }
 }
 
 .operation-feedback {
@@ -3850,6 +3843,16 @@ dialog:not([open]) { display: none; }
     display: none;
   }
 
+  /* 侧栏收成图标宽度：提醒只留呼吸点，靠 title 提示版本。 */
+  .update-reminder {
+    justify-content: center;
+    padding: 11px 0;
+  }
+
+  .update-reminder #update-reminder-text {
+    display: none;
+  }
+
   .pipeline {
     grid-template-columns: 1fr;
   }
@@ -3903,6 +3906,18 @@ dialog:not([open]) { display: none; }
 
   .rail > .rail-item {
     margin-left: auto;
+  }
+
+  /* 手机端 rail 横排：提醒缩成一条胶囊，文案照常显示。 */
+  .update-reminder {
+    width: auto;
+    flex: 0 0 auto;
+    margin-bottom: 0;
+    white-space: nowrap;
+  }
+
+  .update-reminder #update-reminder-text {
+    display: inline;
   }
 
   .metrics,

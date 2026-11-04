@@ -181,17 +181,22 @@ def test_update_panel_assets_are_cache_bumped() -> None:
     assert "app.js?v=" in html
 
 
-def test_topbar_has_global_update_reminder() -> None:
+def test_rail_has_global_update_reminder_above_settings() -> None:
     html = INDEX.read_text(encoding="utf-8")
     script = APP.read_text(encoding="utf-8")
     styles = STYLES.read_text(encoding="utf-8")
 
-    # 提醒按钮挂在 topbar（所有视图共用），而不是只在设置页里有。
+    # 提醒按钮挂在侧栏「设置」上面（不在顶栏），所有视图都看得到。
+    rail = html[html.index('<aside class="rail"'):]
+    rail = rail[: rail.index("</aside>")]
+    assert 'id="update-reminder-btn"' in rail
+    assert rail.index('id="update-reminder-btn"') < rail.index('data-nav-key="settings"')
+    assert 'id="update-reminder-text"' in rail
+    assert " hidden>" in rail
+
     topbar = html[html.index('<header class="topbar">'):]
     topbar = topbar[: topbar.index("</header>")]
-    assert 'id="update-reminder-btn"' in topbar
-    assert 'id="update-reminder-text"' in topbar
-    assert " hidden>" in topbar
+    assert 'id="update-reminder-btn"' not in topbar
 
     for function in (
         "function renderUpdateReminder",
@@ -202,7 +207,7 @@ def test_topbar_has_global_update_reminder() -> None:
     # 缓存过期才补查，避免每次打开页面都打 GitHub。
     assert "UPDATE_REMINDER_STALE_MS" in script
     assert 'target.id === "update-reminder-btn"' in script
-    # 设置页状态渲染后要同步顶栏提醒。
+    # 设置页状态渲染后要同步侧栏提醒。
     assert "renderUpdateReminder(current)" in _function_body(script, "function renderUpdateStatus")
     # 本工程没有全局 [hidden] 规则，必须显式写。
     assert ".update-reminder[hidden]" in styles

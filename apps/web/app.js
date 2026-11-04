@@ -12048,7 +12048,7 @@ async function applyUpdate(versionOverride = "", triggerButton = null) {
 }
 
 // ------------------------------------------------------------
-// 顶栏全局更新提醒（所有视图可见）
+// 侧栏全局更新提醒（「设置」上面，所有视图可见）
 // 状态来自 /api/updates/status：API 启动时后台检查过一次并缓存；缓存超过
 // 半小时（或从没检查过）时，打开页面静默补查一次，避免错过新 Release。
 // ------------------------------------------------------------
@@ -12074,12 +12074,12 @@ function renderUpdateReminder(status) {
     // 已下载并校验完成，只差重启：这时「更新」其实是重启安装。
     mode = "restart";
     version = pendingVersion;
-    label = "v" + version + " 已下载 · 重启安装";
+    label = "v" + version + " 待重启安装";
     title = "v" + version + " 已下载并校验完成，点击重启安装";
   } else if (current?.update_available && latest?.version) {
     mode = "install";
     version = String(latest.version);
-    label = "发现新版本 v" + version + " · 立即更新";
+    label = "有新版本 v" + version;
     title = "点击下载并安装 v" + version;
   }
   button.hidden = !mode;
