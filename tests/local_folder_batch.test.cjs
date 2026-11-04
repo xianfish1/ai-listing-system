@@ -221,3 +221,87 @@ test('planner accepts File System Access files carrying __relativePath', () => {
   assert.equal(plan.rootName, '批次');
   assert.deepEqual(plan.groups.map((group) => `${group.folderName}:${group.files.length}`), ['AL0900:2', 'AL0901:1']);
 });
+
+test('skips a product folder that appears twice or already sits in the queue', () => {
+  const plan = batch.planLocalFolderImport([
+    file('批次/AL0001/main.jpg', 3),
+    file('批次/AL0002/main.jpg', 3),
+  ], SUPPORTED);
+  // 同一个目录再拖一次 = 同一份文件清单：本次入队里重复。
+  const repeat = batch.splitDuplicateLocalImportGroups(
+    [...plan.groups, { ...plan.groups[0] }],
+    [],
+  );
+  assert.deepEqual(repeat.groups.map((group) => group.folderName), ['AL0001', 'AL0002']);
+  assert.deepEqual(repeat.duplicates, [{ folderName: 'AL0001', reason: 'repeat' }]);
+
+  // 已经在队列里（上一批拖入）的那份要跳过，不能把商品导两次。
+  const queued = batch.splitDuplicateLocalImportGroups(plan.groups, [plan.groups[1]]);
+  assert.deepEqual(queued.groups.map((group) => group.folderName), ['AL0001']);
+  assert.deepEqual(queued.duplicates, [{ folderName: 'AL0002', reason: 'existing' }]);
+});
+
+test('folder content change is not treated as a duplicate import', () => {
+  const first = batch.planLocalFolderImport([file('AL0001/main.jpg', 3)], SUPPORTED);
+  const second = batch.planLocalFolderImport([file('AL0001/main.jpg', 9)], SUPPORTED);
+  const result = batch.splitDuplicateLocalImportGroups(second.groups, first.groups);
+  assert.deepEqual(result.groups.map((group) => group.folderName), ['AL0001']);
+  assert.deepEqual(result.duplicates, []);
+});
+
+test('a subfolder dragged after its parent folder is skipped as already imported', () => {
+  const parent = batch.planLocalFolderImport([file('批次/AL0001/main.jpg', 3)], SUPPORTED);
+  const child = batch.planLocalFolderImport([file('AL0001/main.jpg', 3)], SUPPORTED);
+  // 父目录已经排进队列（整目录商品）：再单独拖它的子目录就是重复。
+  const nested = batch.splitDuplicateLocalImportGroups(child.groups, parent.groups, { rootName: child.rootName });
+  assert.deepEqual(nested.groups, []);
+  assert.deepEqual(nested.duplicates, [{ folderName: 'AL0001', reason: 'nested' }]);
+});
+
+test('dropContainedLocalImportBatches drops a top-level folder swallowed by another', () => {
+  const parent = { name: '系列', files: [file('系列/AL0001/main.jpg', 3), file('系列/AL0002/main.jpg', 4)] };
+  const child = { name: 'AL0001', files: [file('AL0001/main.jpg', 3)] };
+  const sibling = { name: 'AL0009', files: [file('AL0009/main.jpg', 5)] };
+  const result = batch.dropContainedLocalImportBatches([parent, child, sibling]);
+  assert.deepEqual(result.batches.map((item) => item.name), ['系列', 'AL0009']);
+  assert.deepEqual(result.dropped.map((item) => item.name), ['AL0001']);
+});
+
+test('same temp folder name in different parents is not a duplicate import', () => {
+  // 父目录里至少两个子目录才是 batch 模式（一个子目录会被当成单个商品）。
+  const day1 = batch.planLocalFolderImport(
+    [file('10-25/1/main.jpg', 3), file('10-25/2/main.jpg', 3)],
+    SUPPORTED,
+  );
+  const day2 = batch.planLocalFolderImport(
+    [file('10-26/1/main.jpg', 3), file('10-26/2/main.jpg', 3)],
+    SUPPORTED,
+  );
+
+  // 「1」「2」这种临时目录名只在父目录里唯一：换了父目录就不是重复。
+  const cross = batch.splitDuplicateLocalImportGroups(day2.groups, day1.groups, { rootName: day2.rootName });
+  assert.deepEqual(cross.groups.map((group) => group.folderName), ['1', '2']);
+  assert.deepEqual(cross.duplicates, []);
+
+  // 同一个父目录再拖一次：整批都按「已导入」跳过。
+  const again = batch.splitDuplicateLocalImportGroups(day1.groups, day1.groups, { rootName: day1.rootName });
+  assert.deepEqual(again.groups, []);
+  assert.deepEqual(again.duplicates, [
+    { folderName: '1', reason: 'existing' },
+    { folderName: '2', reason: 'existing' },
+  ]);
+});
+
+test('SKU-named folder repeated under a different parent is still the same product', () => {
+  const first = batch.planLocalFolderImport(
+    [file('系列A/HN0001/main.jpg', 3), file('系列A/HN0002/main.jpg', 4)],
+    SUPPORTED,
+  );
+  const second = batch.planLocalFolderImport(
+    [file('系列B/HN0001/main.jpg', 3), file('系列B/HN0003/main.jpg', 7)],
+    SUPPORTED,
+  );
+  const result = batch.splitDuplicateLocalImportGroups(second.groups, first.groups, { rootName: second.rootName });
+  assert.deepEqual(result.groups.map((group) => group.folderName), ['HN0003']);
+  assert.deepEqual(result.duplicates, [{ folderName: 'HN0001', reason: 'existing' }]);
+});

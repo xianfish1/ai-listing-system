@@ -42,6 +42,9 @@ python -m services.api.main
 http://127.0.0.1:8787
 ```
 
+macOS / Linux 上用 `bash start-api.sh`（等价于 `python3 -m services.api.main`），
+完整步骤见 `docs/DEPLOY_NEW_MACOS.md`。
+
 ### 局域网访问（多台设备）
 
 打开「设置 → 局域网访问」，勾选「允许局域网设备访问」后点「应用网络设置」：

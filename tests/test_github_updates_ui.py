@@ -179,3 +179,30 @@ def test_update_panel_assets_are_cache_bumped() -> None:
     assert "feature=github-updates-v1" in html
     assert html.count("feature=github-updates-v1") >= 2
     assert "app.js?v=" in html
+
+
+def test_topbar_has_global_update_reminder() -> None:
+    html = INDEX.read_text(encoding="utf-8")
+    script = APP.read_text(encoding="utf-8")
+    styles = STYLES.read_text(encoding="utf-8")
+
+    # 提醒按钮挂在 topbar（所有视图共用），而不是只在设置页里有。
+    topbar = html[html.index('<header class="topbar">'):]
+    topbar = topbar[: topbar.index("</header>")]
+    assert 'id="update-reminder-btn"' in topbar
+    assert 'id="update-reminder-text"' in topbar
+    assert " hidden>" in topbar
+
+    for function in (
+        "function renderUpdateReminder",
+        "async function refreshUpdateReminder",
+        "async function handleUpdateReminderClick",
+    ):
+        assert function in script
+    # 缓存过期才补查，避免每次打开页面都打 GitHub。
+    assert "UPDATE_REMINDER_STALE_MS" in script
+    assert 'target.id === "update-reminder-btn"' in script
+    # 设置页状态渲染后要同步顶栏提醒。
+    assert "renderUpdateReminder(current)" in _function_body(script, "function renderUpdateStatus")
+    # 本工程没有全局 [hidden] 规则，必须显式写。
+    assert ".update-reminder[hidden]" in styles

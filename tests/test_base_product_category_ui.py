@@ -83,7 +83,7 @@ def test_base_product_category_wiring_in_script():
     assert "template.attribute_values" in script
     assert "state.editingBaseProductAttributeValues = { ...templateValues }" in script
     # 老模板（只存类目）会提示用同名「存为模板」补存属性值。
-    assert "该模板未保存属性值" in script
+    assert "该模板还没有属性值" in script
     assert "用同名「存为模板」即可补上" in script
     # Old flat picker helpers removed.
     assert "loadMergedBaseCategories" not in script

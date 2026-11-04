@@ -9,7 +9,8 @@
     <link rel="preload" href="/fonts/inter-400-latin.woff2" as="font" type="font/woff2" crossorigin />
     <link rel="preload" href="/fonts/inter-500-latin.woff2" as="font" type="font/woff2" crossorigin />
     <link rel="stylesheet" href="/fonts.css?v=self-hosted-v1" />
-    <link rel="stylesheet" href="/styles.css?v=color-quick-select-all-v1&feature=category-cascader-v1&feature=desc-profile-base-detail-v2&feature=base-product-multiselect-v1&feature=base-product-stage-v1&feature=local-import-queue-v1&feature=nas-import-queue-retry-v1&feature=copy-editor-errors-v1&feature=job-generation-feedback-v1&feature=fill-missing-attributes-v1&feature=multi-select-custom-value-v1&feature=copy-template-mode-cards-v1&feature=jobs-time-buckets-v1&feature=jobs-collapsed-by-default-v1&feature=ai-color-connection-v1&feature=size-chart-local-image-v1&feature=refresh-position-v1&feature=refresh-inline-v1&feature=jobs-sku-thumb-v1&feature=size-chart-last-image-v1&feature=switch-line-v1&feature=watermark-redesign-v1&feature=mabang-account-list-v1&feature=worker-per-account-v1&feature=mabang-account-ui-v4&feature=import-headed-window-v1&feature=base-color-follow-images-v1&feature=store-template-account-v1&feature=base-product-rerecognize-v1&feature=github-updates-v1&feature=category-cascader-v1&feature=skills-management-v1" />
+    <link rel="stylesheet" href="/styles.css?v=update-reminder-v1&feature=store-promotion-recollect-v1&feature=category-cascader-v1&feature=desc-profile-base-detail-v2&feature=base-product-multiselect-v1&feature=base-product-stage-v1&feature=local-import-queue-v1&feature=nas-import-queue-retry-v1&feature=copy-editor-errors-v1&feature=job-generation-feedback-v1&feature=fill-missing-attributes-v1&feature=multi-select-custom-value-v1&feature=copy-template-mode-cards-v1&feature=jobs-time-buckets-v1&feature=jobs-collapsed-by-default-v1&feature=ai-color-connection-v1&feature=size-chart-local-image-v1&feature=refresh-position-v1&feature=refresh-inline-v1&feature=jobs-sku-thumb-v1&feature=size-chart-last-image-v1&feature=switch-line-v1&feature=watermark-redesign-v1&feature=mabang-account-list-v1&feature=worker-per-account-v1&feature=mabang-account-ui-v4&feature=import-headed-window-v1&feature=base-color-follow-images-v1&feature=store-template-account-v1&feature=base-product-rerecognize-v1&feature=github-updates-v1&feature=category-cascader-v1&feature=skills-management-v1&feature=title-workbench-v1&feature=base-batch-cost-v1&feature=retry-title-skill-v1&feature=variant-image-thumb-picker-v2&feature=title-ai-suggest-v2&feature=update-reminder-v1" />
+    <link rel="stylesheet" href="/title-workbench.css?v=2" />
   </head>
   <body>
     <div class="app">
@@ -59,7 +60,14 @@
             <h1 id="view-title">工作台总览</h1>
             <p id="service-status">正在检查服务状态...</p>
           </div>
-          <button id="refresh-btn">刷新</button>
+          <div class="topbar-actions">
+            <!-- 全局更新提醒：任何视图都看得到；有新版本时点亮，点一下直接走「确认 → 下载校验 → 重启」。 -->
+            <button id="update-reminder-btn" type="button" class="update-reminder" hidden>
+              <span class="update-reminder-dot" aria-hidden="true"></span>
+              <span id="update-reminder-text">发现新版本</span>
+            </button>
+            <button id="refresh-btn">刷新</button>
+          </div>
         </header>
         <div id="global-operation-feedback" class="operation-feedback" role="status" aria-live="polite" hidden></div>
         <section id="dashboard" class="view active">
@@ -173,6 +181,7 @@
                 <button id="create-base-product-btn">从 NAS 创建</button>
                 <button id="create-local-base-product-btn" class="secondary" type="button">＋ 添加文件夹</button>
                 <button id="local-import-queue-show" class="chip" type="button" hidden>显示导入队列</button>
+                <button id="base-title-queue-show" class="chip" type="button" hidden>显示标题队列</button>
                 <button id="copy-to-store-templates-btn">复制到店铺模板</button>
               </div>
             </div>
@@ -198,6 +207,18 @@
               <p class="muted local-import-queue-hint">本地与 NAS 导入都排在这里：本地可连续点「＋ 添加文件夹」逐个加入，或把<b>多个商品文件夹一起拖进基础商品面板</b>批量加入；NAS 从「从 NAS 创建 / 浏览…」选中的目录也会进队列。导入失败或 AI 识别出错的行右侧可点「重试」。</p>
               <ol id="local-import-queue-list" class="local-import-queue-list"></ol>
             </div>
+            <!-- 标题队列：批量「重新识别标题」按勾选顺序逐个排队，生成结果留在行里并可再打开结果弹窗。 -->
+            <div id="base-title-queue" class="local-import-queue" hidden>
+              <div class="local-import-queue-head">
+                <span id="base-title-queue-summary" class="local-import-queue-summary"></span>
+                <span class="local-import-queue-head-actions">
+                  <button type="button" id="base-title-queue-view" class="chip" hidden>查看结果</button>
+                  <button type="button" id="base-title-queue-close" class="chip" title="收起标题队列（结果仍可在「显示标题队列」里查看）">关闭</button>
+                </span>
+              </div>
+              <p class="muted local-import-queue-hint">「重新识别标题」按勾选顺序逐条排队；识别出的标题会直接显示在这一行，全部跑完会弹窗列出全部标题，可逐个或一次性复制。</p>
+              <ol id="base-title-queue-list" class="local-import-queue-list"></ol>
+            </div>
             <div id="base-product-batch-bar" class="base-product-batch-bar" hidden>
               <span id="base-product-batch-count" class="base-product-batch-count">已选 0 个</span>
               <button type="button" class="chip" data-base-batch-action="select-all">全选当前列表</button>
@@ -205,6 +226,9 @@
               <span class="base-product-batch-divider" aria-hidden="true"></span>
               <span class="base-product-batch-label">AI 重识别</span>
               <button type="button" class="chip chip--ai" data-base-batch-action="retry-title" title="只对勾选商品重新生成英文标题，不改详情和颜色图">重新识别标题</button>
+              <select id="base-retry-skill" class="base-retry-skill" title="只影响「重新识别标题」：选中的规则会强制用于这批商品；留在「自动匹配」则按商品范围和默认规则自动选择">
+                <option value="">标题规则：自动匹配（默认）</option>
+              </select>
               <button type="button" class="chip chip--ai" data-base-batch-action="retry-description" title="只对勾选商品重新生成详情，不改标题和颜色图">重新识别详情</button>
               <button type="button" class="chip chip--ai" data-base-batch-action="retry-colors" title="对勾选商品重新识别全部颜色图的颜色（含已命名的颜色图）">重新识别颜色图</button>
               <button type="button" class="chip danger-ghost" data-base-batch-action="delete">批量删除</button>
@@ -316,7 +340,11 @@
                   <input id="store-template-category-id" type="hidden" />
                   <select id="store-template-category-profile" hidden></select>
                 </div>
-                <label>店铺促销活动<select id="store-template-promotion"><option value="">活动未配置</option></select></label>
+                <div id="store-promotion-field" class="store-promotion-field wide">
+                  <label>店铺促销活动<select id="store-template-promotion"><option value="">活动未配置</option></select></label>
+                  <button id="store-template-promotion-recollect" type="button" class="secondary-button" title="在马帮当前商品编辑页重读「选择折扣活动」列表（不改动商品）">重新采集活动</button>
+                  <span id="store-template-promotion-status" class="muted"></span>
+                </div>
               </div>
               <div class="category-ai-row">
                 <button id="store-template-ai-attributes-btn" type="button" class="secondary-button">AI 推荐属性值</button>
@@ -558,6 +586,21 @@
           </div>
         </dialog>
 
+        <dialog id="base-title-result-dialog" class="workflow-dialog base-title-result-dialog">
+          <div class="panel-head"><h2>标题识别结果</h2><button type="button" data-close-dialog="base-title-result-dialog" aria-label="关闭">×</button></div>
+          <p id="base-title-result-summary" class="muted"></p>
+          <div class="base-title-result-scroll">
+            <table class="listing-copy-sku-table base-title-result-table">
+              <thead><tr><th>SKU</th><th>新标题</th><th></th></tr></thead>
+              <tbody id="base-title-result-rows"></tbody>
+            </table>
+          </div>
+          <div class="actions">
+            <button type="button" id="base-title-result-copy-all" class="secondary-button">复制全部标题</button>
+            <button type="button" data-close-dialog="base-title-result-dialog">关闭</button>
+          </div>
+        </dialog>
+
         <dialog id="nas-browser-dialog" class="workflow-dialog">
           <div class="panel-head"><h2>选择商品文件夹</h2><button type="button" data-close-dialog="nas-browser-dialog" aria-label="关闭">×</button></div>
           <p class="muted nas-browser-root-hint">
@@ -629,7 +672,8 @@
                 </div>
                 <div class="listing-copy-head-actions-sub">
                   <button id="select-all-listing-copies-btn" type="button" class="secondary-button">全选新建</button>
-                  <span class="muted">「全选新建」只勾选还没跑过的副本；失败/已完成请单条勾选。已完成区按完成时间分组，点分组标题可折叠隐藏</span>
+                  <button id="delete-selected-listing-copies-btn" type="button" class="secondary-button danger-ghost" title="删除勾选的店铺刊登副本（连带 SKU、价格和未完成自动化任务；正在执行/已排队的会跳过）" disabled>批量删除副本</button>
+                  <span class="muted">「全选新建」只勾选还没跑过、也没在执行/排队的副本（待领取、执行中会跳过）；失败/已完成请单条勾选。已完成区按完成时间分组，点分组标题可折叠隐藏</span>
                 </div>
               </div>
             </div>
@@ -700,35 +744,37 @@
           <div class="panel"><h2>执行链路</h2><div id="project-runtime-chain" class="plan-chain"></div></div>
         </section>
 
-        <section id="skills" class="view">
-          <div class="panel">
-            <div class="panel-head">
-              <div>
-                <h2>标题 Skills</h2>
-                <p class="muted">配置 AI 自动生成 Shopee 标题的规则：字数目标、补充规则、热词策略。默认 Skill 在导入和重试标题时自动套用；未配置时使用内置默认规则。</p>
-              </div>
-              <button id="add-title-skill-btn" type="button">新增 Skill</button>
-            </div>
-            <div id="title-skills-list" class="settings-connection-list"></div>
-          </div>
-          <div class="panel">
-            <div class="panel-head">
-              <div>
-                <h2>最新热词</h2>
-                <p class="muted">维护 Shopee 搜索热词词库。生成标题时按生效 Skill 的热词策略使用（在 Skill 里可切换：参考融入 / 尽量包含 / 不使用）。</p>
-              </div>
-              <span id="hot-words-stats" class="muted small"></span>
-            </div>
-            <div class="hot-words-adder">
-              <textarea id="hot-words-input" rows="3" placeholder="每行一个热词，例：&#10;oversized tee&#10;gift for mom"></textarea>
-              <div class="hot-words-adder-actions">
-                <input id="hot-words-tag" placeholder="标签（可选，如 品类/节日）" />
-                <button id="add-hot-words-btn" type="button">添加热词</button>
-                <button id="clear-hot-words-btn" type="button" class="ghost-danger">清空热词</button>
+        <section id="skills" class="view tkw-workbench" aria-label="Shopee 标题工作台">
+          <header class="tkw-heading">
+            <div><span class="tkw-eyebrow">菲律宾站 · PH</span><h2>Shopee 标题工作台</h2><p>按日期维护关键词，让每个标题都有选词依据。</p></div>
+            <button type="button" data-tkw-action="refresh" class="secondary">刷新数据</button>
+          </header>
+          <div id="tkw-notice" class="tkw-notice" role="status" aria-live="polite" hidden></div>
+          <nav class="tkw-tabs" role="tablist" aria-label="标题工作台">
+            <button id="tkw-tab-keywords" type="button" role="tab" aria-controls="tkw-panel-keywords" aria-selected="true" data-tkw-tab="keywords">热词库</button>
+            <button id="tkw-tab-rules" type="button" role="tab" aria-controls="tkw-panel-rules" aria-selected="false" tabindex="-1" data-tkw-tab="rules">标题规则</button>
+            <button id="tkw-tab-preview" type="button" role="tab" aria-controls="tkw-panel-preview" aria-selected="false" tabindex="-1" data-tkw-tab="preview">生成预览</button>
+          </nav>
+          <section id="tkw-panel-keywords" role="tabpanel" aria-labelledby="tkw-tab-keywords">
+            <div class="tkw-library-bar"><label>词库<select id="tkw-library" aria-label="当前词库"></select></label><button type="button" data-tkw-action="new-library" class="secondary">新建词库</button><span class="tkw-spacer"></span><button type="button" data-tkw-action="import">导入 Excel</button><button type="button" data-tkw-action="paste" class="secondary">批量粘贴</button><button type="button" data-tkw-action="export" class="secondary">导出</button></div>
+            <div class="tkw-data-layout">
+              <aside class="tkw-batches"><div class="tkw-sidebar-heading">数据批次<span>按数据日期</span></div><div id="tkw-batch-list"><p class="tkw-empty">正在加载批次…</p></div></aside>
+              <div class="tkw-sheet">
+                <div id="tkw-batch-summary" class="tkw-batch-summary"></div>
+                <div class="tkw-filters"><input id="tkw-search" type="search" aria-label="搜索关键词" placeholder="搜索关键词…" /><select id="tkw-filter-category" aria-label="筛选品类"></select><select id="tkw-filter-audience" aria-label="筛选人群"></select><select id="tkw-filter-status" aria-label="筛选使用状态"></select><label class="tkw-check"><input id="tkw-extra-metrics" type="checkbox" />更多指标</label></div>
+                <div class="tkw-selection"><span id="tkw-selected-count">已选 0 项</span><button type="button" data-tkw-action="bulk-edit" class="secondary" disabled id="tkw-bulk-edit">批量编辑</button><button type="button" data-tkw-action="clear-selection" class="tkw-text-button">取消选择</button><span class="tkw-spacer"></span><small>点击列名排序 · 点击行内编辑修正数据</small></div>
+                <div id="tkw-grid" class="tkw-grid" tabindex="0" role="region" aria-label="关键词数据表"></div>
+                <footer class="tkw-pagination"><span id="tkw-page-summary"></span><label>每页<select id="tkw-page-size"><option>25</option><option selected>50</option><option>100</option></select></label><button type="button" data-tkw-action="prev-page" id="tkw-prev" class="secondary">上一页</button><span id="tkw-page-number"></span><button type="button" data-tkw-action="next-page" id="tkw-next" class="secondary">下一页</button></footer>
               </div>
             </div>
-            <div id="hot-words-list" class="hot-words-list"></div>
-          </div>
+          </section>
+          <section id="tkw-panel-rules" role="tabpanel" aria-labelledby="tkw-tab-rules" hidden>
+            <div class="tkw-section-head"><div><h3>标题规则</h3><p>按商品品类与人群自动匹配。同一范围使用一套默认规则。</p></div><div><button type="button" data-tkw-action="new-rule-from-preset" class="secondary">从运营模板创建</button> <button type="button" data-tkw-action="new-rule">新增规则</button></div></div>
+            <div id="tkw-rule-list" class="tkw-rule-list"></div>
+          </section>
+          <section id="tkw-panel-preview" role="tabpanel" aria-labelledby="tkw-tab-preview" hidden>
+            <div class="tkw-preview-layout"><div class="tkw-preview-controls"><h3>选择商品试生成</h3><label>商品<select id="tkw-product"><option value="">请选择已有商品</option></select></label><div id="tkw-product-info" class="tkw-product-info"></div><div class="tkw-form-grid"><label>确认品类<select id="tkw-preview-category"></select></label><label>确认人群<select id="tkw-preview-audience"></select></label></div><label>标题规则<select id="tkw-preview-skill"><option value="">自动匹配规则</option></select></label><label>数据批次<select id="tkw-preview-batch"><option value="">自动选最新匹配批次</option></select></label><p class="tkw-hint">手动选择历史批次仅用于本次预览。生成结果不会自动改写商品。</p><button type="button" id="tkw-generate" data-tkw-action="generate">生成标题预览</button></div><div><div id="tkw-preview-result" class="tkw-preview-result"><div class="tkw-empty"><strong>先看效果，再采用标题</strong><p>选择商品后，可检查标题长度、选词依据和数据日期。</p></div></div><details class="tkw-history"><summary>生成记录</summary><div id="tkw-history-list" class="tkw-hint">选择商品后查看记录。</div></details></div></div>
+          </section>
         </section>
 
         <section id="settings" class="view settings-view">
@@ -871,6 +917,13 @@
                       <label>完成后延后压缩（天）<input id="settings-storage-compact-delay" type="number" min="1" max="3650" step="1" /></label>
                       <label>压缩长边（像素）<input id="settings-storage-compact-edge" type="number" min="200" max="4000" step="50" /></label>
                       <label>JPEG 质量（50~95）<input id="settings-storage-compact-quality" type="number" min="50" max="95" step="1" /></label>
+                    </div>
+                    <div class="storage-policy-head">
+                      <div>
+                        <h3>商品素材删除</h3>
+                        <p class="muted small">关闭后不再删除任何商品素材目录（自动清理与手动清理都不删），只按上面的设置压缩。</p>
+                      </div>
+                      <label class="toggle-field"><input id="settings-storage-assets-cleanup-enabled" type="checkbox" />允许删除商品素材</label>
                     </div>
                   </section>
                 </div>
@@ -1063,39 +1116,6 @@
       </div>
     </dialog>
 
-    <dialog id="title-skill-dialog" class="workflow-dialog compact-dialog">
-      <div class="panel-head"><h2>标题 Skill</h2><button type="button" data-close-dialog="title-skill-dialog" aria-label="关闭">×</button></div>
-      <p class="muted small profile-intro">Skill 决定 AI 生成 Shopee 标题的规则：字数目标、补充规则、热词策略。设为默认后，导入和重试标题都会自动套用；热词在「Skills 页 · 最新热词」里维护。</p>
-
-      <div class="profile-basic-grid">
-        <label>Skill 名称<input id="title-skill-name" autocomplete="off" placeholder="例：Shopee 标题 · 主推款" /></label>
-        <label>热词策略
-          <select id="title-skill-hot-word-policy">
-            <option value="reference">参考融入（相关才用）</option>
-            <option value="prefer">尽量包含（自然前提下多用）</option>
-            <option value="off">不使用热词</option>
-          </select>
-        </label>
-        <label>标题最少字数<input id="title-skill-min-chars" type="number" min="0" max="120" value="40" /></label>
-        <label>标题最多字数<input id="title-skill-max-chars" type="number" min="10" max="120" value="100" /></label>
-      </div>
-
-      <div class="profile-field">
-        <div class="profile-block-title">补充规则（每行一条，注入标题生成提示）</div>
-        <textarea id="title-skill-instructions" rows="6" placeholder="例：&#10;标题开头优先放品类词（如 Men T-Shirt）。&#10;包含适用场景词（Daily Wear / Party）。&#10;避免堆砌与商品无关的修饰词。"></textarea>
-        <small class="field-hint">写给 AI 的额外标题规则，中文写也可以。留空＝只用字数目标与热词策略。</small>
-      </div>
-
-      <div class="form-grid compact-form">
-        <label class="toggle-field wide"><input id="title-skill-enabled" type="checkbox" checked />启用</label>
-        <label class="toggle-field wide"><input id="title-skill-default" type="checkbox" />设为默认（生成标题时自动套用）</label>
-      </div>
-
-      <p id="title-skill-result" class="muted"></p>
-      <div class="actions">
-        <button id="save-title-skill-btn" type="button">保存 Skill</button>
-      </div>
-    </dialog>
 
     <div id="image-lightbox" role="dialog" aria-modal="true" aria-label="放大图片"><img id="image-lightbox-img" alt="" /></div>
     <div id="base-maintenance-modal" class="modal-backdrop" hidden>
@@ -1153,7 +1173,21 @@
                 <div class="form-grid compact-form">
                   <label>商品名<input id="base-maintenance-name" /></label>
                   <label>主 SKU<input id="base-maintenance-main-sku" /></label>
-                  <label class="wide">标题<input id="base-maintenance-title-input" /></label>
+                  <div class="wide base-title-field">
+                    <label for="base-maintenance-title-input">标题</label>
+                    <div class="base-title-row">
+                      <input id="base-maintenance-title-input" />
+                      <select id="base-maintenance-audience" aria-label="适用人群" title="AI 生成标题时使用的适用人群；选择后会随「保存维护内容」写入商品">
+                        <option value="">适用人群：按商品</option>
+                        <option value="boys">男童</option>
+                        <option value="girls">女童</option>
+                        <option value="men">男装</option>
+                        <option value="women">女装</option>
+                      </select>
+                      <button id="base-maintenance-ai-title" type="button" class="secondary-button">AI 生成标题</button>
+                    </div>
+                    <div id="base-maintenance-title-suggestions" class="base-title-suggestions" role="status" aria-live="polite" hidden></div>
+                  </div>
                   <label class="wide">详情<textarea id="base-maintenance-description"></textarea></label>
                 </div>
               </section>
@@ -1230,6 +1264,7 @@
                 <div class="maintenance-section-sub">
                   <h4>识别出的尺码</h4>
                   <span class="maintenance-section-action-links">
+                    <button id="base-sizes-common" type="button" class="link-button">常用 XXS–XXXL</button>
                     <button id="base-sizes-select-all" type="button" class="link-button">全选</button>
                     <button id="base-sizes-clear" type="button" class="link-button">清空</button>
                   </span>
@@ -1248,6 +1283,10 @@
                 <p class="muted">按商品颜色/款式分行保存各站点价格（成本 + 每站售价/原价）。颜色行跟随上方「颜色图」区自动增删与排序（颜色图可拖动调整顺序）。粘贴价格表后点「解析价格表」预览，或逐格填写；保存维护内容时一并保存。档位编排与上架在店铺副本编辑器完成。</p>
                 <div class="base-price-toolbar">
                   <button id="base-price-apply-all" type="button" class="secondary-button">覆盖全部 SKU：首行价格应用到全部颜色</button>
+                  <span class="base-price-batch-cost">
+                    <input id="base-price-batch-cost" type="number" min="0" step="0.01" placeholder="成本价" aria-label="批量成本价" />
+                    <button id="base-price-batch-cost-apply" type="button" class="secondary-button mini">批量填成本价</button>
+                  </span>
                   <button id="base-price-cnsc-site-order" type="button" class="secondary-button mini">识别顺序</button>
                   <span id="base-price-cnsc-site-order-display" class="muted"></span>
                 </div>
@@ -1503,7 +1542,8 @@
       </footer>
     </dialog>
 
-    <script src="/local-folder-batch.js?v=local-import-queue-v1"></script>
-    <script src="/app.js?v=color-dropdown-live-refresh-v1&feature=desc-profile-base-detail-v2&feature=base-product-multiselect-v1&feature=description-media-v1&feature=local-folder-batch-v1&feature=local-import-queue-v1&feature=import-scoped-assets-v1&feature=product-image-upload-v2&feature=category-custom-option-v1&feature=base-product-stage-v1&feature=desc-required-spec-rows-v1&feature=field-not-editable-v1&feature=job-requeue-in-place-v1&feature=retry-no-detail-dialog-v1&feature=description-tail-insert-v1&feature=loader-retry-v1&feature=template-sale-price-editable-v1&feature=size-chart-template-label-v1&feature=size-chart-local-image-v1&feature=size-chip-drag-order-v1&feature=size-price-editable-v1&feature=copy-list-new-only-v1&feature=automation-live-steps-v3&feature=local-import-queue-v1&feature=base-product-time-all-v1&feature=jobs-sku-thumb-v1&feature=size-chart-last-image-v1&feature=watermark-redesign-v1&feature=mabang-account-list-v1&feature=worker-per-account-v1&feature=mabang-account-ui-v4&feature=import-headed-window-v1&feature=base-color-follow-images-v1&feature=page-import-worker-standby-v2&feature=store-template-duplicate-v1&feature=store-template-account-v1&feature=hide-fill-missing-batch-v1&feature=base-product-rerecognize-v1&feature=category-quick-template-values-v1&feature=github-updates-v1&feature=cross-border-mode-v1&feature=stale-select-text-fallback-v1&feature=cnsc-price-section-hide-v1&feature=color-quick-pick-v1&feature=color-quick-select-all-v1&feature=color-dropdown-live-refresh-v1&feature=skills-management-v1"></script>
+    <script src="/local-folder-batch.js?v=local-import-duplicate-guard-v1"></script>
+    <script src="/app.js?v=update-reminder-v1&feature=store-promotion-recollect-v1&feature=desc-profile-base-detail-v2&feature=base-product-multiselect-v1&feature=description-media-v1&feature=local-folder-batch-v1&feature=local-import-queue-v1&feature=import-scoped-assets-v1&feature=product-image-upload-v2&feature=category-custom-option-v1&feature=base-product-stage-v1&feature=desc-required-spec-rows-v1&feature=field-not-editable-v1&feature=job-requeue-in-place-v1&feature=retry-no-detail-dialog-v1&feature=description-tail-insert-v1&feature=loader-retry-v1&feature=template-sale-price-editable-v1&feature=size-chart-template-label-v1&feature=size-chart-local-image-v1&feature=size-chip-drag-order-v1&feature=size-price-editable-v1&feature=copy-list-new-only-v1&feature=automation-live-steps-v3&feature=local-import-queue-v1&feature=base-product-time-all-v1&feature=jobs-sku-thumb-v1&feature=size-chart-last-image-v1&feature=watermark-redesign-v1&feature=mabang-account-list-v1&feature=worker-per-account-v1&feature=mabang-account-ui-v4&feature=import-headed-window-v1&feature=base-color-follow-images-v1&feature=page-import-worker-standby-v2&feature=store-template-duplicate-v1&feature=store-template-account-v1&feature=hide-fill-missing-batch-v1&feature=base-product-rerecognize-v1&feature=category-quick-template-values-v1&feature=github-updates-v1&feature=cross-border-mode-v1&feature=stale-select-text-fallback-v1&feature=cnsc-price-section-hide-v1&feature=color-quick-pick-v1&feature=color-quick-select-all-v1&feature=color-dropdown-live-refresh-v1&feature=skills-management-v1&feature=title-workbench-v1&feature=quick-template-reliable-v1&feature=base-common-sizes-v1&feature=base-batch-cost-v1&feature=retry-title-skill-v1&feature=variant-image-thumb-picker-v2&feature=description-image-width-log-v1&feature=description-image-width-fix-v1&feature=local-import-duplicate-guard-v1&feature=base-save-queue-v1&feature=base-selection-clear-on-nav-v1&feature=copy-batch-delete-v1&feature=copy-image-asset-root-v1&feature=title-ai-suggest-v2&feature=title-audience-detect-v1&feature=update-reminder-v1"></script>
+    <script src="/title-workbench.js?v=7-children-20261102"></script>
   </body>
 </html>

@@ -1,0 +1,82 @@
+const { chromium } = require('playwright');
+const fs = require('node:fs');
+const path = require('node:path');
+const assert = require('node:assert/strict');
+
+// Browser contract test with deterministic API responses; never touches a real store.
+(async () => {
+  const web = path.resolve(__dirname, '../apps/web');
+  const browser = await chromium.launch({ headless: true, channel: 'msedge' });
+  try {
+    const page = await browser.newPage({ viewport: { width: 1450, height: 1000 } });
+    const errors = [];
+    page.on('pageerror', error => errors.push(error.message));
+    await page.setContent(fs.readFileSync(path.join(web, 'index.html'), 'utf8').replace(/<script[\s\S]*?<\/script>/g, '').replace(/<link[^>]*>/g, ''));
+    await page.addStyleTag({ path: path.join(web, 'styles.css') });
+    await page.evaluate(() => {
+      document.querySelectorAll('.view').forEach(e => e.classList.remove('active'));
+      document.querySelector('#skills').classList.add('active');
+      window.calls = [];
+      window.escapeHtml = value => String(value ?? '').replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;').replaceAll('"', '&quot;');
+      window.showOperationFeedback = () => {};
+      window.api = async (url, opts = {}) => {
+        const body = opts.body ? JSON.parse(opts.body) : {};
+        window.calls.push({ url, method: opts.method || 'GET', body });
+        const batch = { id: 'b1', library_id: 'l1', name: '九月数据', data_date: '2026-09-20', source: '测试来源', source_type: 'measured', row_count: 1161, enabled: true };
+        if (url === '/api/keyword-libraries') return { items: [{ id: 'l1', name: '菲律宾服装词库' }] };
+        if (url.startsWith('/api/keyword-batches')) return { items: [batch] };
+        if (url === '/api/title-skills') return { items: [{ id: 's1', name: '童装 T 恤', category: 'tshirt', audience: 'kids', library_id: 'l1', title_min_chars: 40, title_max_chars: 100, is_default: true, enabled: true }] };
+        if (url === '/api/title-skill-presets') return { items: [{ id: 'ph-men-print-tshirt', name: 'PH 男装印花 T 恤 · 仿运营模板', version: 1, scope: { market: 'PH', category: 'tshirt', audience: 'men' }, rule: { name: 'PH 男装印花 T 恤 · 仿运营模板', category: 'tshirt', audience: 'men', language: 'en', title_min_chars: 40, title_max_chars: 100, generation_mode: 'operator_template', fixed_terms: ['tshirt for men'], operator_allowances: ['100% Cotton'], operator_template: { core_term: 'tshirt for men', style_words: ['Anime', 'Cartoon', 'Retro', 'Streetwear'], companion_words: ['Print', 'Short Sleeve', 'Ootd'], patterns: ['{theme} {character} {core}'], trim_order: ['Ootd', '100% Cotton', 'Streetwear'], rules: [], source: 'Shopee标题 项目运营模板 · 人工核对快照', version: 1 } } }] };
+        if (url.startsWith('/api/keyword-rows')) return { items: [{ id: 'r1', word: 't shirt for kids boy', category: 'tshirt', audience: 'kids', search_volume: 173169, avg_30d_search_volume: 5772, growth_rate_percent: -0.27, status: 'enabled', notes: '' }], total: 1161, page: 1, page_size: 50 };
+        if (url === '/api/title-workbench/products') return { items: [{ id: 'p1', main_sku: 'AL0001', listing_title: 'Original title', category: 'tshirt', audience: 'kids', recognized_attributes: { material: 'cotton' } }] };
+        if (url.startsWith('/api/title-workbench/history')) return { items: [] };
+        if (url === '/api/keyword-import/preview') return { headers: ['关键词', '搜索量'], mapping: { word: '关键词', search_volume: '搜索量' }, total: 1, rows: [{ word: 'boys tee', search_volume: 200 }], errors: [], preview_id: 'preview1' };
+        if (url === '/api/keyword-import/confirm') return batch;
+        if (url === '/api/title-workbench/preview') return { id: 'g1', product_id: 'p1', skill: { name: '童装 T 恤' }, context: { batch, stale: true, age_days: 35, warnings: ['历史参考'], candidates: [{ word: 't shirt for kids boy' }], rejected: [] }, recommended_index: 0, titles: [{ title: 'Cartoon Graphic Print T Shirt for Kids Boy', chars: 43, status: 'PASS', accepted_terms: [{ word: 't shirt for kids boy', data_date: '2026-09-20', evidence_level: 'PH_MEASURED' }], warnings: [] }] };
+        if (url === '/api/title-workbench/apply') return { listing_title: 'Cartoon Graphic Print T Shirt for Kids Boy' };
+        return {};
+      };
+    });
+    await page.addStyleTag({ path: path.join(web, 'title-workbench.css') });
+    await page.addScriptTag({ path: path.join(web, 'title-workbench.js') });
+    await page.evaluate(() => window.TitleWorkbench.load());
+    assert.equal(await page.getByRole('heading', { name: 'Shopee 标题工作台', exact: true }).count(), 1);
+    assert.match(await page.locator('#tkw-grid').innerText(), /t shirt for kids boy/);
+    await page.locator('#tkw-search').fill('boys');
+    await page.waitForTimeout(400);
+    assert(await page.evaluate(() => window.calls.some(c => c.url.includes('search=boys'))));
+    await page.getByRole('tab', { name: '标题规则', exact: true }).click();
+    await page.getByRole('button', { name: '新增规则', exact: true }).click();
+    await page.locator('#tkw-rule-name').fill('新规则');
+    await page.locator('#tkw-rule-category').selectOption('tshirt');
+    await page.locator('#tkw-rule-audience').selectOption('men');
+    await page.locator('#tkw-rule-save').click();
+    assert(await page.evaluate(() => window.calls.some(c => c.url === '/api/title-skills' && c.method === 'POST' && c.body.audience === 'men')));
+    await page.getByRole('button', { name: '从运营模板创建', exact: true }).click();
+    await page.locator('#tkw-rule-name').waitFor();
+    assert.equal(await page.locator('#tkw-rule-mode').inputValue(), 'operator_template');
+    assert.equal(await page.locator('#tkw-tpl-core').inputValue(), 'tshirt for men');
+    await page.locator('#tkw-rule-save').click();
+    assert(await page.evaluate(() => window.calls.some(c => c.url === '/api/title-skills' && c.method === 'POST' && c.body.generation_mode === 'operator_template' && c.body.operator_template && c.body.operator_template.core_term === 'tshirt for men')));
+    await page.getByRole('tab', { name: '生成预览', exact: true }).click();
+    await page.locator('#tkw-product').selectOption('p1');
+    await page.locator('#tkw-generate').click();
+    await page.getByRole('button', { name: '采用此标题', exact: true }).waitFor();
+    assert.equal(await page.evaluate(() => window.calls.filter(c => c.url === '/api/title-workbench/apply').length), 0);
+    await page.getByRole('button', { name: '采用此标题', exact: true }).click();
+    assert.equal(await page.evaluate(() => window.calls.filter(c => c.url === '/api/title-workbench/apply').length), 1);
+    await page.getByRole('tab', { name: '热词库', exact: true }).click();
+    await page.getByRole('button', { name: '批量粘贴', exact: true }).click();
+    await page.locator('#tkw-import-text').fill('关键词\t搜索量\nboys tee\t200');
+    await page.locator('#tkw-import-source').fill('测试表格');
+    await page.locator('#tkw-import-date').fill('2026-10-25');
+    await page.locator('#tkw-import-preview').click();
+    await page.locator('#tkw-import-confirm').click();
+    assert(await page.evaluate(() => window.calls.some(c => c.url === '/api/keyword-import/confirm' && c.body.preview_id === 'preview1')));
+    assert.deepEqual(errors, []);
+    const out = path.resolve(__dirname, '../outputs/title-workbench-ui.png');
+    fs.mkdirSync(path.dirname(out), { recursive: true });
+    await page.screenshot({ path: out, fullPage: true });
+    console.log('PASS: grid/search, scoped rule save, preview requires explicit apply, paste preview/confirm; screenshot ' + out);
+  } finally { await browser.close(); }
+})().catch(error => { console.error(error); process.exitCode = 1; });

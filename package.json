@@ -1,0 +1,9 @@
+{
+  "name": "ai-listing-system",
+  "private": true,
+  "version": "1.0.2",
+  "description": "Node dependencies for the Mabang Playwright executors. They connect to the bundled Chrome over CDP, so `npm install` is enough — no `npx playwright install` browser download needed.",
+  "dependencies": {
+    "playwright": "1.61.1"
+  }
+}

@@ -11,8 +11,18 @@ from typing import Any
 import pytest
 
 from services.api.model_gateway import GenerationImage, GenerationRequest
-from services.api import main, storage, vision_listing
+from services.api import main, settings, storage, vision_listing
 from services.api.main import _color_translation_patch
+
+
+@pytest.fixture(autouse=True)
+def isolated_store(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """标题生成链路现在会读取词库/规则并写生成记录（keyword_workbench.record_generation
+    直接走 locked_store），必须隔离 STORE_FILE，否则测试会把记录写进真实 data/store.json。"""
+    monkeypatch.setattr(settings, "DATA_DIR", tmp_path)
+    monkeypatch.setattr(settings, "STORAGE_DIR", tmp_path / "storage")
+    monkeypatch.setattr(settings, "EXPORT_DIR", tmp_path / "exports")
+    monkeypatch.setattr(settings, "STORE_FILE", tmp_path / "store.json")
 
 
 # 1×1 red PNG — small enough to embed inline for image-read tests.
@@ -233,6 +243,32 @@ def test_numeric_sku_variants_are_sent_to_vision_for_color_naming(tmp_path: Path
     assert result.input_image_count == 3
     assert gateway.last_request is not None
     assert len(gateway.last_request.images) == 3
+
+
+def test_title_request_is_not_swallowed_by_unnamed_variant_images(tmp_path: Path) -> None:
+    """未命名的数字 SKU 图不能把「要标题」的调用自动切成纯颜色趟。
+
+    2026-11-02 修：基础商品维护的 AI 生成标题曾因此拿到空 titles（error 也为空）。
+    """
+    main = _write_image(tmp_path, "Main-front.jpg")
+    variant = _write_image(tmp_path, "1 (1).png")
+    assets = [
+        {"file_name": main.name, "file_path": str(main), "asset_type": "main"},
+        {"file_name": variant.name, "file_path": str(variant), "asset_type": "variant"},
+    ]
+    gateway = _StubGateway('{"title": "Boys Graphic Tee", "description": "D", "alternatives": ["Boys Cartoon Tee"]}')
+
+    result = vision_listing.generate_listing_from_images(
+        gateway=gateway, connection={"id": "c"},
+        base_product={"main_image": main.name, "recognized_colors": [], "variant_count": 1},
+        assets=assets, want_title=True, want_description=False, candidate_count=2,
+    )
+
+    assert result.ok
+    assert result.title_candidates
+    assert result.title_candidates[0]["title"] == "Boys Graphic Tee"
+    assert gateway.last_request is not None
+    assert "Fixed color palette" not in gateway.last_request.system
 
 
 def test_color_translation_patch_keeps_variant_image_mapping() -> None:
@@ -550,7 +586,9 @@ def test_import_names_numeric_color_images_even_when_listing_generation_is_disab
     result = main._enrich_with_vision_listing(product, {})
 
     assert gateway.last_request is not None
-    assert len(gateway.last_request.images) == 4
+    # 颜色那一趟只发颜色图：主图不是颜色图，混进来会顶掉一张改色图、还会让 #N
+    # 编号与写回下标错开一格。
+    assert len(gateway.last_request.images) == 3
     assert result["recognized_colors"] == ["Pink", "Purple", "Green"]
     assert result["variant_image_map"] == {
         "Pink": "SKU-01-wig only.png",
@@ -993,3 +1031,87 @@ def test_import_runs_text_and_color_stages_in_parallel() -> None:
     stage_block = source[source.index("def _run_text_stage() -> None:"): source.index("errors.extend(title_errors)")]
     assert not _re.search(r"(?<![a-zA-Z_])errors\.append\(", stage_block), "阶段内应写各自的错误列表"
     assert "title_errors.append(" in stage_block and "color_errors.append(" in stage_block
+
+
+def test_numbered_color_set_with_a_main_image_is_named_by_vision(tmp_path: Path) -> None:
+    """文件夹里另有主图时，1-9 这类无信息图仍要交给颜色识别命名。
+
+    现场：改色图重命名成 1-9 + 一张主图导入，扫描器为了不把多角度商品图当颜色，
+    把所有无信息图都留在主图角色，AI 颜色那一趟因此一张都看不到，颜色全是空的。
+    """
+    names = [f"{i}.png" for i in range(1, 10)]
+    assets = []
+    for name in ["主图.png", *names]:
+        path = _write_image(tmp_path, name)
+        assets.append({"file_name": name, "file_path": str(path), "asset_type": "main", "sku_option": ""})
+
+    candidates = vision_listing.ordered_unnamed_variant_assets(assets)
+    assert [asset["file_name"] for asset in candidates] == names
+    # 显式主图不参与配色。
+    assert "主图.png" not in [asset["file_name"] for asset in candidates]
+
+    colors = ["Apricot", "Purple", "Blue", "Red", "Black", "White", "Pink", "Brown", "Green"]
+    gateway = _StubGateway(
+        '{"title": "", "description": "", "color_translations": '
+        + json.dumps({name: color for name, color in zip(names, colors)})
+        + "}"
+    )
+    product = {"main_image": "主图.png", "recognized_colors": [], "variant_image_map": {}}
+
+    result = vision_listing.generate_listing_from_images(
+        gateway=gateway, connection={"id": "c"}, base_product=product, assets=assets,
+        want_title=False, want_description=False,
+    )
+
+    assert result.ok
+    assert gateway.last_request is not None
+    assert gateway.last_request.user.count("#") >= len(names)
+    assert "#1 1.png" in gateway.last_request.user and "#9 9.png" in gateway.last_request.user
+    assert "Fixed color palette" in gateway.last_request.user
+
+    patch = _color_translation_patch(product, result.color_translations or {}, assets=assets)
+    assert patch["recognized_colors"] == colors
+    assert patch["variant_image_map"] == {color: name for color, name in zip(colors, names)}
+
+
+def test_a_few_plain_main_images_stay_product_photos(tmp_path: Path) -> None:
+    """主图 + 多角度商品图 + 已命名颜色图的文件夹：少量无信息图不是改色图。"""
+    assets = []
+    for name, asset_type, sku_option in [
+        ("主图-正面.jpg", "main", ""),
+        ("主图-背面.jpg", "main", ""),
+        ("A白色.jpg", "variant", "White"),
+        ("1.jpg", "main", ""),
+        ("2.jpg", "main", ""),
+        ("详情1.jpg", "detail", ""),
+    ]:
+        path = _write_image(tmp_path, name)
+        assets.append({"file_name": name, "file_path": str(path), "asset_type": asset_type, "sku_option": sku_option})
+
+    assert vision_listing.plain_main_color_assets(assets) == []
+    assert [asset["file_name"] for asset in vision_listing.ordered_unnamed_variant_assets(assets)] == []
+
+
+def test_numbered_color_set_with_one_named_color_takes_the_rest(tmp_path: Path) -> None:
+    """一张已经命名的颜色图 + 1-9 时，剩下的无信息图继续由 AI 命名。"""
+    names = [f"{i}.png" for i in range(1, 10)]
+    assets = []
+    for name in ["A白色.png", *names]:
+        path = _write_image(tmp_path, name)
+        asset_type = "variant" if name == "A白色.png" else "main"
+        sku_option = "White" if name == "A白色.png" else ""
+        assets.append({"file_name": name, "file_path": str(path), "asset_type": asset_type, "sku_option": sku_option})
+
+    candidates = vision_listing.ordered_unnamed_variant_assets(assets)
+    assert [asset["file_name"] for asset in candidates] == names
+
+    translations = {name: color for name, color in zip(names, ["Apricot", "Purple", "Blue", "Red", "Black", "Pink", "Brown", "Green", "Apricot"])}
+    patch = _color_translation_patch(
+        {"recognized_colors": ["White"], "variant_image_map": {"White": "A白色.png"}},
+        translations,
+        assets=assets,
+    )
+    assert patch["recognized_colors"][0] == "White"
+    assert patch["variant_image_map"]["White"] == "A白色.png"
+    # 9 张图 + 已有的 White：重复的 Apricot 让位（不覆盖已有绑定），颜色数不重复。
+    assert len(patch["recognized_colors"]) == len(set(color.lower() for color in patch["recognized_colors"]))

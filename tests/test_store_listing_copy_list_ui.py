@@ -13,13 +13,16 @@ STYLES = ROOT / "apps" / "web" / "styles.css"
 
 def test_select_all_only_selects_new_copies() -> None:
     """现场反馈：全选把「已完成」的一起勾上，批量生成任务时容易误操作。
-    现在全选只覆盖「新建」区（没有作业、还没跑过的副本）。"""
+    现在全选只覆盖「新建」区（没有作业、还没跑过的副本；已排队/执行中的也跳过）。"""
 
     source = APP.read_text(encoding="utf-8")
     assert "function selectableListingCopies()" in source
     helper = source[source.index("function selectableListingCopies()"):]
     helper = helper[: helper.index("\n}\n")]
-    assert 'listingCopyTaskSection(jobs.get(copy.id)) === "new"' in helper, "只挑新建区"
+    assert 'listingCopyTaskSection(job) !== "new"' in helper, "只挑新建区"
+    # 已经排进队列（待领取/已领取）或正在执行的副本也跳过：它们已经有任务了。
+    assert 'ACTIVE_AUTOMATION_STATUSES.has(String(job?.status || "").toLowerCase())' in helper
+    assert 'const ACTIVE_AUTOMATION_STATUSES = new Set(["ready", "claimed", "running"]);' in source
 
     toggle = source[source.index("function toggleSelectAllListingCopies()"):]
     toggle = toggle[: toggle.index("\n}\n")]
@@ -59,7 +62,7 @@ def test_completed_copies_are_bucketed_by_time_and_collapsible() -> None:
 
 def test_copies_panel_copy_and_assets_updated() -> None:
     html = INDEX.read_text(encoding="utf-8")
-    assert "「全选新建」只勾选还没跑过的副本" in html
+    assert "「全选新建」只勾选还没跑过、也没在执行/排队的副本" in html
     assert "已完成区按完成时间分组，点分组标题可折叠隐藏" in html
     # app.js 是静态文件直出，改动必须带新的缓存参数，否则操作员浏览器仍加载旧脚本。
     assert "feature=copy-list-new-only-v1" in html
@@ -84,7 +87,8 @@ def test_local_folder_picking_avoids_browser_upload_confirm() -> None:
     assert 'if (target.id === "create-local-base-product-btn") {' in script
     assert "pickLocalProductFolder().catch(" in script
     # 批量导入不再 window.confirm（直接入队 + 提示）
-    batch_block = script[script.index("if (plan.mode === \"batch\")"): script.index("const category = categoryProfile(", script.index("if (plan.mode === \"batch\")"))]
+    hint_block_start = script.index("const duplicateHint = localImportDuplicateHint(duplicates);")
+    batch_block = script[hint_block_start: script.index("const category = categoryProfile(", hint_block_start)]
     assert "window.confirm(" not in batch_block
     assert "showOperationFeedback(" in batch_block
     # 规划器认 __relativePath
@@ -109,8 +113,45 @@ def test_local_import_supports_multiple_folders_batch() -> None:
 
     # 乱序/静默：拖拽时不要每条都弹提示
     assert "async function createBaseProductFromLocalFiles(allFiles, options = {})" in script
-    assert "if (options.quiet !== true) {" in script
+    # 单目录导入保持安静；批量导入 / 出现重复或被覆盖风险时才提示。
+    assert 'if (options.quiet !== true && (plan.mode === "batch" || duplicates.length || conflictNames.length)) {' in script
 
     # 提示与样式
     assert "多个商品文件夹一起拖进基础商品面板" in html
     assert "#product-maintenance.is-drop-target" in styles
+
+
+def test_copies_panel_has_batch_delete() -> None:
+    """勾选的副本可以一次删掉：一次请求、一次落库，正在执行的由后端按条跳过。"""
+
+    html = INDEX.read_text(encoding="utf-8")
+    styles = STYLES.read_text(encoding="utf-8")
+    script = APP.read_text(encoding="utf-8")
+
+    assert 'id="delete-selected-listing-copies-btn"' in html
+    assert "批量删除副本" in html
+    assert ".secondary-button.danger-ghost" in styles
+
+    assert "function updateListingCopyBatchDeleteButton()" in script
+    assert "async function deleteSelectedListingCopies()" in script
+    assert '"/api/store-listing-copies/batch-delete"' in script
+    assert 'if (target.id === "delete-selected-listing-copies-btn")' in script
+    # 按钮状态跟着勾选走：勾选变化时「全选新建」和「批量删除」一起刷新。
+    assert "updateListingCopyBatchDeleteButton();" in script
+
+
+def test_copy_images_resolve_from_its_own_import_folder() -> None:
+    """重复导入同一个 SKU 后素材库里有同名旧图：副本缩略图/编辑器要认本次导入目录。"""
+
+    script = APP.read_text(encoding="utf-8")
+    marker = "}" + chr(10)
+
+    thumb = script[script.index("function listingCopyThumbUrl(copy)"):]
+    thumb = thumb[: thumb.index(chr(10) + marker)]
+    assert "assetsForBaseProduct(base)" in thumb, "缩略图先按商品这次导入的目录找素材"
+    assert "state.assets.find(" in thumb, "找不到再退回整组（旧副本的主图可能只在旧目录）"
+
+    lookup = script[script.index("function listingCopyAssetByName(fileName)"):]
+    lookup = lookup[: lookup.index(chr(10) + marker)]
+    assert "copy.asset_root" in lookup, "副本编辑器按副本自己的 asset_root 取图"
+    assert "path === root || path.startsWith(" in lookup

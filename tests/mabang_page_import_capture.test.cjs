@@ -537,6 +537,39 @@ test('promotion_catalog_loaded is true when the dialog table provided activities
   assert.equal(result.promotion_catalog_loaded, true);
 });
 
+test('a selection on another page of the activity list is kept (not judged stale)', () => {
+  // 弹窗 10 条/页：本页没有选中的那条，但 total 显示还有别的页 → 不能判它失效，
+  // 否则导入确认会报"所选促销活动不属于当前店铺采集目录"。
+  const rows = Array.from({ length: 10 }, (_, index) => ({
+    discount_id: `page1-${index}`,
+    discount_name: `活动${index}`,
+    start_time: '2026-10-01 00:00:00',
+    end_time: '2026-12-01 00:00:00',
+    flag: 2,
+  }));
+  const activityTable = { __vue__: { tableData: rows } };
+  const dialog = {
+    __vue__: { total: 25 },
+    textContent: '选择折扣活动 活动名称 状态 操作',
+    querySelectorAll: (selector) => (selector.includes('table') ? [activityTable] : []),
+  };
+  const result = executeCapture({
+    href: 'https://publish.mabangerp.com/publish-ui/#/productDetailShopee?platformId=17',
+    columns: [],
+    rows: [],
+    promotionDialog: dialog,
+    vuexShopee: { variantAttributeModule: { mdDiscountActivity: { discount_id: 'picked-on-page-2', discount_name: '第二页活动' } } },
+  });
+
+  assert.equal(result.promotion_catalog_loaded, true);
+  const kept = result.promotion_options.find((item) => item.activity_id === 'picked-on-page-2');
+  assert.ok(kept, '分页列表里缺失的选中项要回显，不能丢');
+  assert.equal(kept.selected, true);
+  // 只有名称，没有状态/有效期 → 后端判 unresolved，不会冒充可用。
+  assert.equal(kept.status, '');
+  assert.ok(result.promotion_options.some((item) => item.activity_id === 'page1-0'));
+});
+
 test('a stale page selection is not echoed when the store list was read', () => {
   // 页面上选中的活动不在店铺列表里（草稿从别处带过来的）→ 不能回显并绑定它。
   const activityTable = {

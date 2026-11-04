@@ -47,6 +47,8 @@ GROUP_FIELDS = {
         # 商品素材：保留期（清理门槛）与压缩参数（上架完成后延后多少天、压到多长边、JPEG 质量）。
         "assets_retention_days",
         "compact_enabled", "compact_delay_days", "compact_max_edge", "compact_jpeg_quality",
+        # 素材删除总开关（false = 永远不删商品素材目录）。
+        "assets_cleanup_enabled",
     },
     "cnsc": {"price_site_order"},
     "display": {"cross_border_enabled"},
@@ -163,11 +165,12 @@ def default_configuration() -> dict[str, dict[str, Any]]:
             "screenshot_retention_days": 30,
             "export_retention_days": 90,
             "log_retention_days": 30,
-            # 商品素材：上架完成满 3 天压缩（PNG→同名 JPEG，长边 1000、质量 88），
-            # 满 30 天可在设置页/每日自动清理里删除。
-            "assets_retention_days": 30,
-            "compact_enabled": True,
-            "compact_delay_days": 3,
+        # 商品素材：上架完成满 N 天压缩（PNG→同名 JPEG，长边 1000、质量 88）；
+        # assets_cleanup_enabled=False 时**永不删除**素材，assets_retention_days 仅作展示。
+        "assets_retention_days": 30,
+        "assets_cleanup_enabled": True,
+        "compact_enabled": True,
+        "compact_delay_days": 3,
             "compact_max_edge": 1000,
             "compact_jpeg_quality": 88,
         },
@@ -380,6 +383,11 @@ def _validate_configuration(config: dict[str, dict[str, Any]]) -> None:
     config["storage_cleanup"]["compact_jpeg_quality"] = quality
     config["storage_cleanup"]["compact_enabled"] = (
         config["storage_cleanup"].get("compact_enabled") is not False
+    )
+    # 商品素材删除总开关：关掉后 product_assets / product_assets_legacy 两类都不删
+    # （自动和手动都不动），压缩仍按 compact_* 设置走。现场要求「压缩可以、删除不要」。
+    config["storage_cleanup"]["assets_cleanup_enabled"] = (
+        config["storage_cleanup"].get("assets_cleanup_enabled") is not False
     )
     # 跨境模式开关：任意非空值按 bool 归一化（"false" 字符串等脏值一律算开），
     # 只做前端显示控制，不参与任何后端业务判断。

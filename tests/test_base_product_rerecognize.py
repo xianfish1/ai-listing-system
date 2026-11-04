@@ -156,6 +156,40 @@ def test_title_aspect_only_rewrites_the_title(tmp_path: Path, monkeypatch: pytes
     assert calls["want_description"] is False
 
 
+def test_title_regeneration_honors_an_explicitly_selected_skill(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """「重新识别标题」可以手动指定规则：即使商品范围推断出来是男装，也按选中的童装规则生成。"""
+    from services.api import title_skill_presets
+
+    product = _make_product(tmp_path)
+    storage.update_base_product(
+        product["id"], {"recognized_attributes": {"Item Type": "T-Shirt", "Gender": "Men"}}
+    )
+    product = storage.get_item("base_products", product["id"])
+    preset_rule = title_skill_presets.list_presets()[0]["rule"]
+    skill = storage.create_title_skill({**preset_rule, "name": "童装规则", "audience": "kids"})
+    calls: dict = {}
+
+    def fake_generate(**kwargs):
+        calls.update(kwargs)
+        return vision_listing.VisionListingResult(
+            title="KIDS TEE", description="", model_id="stub-model", input_image_count=1
+        )
+
+    monkeypatch.setattr(vision_listing, "generate_listing_from_images", fake_generate)
+    monkeypatch.setattr(storage, "get_default_ai_model_connection_private", _dummy_connection)
+
+    updated = main._enrich_with_vision_listing(
+        product,
+        {"aspect": "title", "skill_id": skill["id"], "force_skill": True},
+        mark_edited=True,
+        aspect="title",
+    )
+
+    assert updated["listing_title"] == "KIDS TEE"
+    assert calls["title_skill"]["id"] == skill["id"]
+    assert calls["title_context"]["scope"]["audience"] == "kids"
+
+
 def test_description_aspect_only_rewrites_the_description(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     product = _make_product(tmp_path)
     storage.update_base_product(
@@ -334,3 +368,35 @@ def test_regenerate_endpoint_rejects_an_unknown_aspect(tmp_path: Path) -> None:
 
     assert excinfo.value.code == 422
     assert "aspect" in excinfo.value.read().decode("utf-8")
+
+
+def test_color_recognition_targets_include_numbered_images_typed_as_main() -> None:
+    """图片命名成 1-9、文件夹里另有主图的老商品：重新识别颜色图也要看到它们。
+
+    扫描器把这类无信息图保留成主图角色（避免把多角度商品图当颜色），只按 variant
+    取目标会让「重新识别颜色图」对这些商品什么都不做。"""
+    assets = [
+        {"file_name": "主图.png", "asset_type": "main", "sku_option": ""},
+        *[
+            {"file_name": f"{index}.png", "asset_type": "main", "sku_option": ""}
+            for index in range(1, 10)
+        ],
+    ]
+
+    names = main._color_recognition_target_names({"variant_image_map": {}}, assets)
+
+    assert names == [f"{index}.png" for index in range(1, 10)]
+
+
+def test_a_few_plain_main_images_are_not_color_targets() -> None:
+    """主图 + 多角度图 + 颜色图：少量无信息主图不是颜色图，不进重识别目标。"""
+    assets = [
+        {"file_name": "主图-正面.jpg", "asset_type": "main", "sku_option": ""},
+        {"file_name": "主图-背面.jpg", "asset_type": "main", "sku_option": ""},
+        {"file_name": "A白色.jpg", "asset_type": "variant", "sku_option": "White"},
+        {"file_name": "1.jpg", "asset_type": "main", "sku_option": ""},
+        {"file_name": "2.jpg", "asset_type": "main", "sku_option": ""},
+        {"file_name": "详情1.jpg", "asset_type": "detail", "sku_option": ""},
+    ]
+
+    assert main._color_recognition_target_names({"variant_image_map": {}}, assets) == ["A白色.jpg"]

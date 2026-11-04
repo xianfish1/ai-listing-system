@@ -187,6 +187,23 @@ button.secondary {
   font-size: 12px;
 }
 
+/* 危险动作的次级按钮（批量删除副本）：平时和次级按钮同形，只把描边和文字染红。 */
+.secondary-button.danger-ghost {
+  color: var(--danger);
+  border-color: color-mix(in srgb, var(--danger) 45%, var(--line));
+}
+
+.secondary-button.danger-ghost:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--danger) 8%, var(--panel));
+  border-color: var(--danger);
+  color: var(--danger);
+}
+
+.secondary-button.danger-ghost:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
 /* 全局 hidden 兜底：组件类的 display 规则会盖掉浏览器默认的 [hidden] 隐藏，
    必须用更高权重的显式规则压回去（旧的做法是每个组件各写一条，漏一条就漏显）。 */
 [hidden] { display: none !important; }
@@ -409,6 +426,74 @@ h2 {
 
 .topbar #refresh-btn {
   flex: 0 0 auto;
+}
+
+.topbar-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex: 0 0 auto;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+
+/* 顶栏全局更新提醒：只在「有新版本」或「已下载待重启」时出现。
+   注意本工程没有全局 [hidden] 规则，必须自己写，且权重高于 .update-reminder。 */
+.update-reminder {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 14px;
+  border: 1px solid #c8ccf4;
+  border-radius: 999px;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--indigo-ink);
+  background: var(--indigo-soft);
+  cursor: pointer;
+  white-space: nowrap;
+  transition: background 0.15s ease, border-color 0.15s ease, box-shadow 0.15s ease;
+}
+
+.update-reminder[hidden] {
+  display: none;
+}
+
+.update-reminder:hover:not(:disabled) {
+  background: #e3e6fd;
+  border-color: #b3b8ee;
+  box-shadow: var(--shadow-sm);
+}
+
+.update-reminder:disabled {
+  opacity: 0.72;
+  cursor: progress;
+}
+
+.update-reminder-dot {
+  width: 8px;
+  height: 8px;
+  flex: 0 0 auto;
+  border-radius: 50%;
+  background: var(--indigo);
+  box-shadow: 0 0 0 3px rgba(79, 70, 229, 0.18);
+  animation: update-reminder-pulse 1.8s ease-in-out infinite;
+}
+
+@keyframes update-reminder-pulse {
+  0%,
+  100% {
+    box-shadow: 0 0 0 3px rgba(79, 70, 229, 0.18);
+  }
+  50% {
+    box-shadow: 0 0 0 6px rgba(79, 70, 229, 0.06);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .update-reminder-dot {
+    animation: none;
+  }
 }
 
 .operation-feedback {
@@ -1903,6 +1988,117 @@ td code {
 .variant-image-row select,
 .variant-image-row input { min-width: 0; }
 
+/* 颜色图选择器（2026-10-27）：原生 select 只能显示文件名，改成按钮 + 缩略图弹层。 */
+.variant-image-row .variant-image-trigger {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  min-width: 0;
+  min-height: 36px;
+  padding: 6px 10px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--panel);
+  color: var(--text);
+  font: inherit;
+  font-size: 12.5px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.variant-image-row .variant-image-trigger:hover { border-color: var(--indigo); }
+
+.variant-image-row .variant-image-trigger.is-empty { color: var(--muted); }
+
+.variant-image-row .variant-image-trigger-label {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.variant-image-row .variant-image-trigger-caret {
+  flex: 0 0 auto;
+  width: 0;
+  height: 0;
+  border-top: 5px solid var(--muted);
+  border-right: 4px solid transparent;
+  border-left: 4px solid transparent;
+}
+
+.variant-image-picker-popup {
+  position: fixed;
+  z-index: 1200;
+  padding: 8px;
+  overflow-y: auto;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--panel);
+  box-shadow: var(--shadow-md);
+}
+
+.variant-image-picker-empty { margin: 0 0 8px; font-size: 12px; line-height: 1.5; }
+
+.variant-image-option-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(92px, 1fr));
+  gap: 8px;
+}
+
+.variant-image-option {
+  display: grid;
+  gap: 5px;
+  justify-items: center;
+  padding: 6px;
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text);
+  font: inherit;
+  font-size: 11.5px;
+  cursor: pointer;
+}
+
+.variant-image-option:hover { background: var(--panel-soft); border-color: var(--line); }
+
+.variant-image-option.is-selected {
+  border-color: var(--indigo);
+  background: color-mix(in srgb, var(--indigo) 8%, transparent);
+}
+
+.variant-image-option-thumb {
+  width: 100%;
+  aspect-ratio: 1;
+  border-radius: 6px;
+  background: #eef1f5;
+  object-fit: cover;
+}
+
+.variant-image-option-thumb--none {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 100%;
+  aspect-ratio: 1;
+  border-radius: 6px;
+  background: #eef1f5;
+  color: var(--muted);
+  font-size: 16px;
+}
+
+.variant-image-option-name {
+  width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  text-align: center;
+}
+
+/* 弹层里的缩略图只用来辨认图片，不要继承维护弹窗的放大镜光标。 */
+#variant-image-picker-popup img { cursor: pointer; }
+
 .variant-image-row button[data-remove-base-color] {
   padding: 7px 12px;
   white-space: nowrap;
@@ -2234,6 +2430,34 @@ td code {
   color: var(--danger);
 }
 
+/* 标题队列：SKU 列窄一点，标题（可能很长）占满剩余宽度并换行显示。 */
+#base-title-queue .local-import-queue-name {
+  max-width: 18%;
+}
+
+.base-title-queue-title {
+  color: var(--text);
+}
+
+/* 标题结果弹窗：标题较长，用更宽的弹窗 + 可滚动表格。 */
+.workflow-dialog.base-title-result-dialog {
+  width: min(980px, calc(100vw - 32px));
+}
+
+.base-title-result-scroll {
+  max-height: 52vh;
+  overflow: auto;
+}
+
+.base-title-result-table td {
+  vertical-align: top;
+}
+
+.base-title-result-table .base-title-result-title {
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+
 /* 批量操作栏：显示在筛选条上方，选中任意商品后出现。 */
 .base-product-batch-bar {
   display: flex;
@@ -2262,6 +2486,13 @@ td code {
   font-size: 12px;
   font-weight: 600;
   color: var(--muted);
+}
+/* 「重新识别标题」旁的标题规则下拉：跟着 chip 的高度走，别把批量栏撑高。 */
+.base-retry-skill {
+  max-width: 260px;
+  height: 28px;
+  padding: 2px 8px;
+  font-size: 12.5px;
 }
 .chip.chip--ai {
   color: var(--indigo);
@@ -2293,6 +2524,20 @@ td code {
   height: 150px;
   object-fit: cover;
   display: block;
+}
+
+/* 素材目录被清理过的商品：缩略图位置直接说明状态，不要留空白或裂图 */
+.product-card-thumb .product-card-thumb-note {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: 150px;
+  padding: 0 8px;
+  text-align: center;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--muted);
+  background: repeating-linear-gradient(45deg, #f5f6f8, #f5f6f8 8px, #eceef2 8px, #eceef2 16px);
 }
 
 .product-card-body { display: grid; gap: 5px; padding: 12px; }
@@ -2662,6 +2907,19 @@ dialog:not([open]) { display: none; }
 .template-section-grid .wide { grid-column: 1 / -1; }
 .transaction-grid { grid-template-columns: repeat(4, minmax(0, 1fr)); }
 .media-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+
+/* 店铺促销活动：下拉 + 「重新采集活动」+ 采集状态（目录几条/上次失败原因）。
+   活动目录只在页面导入或点这个按钮时才更新；状态提示放在同一行，省得操作员
+   看到"未设置有效期"却不知道要做什么。 */
+.store-promotion-field {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: 10px;
+}
+.store-promotion-field > label { flex: 0 1 360px; }
+.store-promotion-field > button { flex: 0 0 auto; }
+.store-promotion-field > .muted { flex: 1 1 240px; min-width: 0; font-size: 12px; overflow-wrap: anywhere; }
 
 /* ============================================================
    水印（马帮原生水印模板 + 应用范围）
@@ -3690,7 +3948,7 @@ dialog:not([open]) { display: none; }
   .variant-image-row input[data-base-color-index] { grid-area: name; }
   .variant-image-row img,
   .variant-image-row .variant-image-empty { grid-area: thumb; }
-  .variant-image-row select[data-variant-image-index] { grid-area: image; }
+  .variant-image-row [data-variant-image-index] { grid-area: image; }
   .variant-image-row button[data-remove-base-color] { grid-area: remove; }
 
   .variant-image-row img,
@@ -5756,6 +6014,15 @@ button.mini {
   font-weight: 500;
 }
 
+/* 失败的步骤直接写出原因（automationErrorLabel），别再让运营只看到「步骤」+ 红点 */
+.automation-step-item .automation-step-reason {
+  max-width: 46%;
+  font-size: 12px;
+  line-height: 1.35;
+  color: var(--danger, #b42318);
+  overflow-wrap: anywhere;
+}
+
 .automation-step-item time {
   font-family: var(--font-mono);
   font-size: 11px;
@@ -6321,6 +6588,17 @@ button.mini {
   align-items: center;
   gap: 8px 10px;
   margin: 12px 0;
+}
+
+/* 批量成本价：输入框 + 应用按钮作为一个整体排在工具栏里。 */
+#maintenance-section-prices .base-price-batch-cost {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+#maintenance-section-prices .base-price-batch-cost input {
+  width: 96px;
 }
 
 #maintenance-section-prices .base-price-parse {
@@ -7215,3 +7493,113 @@ button.mini {
   max-height: 220px;
 }
 
+
+
+/* ============================================================
+   基础商品维护 · 标题 AI 生成 + 3 个推荐标题（2026-11-02）
+   ============================================================ */
+.base-title-field {
+  display: grid;
+  /* META 是 4 列网格：标题占满整行，输入框才能显示完整标题，
+     「AI 生成标题」按钮也落到最右边。 */
+  grid-column: 1 / -1;
+  gap: 7px;
+  min-width: 0;
+  width: 100%;
+  color: var(--text-soft);
+  font-size: 12.5px;
+  font-weight: 500;
+}
+
+.base-title-field > label {
+  display: block;
+  color: var(--text-soft);
+  font-size: 12.5px;
+  font-weight: 500;
+}
+
+.base-title-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.base-title-row input {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.base-title-row select {
+  flex: 0 0 auto;
+  width: auto;
+  max-width: 150px;
+}
+
+.base-title-row button {
+  flex: 0 0 auto;
+  white-space: nowrap;
+}
+
+.base-title-suggestions {
+  display: grid;
+  gap: 6px;
+  margin-top: 8px;
+}
+
+.base-title-suggestions[hidden] {
+  display: none;
+}
+
+.base-title-suggest-hint {
+  margin: 0;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 400;
+}
+
+.base-title-suggestion {
+  display: grid;
+  gap: 4px;
+  width: 100%;
+  padding: 8px 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--panel);
+  color: var(--text);
+  text-align: left;
+  cursor: pointer;
+}
+
+.base-title-suggestion:hover,
+.base-title-suggestion:focus-visible {
+  border-color: var(--indigo);
+  background: var(--indigo-soft);
+  outline: none;
+}
+
+.base-title-suggestion.is-blocked {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+.base-title-suggestion-head {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  color: var(--muted);
+  font-size: 11.5px;
+  font-weight: 400;
+}
+
+.base-title-suggestion-tag {
+  color: var(--indigo-ink);
+  font-weight: 600;
+}
+
+.base-title-suggestion-text {
+  font-size: 13.5px;
+  line-height: 1.35;
+  font-weight: 500;
+  word-break: break-word;
+}

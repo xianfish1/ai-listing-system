@@ -36,6 +36,8 @@ const state = {
   selectedBaseProductId: "", // 单选：当前维护/操作对象（点卡片选中）
   selectedBaseProducts: new Set(), // 多选：勾选框选中的批量对象
   baseProductRetryRunning: false, // 批量 AI 重识别进行中：防重复点击，按钮置灰
+  baseRetrySkills: [],            // 「重新识别标题」下拉里可选的标题规则
+  baseRetrySkillsLoaded: false,   // 规则列表只拉一次；失败后可重试
   baseProductCategoryFilter: "",
   baseProductTimeFilter: "today", // 默认只看今天更新的商品；点 chip 切到昨天/最近一周/全部
   selectedStoreTemplates: new Set(),
@@ -45,6 +47,9 @@ const state = {
   editingBaseProductImages: [],
   editingBaseVariantImageMap: {},
   editingBaseColors: [],
+  // 颜色图选择弹层当前打开的是哪一行（-1 = 关闭）。弹层挂在 body 上做 fixed 定位，
+  // 因为维护弹窗的滚动容器会把 absolute 弹层裁掉。
+  variantImagePickerIndex: -1,
   // 「颜色图顺序跟随产品图顺序」开关的编辑态（按商品保存；缺字段默认打开）。
   editingBaseColorOrderFollowsImages: true,
   editingBaseSizeChartImage: "",
@@ -119,6 +124,8 @@ const COMPLETED_AUTOMATION_STATUSES = new Set(["saved", "saved_with_warnings"]);
 const FAILED_AUTOMATION_STATUSES = new Set([
   "failed", "blocked", "needs_manual", "needs_confirmation", "needs_regeneration", "canceled",
 ]);
+// 已经排进队列（待领取/已领取）或正在执行：副本其实「已经有任务了」，不算新建。
+const ACTIVE_AUTOMATION_STATUSES = new Set(["ready", "claimed", "running"]);
 
 function automationTaskSection(job) {
   const status = String(job?.status || "");
@@ -196,8 +203,10 @@ const AUTOMATION_STAGE_LABELS = {
   fill_logistics_info: "正在填写物流信息",
   select_discount_activity: "正在选择折扣活动",
   upload_variant_thumbnails: "正在上传颜色图",
+  fix_description_image_widths: "正在修复描述图片尺寸",
   validate_before_save: "正在校验保存前内容",
   save_draft: "正在保存草稿",
+  save_draft_rejected: "保存被马帮拒绝",
   close_saved_detail_page: "正在关闭已保存详情页",
   verify_saved_draft: "正在核验草稿保存结果",
   verify_cnsc_draft_inbox: "正在核验 CNSC 草稿箱",
@@ -1040,6 +1049,7 @@ function renderRuntimeSettings() {
   $("settings-storage-compact-delay").value = cleanup.compact_delay_days || 3;
   $("settings-storage-compact-edge").value = cleanup.compact_max_edge || 1000;
   $("settings-storage-compact-quality").value = cleanup.compact_jpeg_quality || 88;
+  $("settings-storage-assets-cleanup-enabled").checked = cleanup.assets_cleanup_enabled !== false;
   const connections = $("settings-ai-connections");
   connections.innerHTML = state.aiModelConnections.length ? state.aiModelConnections.map((item) => {
     const balanceLine = renderAiConnectionBalanceLine(item);
@@ -2018,6 +2028,7 @@ async function saveRuntimeSettings() {
         compact_delay_days: Number($("settings-storage-compact-delay").value),
         compact_max_edge: Number($("settings-storage-compact-edge").value),
         compact_jpeg_quality: Number($("settings-storage-compact-quality").value),
+        assets_cleanup_enabled: $("settings-storage-assets-cleanup-enabled").checked,
       },
     }),
   });
@@ -2293,17 +2304,100 @@ function applyStoreTemplateRatio(value) {
   return (Math.round(cents * ratio) / 100).toFixed(2);
 }
 
-async function loadStorePromotions() {
+async function loadStorePromotions(keepActivityId = "") {
   const storeId = $("store-template-store")?.value || "";
   const select = $("store-template-promotion");
   if (!select) return;
-  if (!storeId) { select.innerHTML = '<option value="">活动未配置</option>'; return; }
+  if (!storeId) {
+    select.innerHTML = '<option value="">活动未配置</option>';
+    renderStorePromotionStatus(null);
+    return;
+  }
   const data = await api(`/api/store-promotions?store_id=${encodeURIComponent(storeId)}&available_only=true`);
-  state.storePromotions = data.items || [];
-  select.innerHTML = state.storePromotions.length
-    ? '<option value="">请选择店铺促销活动</option>' + state.storePromotions.map((item) => `<option value="${escapeHtml(item.activity_id)}">${escapeHtml(item.label)}</option>`).join("")
+  let items = data.items || [];
+  // 模板上已经绑的活动如果这一版不可用（采集时没读到活动列表 → unresolved），
+  // 下拉里就没有它。只显示可用项的话，操作员一保存就会把模板上的活动写成空，
+  // 所以把它作为一条不可选、只用于回显的记录补回去。
+  const keep = String(keepActivityId || "").trim();
+  if (keep && !items.some((item) => String(item.activity_id || item.id || "") === keep)) {
+    const all = await api(`/api/store-promotions?store_id=${encodeURIComponent(storeId)}`).catch(() => ({ items: [] }));
+    const retained = (all.items || []).find((item) => String(item.activity_id || item.id || "") === keep);
+    if (retained) items = [...items, { ...retained, retained: true }];
+  }
+  state.storePromotions = items;
+  select.innerHTML = items.length
+    ? '<option value="">请选择店铺促销活动</option>' + items.map((item) => {
+      const label = String(item.label || item.name || item.activity_id);
+      const suffix = item.retained ? "（当前不可用，仅保留原值）" : "";
+      return `<option value="${escapeHtml(item.activity_id || item.id)}" data-label="${escapeHtml(label)}"${item.retained ? " disabled" : ""}>${escapeHtml(label + suffix)}</option>`;
+    }).join("")
     : '<option value="">活动未配置</option>';
-  select.disabled = !state.storePromotions.length;
+  select.disabled = !items.some((item) => !item.retained);
+  renderStorePromotionStatus(data.status);
+}
+
+/**
+ * 活动目录的采集状态：目录几条、上次何时采到、上次为什么失败。
+ * 页面导入没读到活动列表时目录只有名称/没有有效期，这里要把原因摆出来，
+ * 操作员才知道该点「重新采集活动」。
+ */
+function renderStorePromotionStatus(status, options = {}) {
+  const target = $("store-template-promotion-status");
+  if (!target) return;
+  const error = String(options.error || "").trim();
+  if (error) {
+    target.textContent = `采集失败：${error}`;
+    return;
+  }
+  if (!status) {
+    target.textContent = "";
+    return;
+  }
+  const count = Number(status.count || 0);
+  if (status.status === "ok") {
+    const time = formatLocalTime(status.collected_at);
+    target.textContent = options.justCollected
+      ? `目录 ${count} 条 · 刚刚采集`
+      : `目录 ${count} 条 · 采集于 ${time}`;
+    return;
+  }
+  const reason = String(status.error || "").trim();
+  target.textContent = reason ? `上次采集失败：${reason}` : "上次采集失败";
+}
+
+async function recollectStorePromotions() {
+  const storeId = $("store-template-store")?.value || "";
+  const button = $("store-template-promotion-recollect");
+  const status = $("store-template-promotion-status");
+  if (!storeId) {
+    renderStorePromotionStatus(null, { error: "请先选择店铺" });
+    return;
+  }
+  if (button?.disabled) return;
+  const keep = $("store-template-promotion")?.value || "";
+  if (button) {
+    button.disabled = true;
+    button.textContent = "采集中…";
+  }
+  if (status) status.textContent = "正在读取马帮「选择折扣活动」列表…";
+  try {
+    const result = await api("/api/store-promotions/collect", {
+      method: "POST",
+      body: JSON.stringify({
+        store_id: storeId,
+        account_id: currentStoreTemplateAccountId() || undefined,
+      }),
+    });
+    await loadStorePromotions(keep);
+    renderStorePromotionStatus(result.status, { justCollected: true });
+  } catch (error) {
+    renderStorePromotionStatus(null, { error: String(error?.message || error) });
+  } finally {
+    if (button) {
+      button.disabled = false;
+      button.textContent = "重新采集活动";
+    }
+  }
 }
 
 const WATERMARK_ROLES = ["main", "product"];
@@ -3948,7 +4042,14 @@ function clearBaseProductCategory() {
 async function loadBaseCategoryQuickTemplates() {
   const status = $("base-category-template-status");
   try {
-    const data = await api("/api/category-quick-templates");
+    // 弹窗打开瞬间请求洪峰可能被系统直接重置连接（API burst 问题）：
+    // 失败先重试一次，避免下拉一直是空占位、看起来像卡住。
+    let data;
+    try {
+      data = await api("/api/category-quick-templates");
+    } catch (first) {
+      data = await api("/api/category-quick-templates").catch(() => { throw first; });
+    }
     state.baseCategoryQuickTemplates = data.items || [];
     state.baseCategoryQuickTemplateLoaded = true;
     renderBaseCategoryQuickTemplateOptions();
@@ -3981,9 +4082,23 @@ function renderBaseCategoryQuickTemplateOptions() {
   if (previous && [...select.options].some((option) => option.value === previous)) select.value = previous;
 }
 
-function applyBaseCategoryQuickTemplate(templateId) {
-  const template = (state.baseCategoryQuickTemplates || []).find((item) => String(item.id || "") === String(templateId || ""));
-  if (!template || !template.category) return;
+async function applyBaseCategoryQuickTemplate(templateId) {
+  const resetSelect = () => {
+    const select = $("base-category-template-select");
+    if (select) select.value = "";
+  };
+  let template = (state.baseCategoryQuickTemplates || []).find((item) => String(item.id || "") === String(templateId || ""));
+  // 列表还没加载好（弹窗刚开就选）或刚被删掉时：先补拉一次再找。找不到必须给出
+  // 反馈并复位下拉——静默返回的话页面毫无反应，操作员会以为卡死了。
+  if (!template) {
+    await loadBaseCategoryQuickTemplates().catch(() => {});
+    template = (state.baseCategoryQuickTemplates || []).find((item) => String(item.id || "") === String(templateId || ""));
+  }
+  if (!template || !template.category) {
+    showOperationFeedback("快速类目模板还没加载好或已被删除，请稍后重选", "error");
+    resetSelect();
+    return;
+  }
   state.editingBaseProductCategory = { ...template.category };
   // 模板里的类目属性值一并回填；老模板没有 attribute_values 时保留商品自己的值，
   // 不做「套模板先把已填值清空」的破坏性动作。
@@ -3993,11 +4108,11 @@ function applyBaseCategoryQuickTemplate(templateId) {
   const valueCount = templateValues ? Object.keys(templateValues).length : 0;
   if (valueCount) state.editingBaseProductAttributeValues = { ...templateValues };
   renderBaseMaintenanceCategoryInput();
-  loadBaseCategoryAttributeFields();
+  await loadBaseCategoryAttributeFields().catch(() => {});
   showOperationFeedback(
     valueCount
       ? `已套用快速类目模板「${template.name || ""}」（含 ${valueCount} 项属性值），保存后生效`
-      : `已套用快速类目模板「${template.name || ""}」（该模板未保存属性值），保存后生效`,
+      : `已套用快速类目模板「${template.name || ""}」；该模板还没有属性值——选好属性后点「存为模板」用同名补存，以后套用就会带上选项`,
     "success",
   );
 }
@@ -4016,7 +4131,17 @@ async function saveCurrentBaseCategoryAsQuickTemplate() {
   const name = String(window.prompt("快速类目模板名称（例如：男装 T恤）：", selectedTemplate?.name || "") || "").trim();
   if (!name) return;
   // 「存为模板」= 保存当前类目 + 当前表单里已填的类目属性值（价格/尺码不存）。
-  const attributeValues = collectBaseCategoryAttributeValues();
+  // 属性字段还没渲染出来（规则加载慢/该类目无已发布规则）时，采集结果恒为空，
+  // 会存出「只有类目没有选项」的模板——改用商品已存的属性值兜底。
+  let attributeValues = collectBaseCategoryAttributeValues();
+  const categoryFieldControls = document.querySelectorAll("#base-maintenance-category-fields [data-category-field-input]");
+  if (!categoryFieldControls.length) {
+    attributeValues = { ...(state.editingBaseProductAttributeValues || {}) };
+  }
+  if (!Object.keys(attributeValues).length) {
+    const proceed = window.confirm("当前没有已填的类目属性值：这个模板将只有类目、没有属性选项（套用时选项不会被选上）。确定这样保存吗？");
+    if (!proceed) return;
+  }
   try {
     await api("/api/category-quick-templates", {
       method: "POST",
@@ -4077,7 +4202,8 @@ function renderBaseProducts() {
     card.className = `product-card ${isSingle ? "selected" : ""} ${isChecked ? "checked" : ""}`;
     const assets = assetsForBaseProduct(product);
     const mainAsset = assets.find((asset) => asset.file_name === product.main_image) || assets.find((asset) => asset.file_name === (product.product_images || [])[0]);
-    const imageSrc = mainAsset ? assetImageUrl(mainAsset, 480) : "";
+    const assetsCleaned = Boolean(String(product.assets_cleaned_at || "").trim());
+    const imageSrc = assetsCleaned ? "" : (mainAsset ? assetImageUrl(mainAsset, 480) : "");
     const colors = (product.recognized_colors || []).length;
     const imageCount = (product.product_images || []).length;
     const glyph = product.automation_glyph || "idle";
@@ -4096,7 +4222,7 @@ function renderBaseProducts() {
     card.innerHTML = `
       <label class="product-card-check" title="${isChecked ? "取消勾选" : "勾选以批量操作"}"><input type="checkbox" data-base-product-select="${escapeHtml(product.id)}" ${isChecked ? "checked" : ""} /></label>
       <span class="card-glyph card-glyph--${glyph}" title="${escapeHtml(glyphTitleParts.join(" · "))}" aria-label="${escapeHtml(glyphTitleParts.join(" · "))}"></span>
-      <div class="product-card-thumb">${imageSrc ? `<img src="${imageSrc}" alt="${escapeHtml(product.product_name_cn || "")}" loading="lazy" decoding="async" />` : ""}</div>
+      <div class="product-card-thumb">${imageSrc ? `<img src="${imageSrc}" alt="${escapeHtml(product.product_name_cn || "")}" loading="lazy" decoding="async" />` : (assetsCleaned ? `<span class="product-card-thumb-note">素材已清理<br />需重新导入</span>` : "")}</div>
       <div class="product-card-body">
         <strong>${escapeHtml(product.product_name_cn || product.base_name || product.main_sku || product.group_id || "")}</strong>
         <span>主 SKU：${escapeHtml(product.main_sku || product.group_id || "")}</span>
@@ -4293,6 +4419,55 @@ function renderBaseProductBatchBar() {
   const count = state.selectedBaseProducts.size;
   if (countEl) countEl.textContent = `已选 ${count} 个商品`;
   bar.hidden = count === 0;
+  if (count > 0) void loadBaseRetrySkillOptions();
+}
+
+// 切页时清掉商品勾选（多选 + 当前单选卡片）。只改已经渲染出来的勾选框和卡片类名，
+// 不整表重画：切页不该为了复位勾选再渲染几百张卡片。
+function clearBaseProductSelection() {
+  const hadSelection = state.selectedBaseProducts.size > 0;
+  const hadFocusedCard = Boolean(state.selectedBaseProductId);
+  if (!hadSelection && !hadFocusedCard) return;
+  state.selectedBaseProducts.clear();
+  state.selectedBaseProductId = "";
+  document.querySelectorAll("[data-base-product-select]").forEach((input) => {
+    input.checked = false;
+    input.closest(".product-card")?.classList.remove("checked", "selected");
+  });
+  renderBaseProductBatchBar();
+}
+
+// 「重新识别标题」旁边的手动规则下拉：只在勾选商品后才需要，规则列表按需拉一次。
+async function loadBaseRetrySkillOptions() {
+  if (state.baseRetrySkillsLoaded) return;
+  state.baseRetrySkillsLoaded = true;
+  try {
+    const data = await api("/api/title-skills");
+    const rules = Array.isArray(data) ? data : data?.items || [];
+    state.baseRetrySkills = rules.filter((rule) => rule && rule.enabled !== false);
+  } catch (error) {
+    state.baseRetrySkillsLoaded = false; // 下次勾选商品时再试
+    return;
+  }
+  renderBaseRetrySkillOptions();
+}
+
+function renderBaseRetrySkillOptions() {
+  const select = $("base-retry-skill");
+  if (!select) return;
+  const current = select.value;
+  const options = ['<option value="">标题规则：自动匹配（默认）</option>'];
+  for (const rule of state.baseRetrySkills) {
+    const name = rule.name || rule.id || "";
+    options.push(`<option value="${escapeHtml(rule.id || "")}">${escapeHtml(name)}</option>`);
+  }
+  select.innerHTML = options.join("");
+  if (current && state.baseRetrySkills.some((rule) => rule.id === current)) select.value = current;
+}
+
+function selectedBaseRetrySkillId() {
+  const select = $("base-retry-skill");
+  return select ? String(select.value || "") : "";
 }
 
 // 批量操作栏的三个 AI 重识别按钮：只重跑指定环节，不复用导入时的开关。
@@ -4341,8 +4516,120 @@ function setBaseProductRetryBusy(busy) {
   }
 }
 
+// 标题队列：批量「重新识别标题」时才用到。逐条排队、串行执行，生成结果留在行里，
+// 全部跑完弹窗列出所有标题（可逐个/一次性复制）。队列只活在当前页面；标题本身已经
+// 写进基础商品，刷新丢的只是这份进度清单。
+const BASE_TITLE_GLYPHS = { waiting: "⏳", running: "▶", done: "✅", error: "❌" };
+let baseTitleQueue = null;
+let baseTitleQueueCollapsed = false;
+
+function baseTitleProductLabel(product) {
+  return product.product_name_cn || product.base_name || product.main_sku || product.group_id || "未命名商品";
+}
+
+function resetBaseTitleQueue(products) {
+  baseTitleQueue = {
+    items: products.map((product) => ({
+      id: product.id,
+      sku: product.main_sku || product.group_id || "",
+      name: baseTitleProductLabel(product),
+      status: "waiting",
+      title: "",
+      error: "",
+    })),
+  };
+  baseTitleQueueCollapsed = false;
+  renderBaseTitleQueue();
+  $("base-title-queue")?.scrollIntoView({ block: "nearest", behavior: "smooth" });
+}
+
+function baseTitleQueueItem(productId) {
+  return (baseTitleQueue?.items || []).find((item) => item.id === productId) || null;
+}
+
+function baseTitleQueueDone() {
+  return (baseTitleQueue?.items || []).filter((item) => item.status === "done");
+}
+
+function renderBaseTitleQueue() {
+  const items = baseTitleQueue?.items || [];
+  const showBtn = $("base-title-queue-show");
+  if (showBtn) {
+    showBtn.hidden = !(items.length && baseTitleQueueCollapsed);
+    if (!showBtn.hidden) showBtn.textContent = `显示标题队列（${items.length}）`;
+  }
+  const panel = $("base-title-queue");
+  if (!panel) return;
+  panel.hidden = !items.length || baseTitleQueueCollapsed;
+  if (panel.hidden) return;
+  const counts = { waiting: 0, running: 0, done: 0, error: 0 };
+  for (const item of items) counts[item.status] = (counts[item.status] || 0) + 1;
+  const summary = $("base-title-queue-summary");
+  if (summary) {
+    const parts = [`进度 ${counts.done + counts.error}/${items.length}`];
+    if (counts.running) parts.push(`识别中 ${counts.running}`);
+    if (counts.waiting) parts.push(`等待 ${counts.waiting}`);
+    if (counts.done) parts.push(`完成 ${counts.done}`);
+    if (counts.error) parts.push(`失败 ${counts.error}`);
+    summary.textContent = `标题队列：${parts.join(" · ")}`;
+  }
+  const viewBtn = $("base-title-queue-view");
+  if (viewBtn) viewBtn.hidden = !counts.done;
+  const list = $("base-title-queue-list");
+  if (!list) return;
+  list.innerHTML = items.map((item) => {
+    const label = item.sku || item.name;
+    const detail = item.status === "done"
+      ? (item.title || "（AI 返回空标题）")
+      : item.status === "error"
+        ? (item.error || "识别失败")
+        : item.status === "running" ? "识别中…" : "等待中";
+    const statusClass = item.status === "done" ? "succeeded"
+      : item.status === "error" ? "failed"
+        : item.status === "running" ? "running" : "waiting";
+    return `<li class="local-import-queue-item local-import-queue-item--${statusClass}">
+      <span class="local-import-queue-glyph" aria-hidden="true">${BASE_TITLE_GLYPHS[item.status] || "•"}</span>
+      <span class="local-import-queue-name" title="${escapeHtml(label)}">${escapeHtml(label)}</span>
+      <span class="local-import-queue-detail${item.status === "done" ? " base-title-queue-title" : ""}">${escapeHtml(detail)}</span>
+    </li>`;
+  }).join("");
+}
+
+function baseTitleResultText() {
+  return (baseTitleQueue?.items || [])
+    .filter((item) => item.status === "done" && item.title)
+    .map((item) => `${item.sku || item.name}\t${item.title}`)
+    .join("\n");
+}
+
+// 全部跑完的「提醒」：列出这批判识别出来的标题，原本的标题也一并显示，方便核对。
+function showBaseTitleResults() {
+  const dialog = $("base-title-result-dialog");
+  const dialogItems = baseTitleQueue?.items || [];
+  if (!dialog || !dialogItems.length) return;
+  const done = dialogItems.filter((item) => item.status === "done");
+  const failed = dialogItems.filter((item) => item.status === "error");
+  const summary = $("base-title-result-summary");
+  if (summary) {
+    summary.textContent = `本批 ${dialogItems.length} 个商品：成功 ${done.length} 个${failed.length ? `，失败 ${failed.length} 个` : ""}。标题已写入基础商品，可复制后核对。`;
+  }
+  const tbody = $("base-title-result-rows");
+  if (tbody) {
+    tbody.innerHTML = (done.length ? done : dialogItems).map((item) => {
+      const cell = item.status === "done"
+        ? escapeHtml(item.title || "（AI 返回空标题）")
+        : escapeHtml(item.error || "未生成");
+      const copy = item.status === "done"
+        ? `<button type="button" class="secondary-button mini" data-base-title-copy="${escapeHtml(item.id)}">复制</button>`
+        : "";
+      return `<tr><td>${escapeHtml(item.sku || "—")}</td><td class="base-title-result-title">${cell}</td><td>${copy}</td></tr>`;
+    }).join("");
+  }
+  if (typeof dialog.showModal === "function" && !dialog.open) dialog.showModal();
+}
+
 // 按勾选（含「全选当前列表」）逐个重识别。串行跑：视觉模型单次就要几十秒，
-// 并发只会把模型连接和本机请求一起打满；进度写在商品面板的结果行上。
+// 并发只会把模型连接和本机请求一起打满；进度写在商品面板的结果行上（标题另进队列）。
 async function retryCheckedBaseProducts(aspect, label) {
   if (state.baseProductRetryRunning) return;
   const result = $("base-product-result");
@@ -4354,22 +4641,48 @@ async function retryCheckedBaseProducts(aspect, label) {
     return;
   }
   setBaseProductRetryBusy(true);
+  // 标题可以手动指定规则：选了就强制按该规则生成（不看商品范围推断），
+  // 不选则沿用「自动匹配默认规则」。
+  const skillId = aspect === "title" ? selectedBaseRetrySkillId() : "";
+  const queued = aspect === "title";
+  if (queued) resetBaseTitleQueue(products);
   const failures = [];
   try {
     for (let index = 0; index < products.length; index += 1) {
       const product = products[index];
-      const name = product.product_name_cn || product.base_name || product.main_sku || product.group_id || "未命名商品";
+      const name = baseTitleProductLabel(product);
+      const queueItem = queued ? baseTitleQueueItem(product.id) : null;
+      if (queueItem) {
+        queueItem.status = "running";
+        renderBaseTitleQueue();
+      }
       if (result) result.textContent = `重新识别${label} ${index + 1}/${products.length}：${name}…`;
       try {
+        const body = skillId ? { aspect, skill_id: skillId, force_skill: true } : { aspect };
         const updated = await api(`/api/base-products/${encodeURIComponent(product.id)}/regenerate-listing`, {
           method: "POST",
-          body: JSON.stringify({ aspect }),
+          body: JSON.stringify(body),
         });
         const error = String(updated?.ai_generation_error || "").trim();
-        if (error) failures.push(`${name}：${error}`);
+        if (error) {
+          failures.push(`${name}：${error}`);
+          if (queueItem) {
+            queueItem.status = "error";
+            queueItem.error = error;
+          }
+        } else if (queueItem) {
+          queueItem.status = "done";
+          queueItem.title = String(updated?.listing_title || "").trim();
+        }
       } catch (error) {
-        failures.push(`${name}：${error.message || error}`);
+        const message = error.message || String(error);
+        failures.push(`${name}：${message}`);
+        if (queueItem) {
+          queueItem.status = "error";
+          queueItem.error = message;
+        }
       }
+      if (queued) renderBaseTitleQueue();
     }
     await Promise.all([loadBaseProducts(), loadAssets()]);
     const successCount = products.length - failures.length;
@@ -4380,12 +4693,20 @@ async function retryCheckedBaseProducts(aspect, label) {
     }
     if (result) result.textContent = message;
     showOperationFeedback(message, failures.length ? "warning" : "success");
+    if (queued) {
+      renderBaseTitleQueue();
+      if (baseTitleQueueDone().length) {
+        showBaseTitleResults();
+        if (result) result.textContent = `${message}；标题已弹出，可核对后复制`;
+      }
+    }
   } catch (error) {
     operationError(error, `重新识别${label}失败`);
   } finally {
     setBaseProductRetryBusy(false);
   }
 }
+
 
 async function deleteCheckedBaseProducts() {
   const result = $("base-product-result");
@@ -4968,6 +5289,84 @@ function handleBaseColorRename() {
   renderBasePriceColors();
 }
 
+// 商品属性/旧数据里的 target_audience 可能还是 boy/girl/kids_unisex。
+// 2026-11-02 起弹窗只提供 男童/女童/男装；认不出来就留「按商品」让后端推断。
+const BASE_TITLE_AUDIENCE_MAP = { boy: "boys", boys: "boys", girl: "girls", girls: "girls", men: "men", man: "men", male: "men", women: "women", woman: "women", female: "women" };
+
+function baseProductAudienceValue(product) {
+  const raw = String(product?.title_audience || product?.target_audience || "").trim().toLowerCase();
+  if (BASE_TITLE_AUDIENCE_MAP[raw]) return BASE_TITLE_AUDIENCE_MAP[raw];
+  const attrs = product?.recognized_attributes || {};
+  const text = Object.entries(attrs)
+    .filter(([key]) => /gender|audience|性别|人群/i.test(key))
+    .map(([, value]) => String(value || ""))
+    .join(" ")
+    .toLowerCase();
+  if (/\bboys?\b|男童/.test(text)) return "boys";
+  if (/\bgirls?\b|女童/.test(text)) return "girls";
+  if (/\bmen\b|男装/.test(text)) return "men";
+  return "";
+}
+
+const BASE_TITLE_STATUS_LABELS = { PASS: "通过", REVIEW: "待确认", BLOCKED: "未通过" };
+
+function renderBaseTitleSuggestions(titles, message = "") {
+  const node = $("base-maintenance-title-suggestions");
+  if (!node) return;
+  if (message) {
+    node.hidden = false;
+    node.innerHTML = `<p class="muted">${escapeHtml(message)}</p>`;
+    return;
+  }
+  const rows = Array.isArray(titles) ? titles.filter((item) => item && item.title) : [];
+  if (!rows.length) {
+    node.hidden = true;
+    node.innerHTML = "";
+    return;
+  }
+  node.hidden = false;
+  const hint = '<p class="base-title-suggest-hint">AI 推荐标题：点一下填入上面的标题框，再点「保存维护内容」生效。</p>';
+  node.innerHTML = hint + rows.map((item, index) => {
+    const blocked = item.status === "BLOCKED";
+    const label = item.recommended ? "推荐" : `备选 ${index}`;
+    const meta = `${Number(item.chars || (item.title || "").length)} 字符 · ${BASE_TITLE_STATUS_LABELS[item.status] || item.status || "待确认"}`;
+    const tips = [...(item.warnings || []), ...((item.errors || []).filter((text) => text && !item.warnings?.includes(text)))];
+    return `<button type="button" class="base-title-suggestion${blocked ? " is-blocked" : ""}" data-base-title-suggestion="${escapeHtml(item.title)}"${blocked ? " disabled" : ""} title="${escapeHtml(tips.join("；"))}">
+      <span class="base-title-suggestion-head"><span class="base-title-suggestion-tag">${escapeHtml(label)}</span><span class="base-title-suggestion-meta">${escapeHtml(meta)}</span></span>
+      <span class="base-title-suggestion-text">${escapeHtml(item.title)}</span>
+    </button>`;
+  }).join("");
+}
+
+async function generateBaseProductTitleCandidates() {
+  const productId = state.editingBaseProductId || state.selectedBaseProductId;
+  if (!productId) return;
+  const button = $("base-maintenance-ai-title");
+  const audience = $("base-maintenance-audience")?.value || "";
+  if (button) { button.disabled = true; button.textContent = "生成中…"; }
+  renderBaseTitleSuggestions([], "正在按标题规则生成 3 个候选标题…");
+  try {
+    const body = { product_id: productId };
+    if (audience) body.audience = audience;
+    const data = await api("/api/title-workbench/preview", { method: "POST", body: JSON.stringify(body) });
+    const recommendedIndex = Number.isInteger(data.recommended_index) ? data.recommended_index : 0;
+    const titles = (Array.isArray(data.titles) ? data.titles : [])
+      .map((item, index) => ({ ...item, recommended: index === recommendedIndex }));
+    titles.sort((a, b) => Number(b.recommended) - Number(a.recommended));
+    if (!titles.length) {
+      renderBaseTitleSuggestions([], data.error || "AI 没有返回可用标题，请检查标题规则与 AI 连接。");
+    } else {
+      renderBaseTitleSuggestions(titles);
+      if (data.error) showOperationFeedback(`AI 生成完成，但有提示：${data.error}`, "info");
+    }
+  } catch (error) {
+    renderBaseTitleSuggestions([], `生成失败：${error.message || error}`);
+    showOperationFeedback(error.message || "AI 生成标题失败", "error");
+  } finally {
+    if (button) { button.disabled = false; button.textContent = "AI 生成标题"; }
+  }
+}
+
 function openBaseProductMaintenance(productId) {
   const product = state.baseProducts.find((item) => item.id === productId);
   if (!product) return;
@@ -4980,9 +5379,16 @@ function openBaseProductMaintenance(productId) {
   state.editingBaseColorOrderFollowsImages = product.color_order_follows_images !== false;
   state.editingBaseSizeChartImage = product.size_chart_image || "";
   state.editingBaseRecognizedSizes = [...(product.recognized_sizes || [])];
-  state.editingBaseSelectedSizes = (product.selected_sizes && product.selected_sizes.length)
+  // 勾选状态以商品记录为准：selected_sizes 字段存在（即使是空数组）就照用——空数组
+  // 表示操作员明确一个都没选；只有旧数据缺这个字段时才回退到识别尺码。
+  state.editingBaseSelectedSizes = Array.isArray(product.selected_sizes)
     ? [...product.selected_sizes]
     : [...(product.recognized_sizes || [])];
+  // 还没有任何尺码时给一套常用默认尺码（XXS–XXXL）作为可点选项，但默认不勾选：
+  // 勾选 = 该码会上架，必须由操作员明确点选。只改编辑态，保存维护内容才落库。
+  if (!state.editingBaseRecognizedSizes.length) {
+    state.editingBaseRecognizedSizes = [...BASE_COMMON_SIZES];
+  }
   state.editingBaseProductCategory = (product.product_category && typeof product.product_category === "object")
     ? { ...product.product_category }
     : null;
@@ -4994,6 +5400,10 @@ function openBaseProductMaintenance(productId) {
   $("base-maintenance-main-sku").value = product.main_sku || product.group_id || "";
   $("base-maintenance-status").value = product.status || "base_ready";
   $("base-maintenance-title-input").value = product.listing_title || "";
+  // 适用人群只影响 AI 生成标题；选中的值会在「保存维护内容」时写入商品。
+  const titleAudienceSelect = $("base-maintenance-audience");
+  if (titleAudienceSelect) titleAudienceSelect.value = baseProductAudienceValue(product);
+  renderBaseTitleSuggestions([]);
   $("base-maintenance-description").value = product.description || "";
   renderBaseMaintenanceCategoryInput();
   loadBaseCategoryAttributeFields();
@@ -5008,6 +5418,8 @@ function openBaseProductMaintenance(productId) {
   if (quickTemplateSelect) quickTemplateSelect.value = "";
   loadBaseCategoryQuickTemplates();
   $("base-image-editor-result").textContent = "";
+  // 重新打开时按保存队列的真实状态恢复按钮（上一个商品还在保存中就继续显示「保存中…」）。
+  renderBaseProductSaveButton();
   $("base-maintenance-modal").hidden = false;
   showMaintenancePanel("images");
   renderBaseProducts();
@@ -5241,16 +5653,12 @@ function renderBaseVariantImageMap() {
   const variantAssets = variantImageAssets(product);
   const colors = state.editingBaseColors || [];
   if (!colors.length) {
+    closeVariantImagePicker();
     target.innerHTML = `<p class="muted">还没有颜色。可以手动添加颜色并选择对应图片。</p>`;
     return;
   }
-  const options = (selectedFileName) => [
-    `<option value="">未选择图片</option>`,
-    ...variantAssets.map((asset) => {
-      const name = asset.file_name || "";
-      return `<option value="${escapeHtml(name)}" ${name === selectedFileName ? "selected" : ""}>${escapeHtml(name)}</option>`;
-    }),
-  ].join("");
+  // 选择器改成自定义按钮 + 缩略图弹层：原生 <option> 放不了图片，只能看文件名。
+  const pickerLabel = (selectedFileName) => selectedFileName || "未选择图片";
   target.innerHTML = colors.map((color, index) => {
     const fileName = state.editingBaseVariantImageMap[color] || "";
     const asset = variantAssets.find((item) => item.file_name === fileName);
@@ -5260,12 +5668,157 @@ function renderBaseVariantImageMap() {
         <span class="drag-handle" aria-hidden="true">⋮⋮</span>
         <input data-base-color-index="${index}" value="${escapeHtml(color)}" placeholder="颜色名称" />
         ${preview}
-        <select data-variant-image-index="${index}">${options(fileName)}</select>
+        <button type="button" class="variant-image-trigger${fileName ? "" : " is-empty"}" data-variant-image-index="${index}" data-variant-image-trigger="${index}" aria-haspopup="listbox" aria-expanded="false" title="选择颜色图（带缩略图）：${escapeHtml(pickerLabel(fileName))}">
+          <span class="variant-image-trigger-label">${escapeHtml(pickerLabel(fileName))}</span>
+          <span class="variant-image-trigger-caret" aria-hidden="true"></span>
+        </button>
         <button type="button" data-remove-base-color="${index}">删除</button>
       </div>
     `;
   }).join("");
+  // 重渲染会换掉触发按钮：已经打开的弹层要么跟着关掉，要么按新行号重开。
+  if (state.variantImagePickerIndex >= 0) {
+    if (state.variantImagePickerIndex < colors.length) renderVariantImagePickerPopup(state.variantImagePickerIndex);
+    else closeVariantImagePicker();
+  }
 }
+
+// ===== 颜色图缩略图选择弹层（2026-10-27）=====
+// 弹层挂在 body 上并用 fixed 定位：维护弹窗的 .maintenance-scroll 是滚动容器，
+// 行内 absolute 弹层会被裁掉。
+function variantImagePickerPopup() {
+  let popup = document.getElementById("variant-image-picker-popup");
+  if (!popup) {
+    popup = document.createElement("div");
+    popup.id = "variant-image-picker-popup";
+    popup.className = "variant-image-picker-popup";
+    popup.setAttribute("role", "listbox");
+    popup.hidden = true;
+    document.body.appendChild(popup);
+  }
+  return popup;
+}
+
+function variantImagePickerOption(name, label, asset, selectedName) {
+  const selected = name === selectedName;
+  const thumb = asset
+    ? `<img class="variant-image-option-thumb" src="${escapeHtml(assetImageUrl(asset, 160))}" alt="" loading="lazy" />`
+    : `<span class="variant-image-option-thumb variant-image-option-thumb--none" aria-hidden="true">✕</span>`;
+  return `
+    <button type="button" class="variant-image-option${selected ? " is-selected" : ""}" role="option" aria-selected="${selected}" data-variant-image-pick="${escapeHtml(name)}">
+      ${thumb}
+      <span class="variant-image-option-name" title="${escapeHtml(label)}">${escapeHtml(label)}</span>
+    </button>
+  `;
+}
+
+function renderVariantImagePickerPopup(index) {
+  const popup = variantImagePickerPopup();
+  const product = state.baseProducts.find((item) => item.id === state.editingBaseProductId) || {};
+  const variantAssets = variantImageAssets(product);
+  const color = state.editingBaseColors[index] || "";
+  const selectedName = state.editingBaseVariantImageMap[color] || "";
+  popup.dataset.variantImageRow = String(index);
+  const items = [
+    variantImagePickerOption("", "未选择图片", null, selectedName),
+    ...variantAssets.map((asset) => variantImagePickerOption(asset.file_name || "", asset.file_name || "", asset, selectedName)),
+  ];
+  const emptyHint = variantAssets.length
+    ? ""
+    : `<p class="variant-image-picker-empty muted">这个商品还没有可选的颜色图素材，先在上方「产品图」里加入图片。</p>`;
+  popup.innerHTML = `${emptyHint}<div class="variant-image-option-grid">${items.join("")}</div>`;
+}
+
+function positionVariantImagePicker() {
+  const popup = document.getElementById("variant-image-picker-popup");
+  if (!popup || popup.hidden) return;
+  const index = state.variantImagePickerIndex;
+  const trigger = document.querySelector(`#base-variant-image-map [data-variant-image-trigger="${index}"]`);
+  if (!(trigger instanceof HTMLElement)) return;
+  const rect = trigger.getBoundingClientRect();
+  const margin = 12;
+  const width = Math.min(Math.max(rect.width, 340), window.innerWidth - margin * 2);
+  popup.style.width = `${width}px`;
+  popup.style.left = `${Math.round(Math.max(margin, Math.min(rect.left, window.innerWidth - width - margin)))}px`;
+  const contentHeight = Math.min(popup.scrollHeight, 360, window.innerHeight - margin * 2);
+  const spaceBelow = window.innerHeight - margin - (rect.bottom + 6);
+  const spaceAbove = rect.top - 6 - margin;
+  // 下面够放就往下弹；否则往上弹，并按上方剩余空间收高度，别盖住触发按钮。
+  const placeBelow = spaceBelow >= Math.min(contentHeight, 200) || spaceBelow >= spaceAbove;
+  const height = placeBelow
+    ? Math.min(contentHeight, Math.max(140, spaceBelow))
+    : Math.min(contentHeight, Math.max(140, spaceAbove));
+  popup.style.maxHeight = `${Math.round(height)}px`;
+  const top = placeBelow ? rect.bottom + 6 : Math.max(margin, rect.top - 6 - height);
+  popup.style.top = `${Math.round(top)}px`;
+}
+
+function openVariantImagePicker(index) {
+  if (!state.editingBaseColors[index]) return;
+  state.variantImagePickerIndex = index;
+  const popup = variantImagePickerPopup();
+  renderVariantImagePickerPopup(index);
+  popup.hidden = false;
+  positionVariantImagePicker();
+  document.querySelectorAll("#base-variant-image-map [data-variant-image-trigger]").forEach((node) => {
+    node.setAttribute("aria-expanded", String(Number(node.dataset.variantImageTrigger) === index));
+  });
+}
+
+function closeVariantImagePicker() {
+  const popup = document.getElementById("variant-image-picker-popup");
+  if (popup) popup.hidden = true;
+  state.variantImagePickerIndex = -1;
+  document.querySelectorAll("#base-variant-image-map [data-variant-image-trigger]").forEach((node) => {
+    node.setAttribute("aria-expanded", "false");
+  });
+}
+
+function toggleVariantImagePicker(index) {
+  if (state.variantImagePickerIndex === index) closeVariantImagePicker();
+  else openVariantImagePicker(index);
+}
+
+function selectBaseVariantImage(index, fileName) {
+  syncBaseColorInputs();
+  const color = state.editingBaseColors[index] || "";
+  if (!color) return;
+  if (fileName) state.editingBaseVariantImageMap[color] = fileName;
+  else delete state.editingBaseVariantImageMap[color];
+  closeVariantImagePicker();
+  // 换了颜色图 = 这个颜色在产品图顺序里换了位置：联动打开时按图的位置重排颜色
+  // （清空选择则变成「未匹配」，联动下排到最后）。
+  applyBaseColorFollowFromImages();
+  renderBaseVariantImageMap();
+}
+
+// 弹层是全局单例：点空白、按 Esc、滚动/改窗口大小都收起来。
+document.addEventListener("click", (event) => {
+  if (state.variantImagePickerIndex < 0) return;
+  const target = event.target;
+  if (!(target instanceof Element)) return;
+  if (target.closest("#variant-image-picker-popup")) return;
+  if (target.closest("#base-variant-image-map [data-variant-image-trigger]")) return;
+  closeVariantImagePicker();
+});
+
+document.addEventListener("keydown", (event) => {
+  if (event.key !== "Escape" || state.variantImagePickerIndex < 0) return;
+  closeVariantImagePicker();
+});
+
+document.addEventListener("scroll", (event) => {
+  if (state.variantImagePickerIndex < 0) return;
+  const target = event.target;
+  if (target instanceof Element && target.closest("#variant-image-picker-popup")) return;
+  closeVariantImagePicker();
+}, true);
+
+// 窗口尺寸变了只需重新定位（fixed 弹层位置会过期），不必直接关掉。
+window.addEventListener("resize", () => {
+  if (state.variantImagePickerIndex >= 0) positionVariantImagePicker();
+});
+
 
 function moveBaseImage(fromIndex, toIndex) {
   if (fromIndex === toIndex || fromIndex < 0 || toIndex < 0) return;
@@ -5497,10 +6050,47 @@ async function recommendBaseAttributesWithAI() {
   }
 }
 
-async function saveBaseImageOrder() {
-  if (!state.editingBaseProductId) return;
+// ===== 基础商品「保存维护内容」队列 =====
+// 点保存时只同步取一份表单快照，写入放到后台串行跑：
+// ① 点完立刻能继续操作（原来保存后要重拉副本 4.5MB + 自动化任务 2.9MB 再整表重画，
+//    这就是点击后卡一下的原因；现在只更新本地这一条商品并重画卡片）；
+// ② 弹窗关掉了也照常保存完，但保存成功后绝不再把弹窗弹回来——操作员可能已经在看
+//    别的商品了（这正是「点了保存、关掉商品，保存成功后又弹出来」的来源）。
+const baseProductSaveQueue = [];        // [{ productId, label, payload }]
+const baseProductSaveState = new Map(); // productId -> { status: "queued"|"saving"|"saved"|"failed", message }
+let baseProductSaveDraining = false;
+let baseProductRefreshTimer = 0;
+
+function baseProductSaveLabel(productId) {
+  const product = state.baseProducts.find((item) => item.id === productId);
+  return String(product?.main_sku || product?.product_name_cn || product?.base_name || "").trim() || "基础商品";
+}
+
+function baseProductSaveBusy(productId) {
+  const status = baseProductSaveState.get(productId);
+  return status?.status === "queued" || status?.status === "saving";
+}
+
+function renderBaseProductSaveButton() {
+  const button = $("save-base-image-order-btn");
+  if (!button) return;
+  const busy = baseProductSaveBusy(state.editingBaseProductId);
+  button.disabled = busy;
+  button.textContent = busy
+    ? (baseProductSaveQueue.length ? `保存中…（待存 ${baseProductSaveQueue.length}）` : "保存中…")
+    : "保存维护内容";
+}
+
+function setBaseProductSaveStatus(productId, status, message = "") {
+  if (!productId) return;
+  baseProductSaveState.set(productId, { status, message });
+  if (state.editingBaseProductId !== productId) return;
   const result = $("base-image-editor-result");
-  result.textContent = "正在保存维护内容...";
+  if (result && message) result.textContent = message;
+  renderBaseProductSaveButton();
+}
+
+function collectBaseProductMaintenancePayload() {
   syncBaseColorInputs();
   const name = $("base-maintenance-name").value.trim();
   const recognizedColors = normalizeBaseColors(state.editingBaseColors);
@@ -5515,31 +6105,107 @@ async function saveBaseImageOrder() {
   const attributeValues = categoryFieldControls.length
     ? collectBaseCategoryAttributeValues()
     : { ...(state.editingBaseProductAttributeValues || {}) };
-  const product = await api(`/api/base-products/${encodeURIComponent(state.editingBaseProductId)}`, {
-    method: "PUT",
-    body: JSON.stringify({
-      product_name_cn: name,
-      base_name: name,
-      main_sku: $("base-maintenance-main-sku").value.trim(),
-      status: $("base-maintenance-status").value.trim(),
-      listing_title: $("base-maintenance-title-input").value.trim(),
-      description: $("base-maintenance-description").value.trim(),
-      product_images: state.editingBaseProductImages,
-      main_image: state.editingBaseProductImages[0] || "",
-      recognized_colors: recognizedColors,
-      variant_image_map: variantImageMap,
-      color_order_follows_images: baseColorFollowEnabled(),
-      price_tiers: saveBasePriceColorRowsToTiers(),
-      size_chart_image: state.editingBaseSizeChartImage || "",
-      recognized_sizes: [...(state.editingBaseRecognizedSizes || [])],
-      selected_sizes: [...(state.editingBaseSelectedSizes || [])],
-      attribute_values: attributeValues,
-      product_category: state.editingBaseProductCategory || null,
-    }),
-  });
-  result.textContent = `已保存 ${product.product_images?.length || 0} 张产品图、${product.recognized_colors?.length || 0} 个颜色。`;
-  await Promise.all([loadBaseProducts(), loadStoreListingCopies(), loadAutomationJobs()]);
-  openBaseProductMaintenance(product.id);
+  return {
+    product_name_cn: name,
+    base_name: name,
+    main_sku: $("base-maintenance-main-sku").value.trim(),
+    status: $("base-maintenance-status").value.trim(),
+    listing_title: $("base-maintenance-title-input").value.trim(),
+    ...(($("base-maintenance-audience")?.value || "") ? { title_audience: $("base-maintenance-audience").value } : {}),
+    description: $("base-maintenance-description").value.trim(),
+    product_images: [...state.editingBaseProductImages],
+    main_image: state.editingBaseProductImages[0] || "",
+    recognized_colors: recognizedColors,
+    variant_image_map: variantImageMap,
+    color_order_follows_images: baseColorFollowEnabled(),
+    price_tiers: saveBasePriceColorRowsToTiers(),
+    size_chart_image: state.editingBaseSizeChartImage || "",
+    recognized_sizes: [...(state.editingBaseRecognizedSizes || [])],
+    selected_sizes: [...(state.editingBaseSelectedSizes || [])],
+    attribute_values: attributeValues,
+    product_category: state.editingBaseProductCategory || null,
+  };
+}
+
+function enqueueBaseProductSave(task) {
+  const existing = baseProductSaveQueue.findIndex((item) => item.productId === task.productId);
+  // 同一商品连点只保留最新快照，避免把旧表单内容后写上去。
+  if (existing >= 0) baseProductSaveQueue[existing] = task;
+  else baseProductSaveQueue.push(task);
+  baseProductSaveState.set(task.productId, { status: "queued", message: "" });
+  renderBaseProductSaveButton();
+  drainBaseProductSaveQueue().catch(() => {});
+}
+
+async function drainBaseProductSaveQueue() {
+  if (baseProductSaveDraining) return;
+  baseProductSaveDraining = true;
+  try {
+    while (baseProductSaveQueue.length) {
+      const task = baseProductSaveQueue.shift();
+      setBaseProductSaveStatus(task.productId, "saving", "正在保存维护内容…");
+      renderBaseProductSaveButton();
+      try {
+        const product = await api(`/api/base-products/${encodeURIComponent(task.productId)}`, {
+          method: "PUT",
+          body: JSON.stringify(task.payload),
+        });
+        applySavedBaseProduct(task, product);
+      } catch (error) {
+        const message = error?.message || String(error);
+        setBaseProductSaveStatus(task.productId, "failed", `保存失败：${message}`);
+        showOperationFeedback(`「${task.label}」保存失败：${message}`, "error");
+      }
+    }
+  } finally {
+    baseProductSaveDraining = false;
+    renderBaseProductSaveButton();
+    scheduleBaseProductRefresh();
+  }
+}
+
+function applySavedBaseProduct(task, product) {
+  if (!product?.id) return;
+  const index = state.baseProducts.findIndex((item) => item.id === product.id);
+  const before = index >= 0 ? state.baseProducts[index] : null;
+  // PUT 只回商品本体：副本数/生命周期/自动化图标是列表接口算出来的，先沿用旧值，
+  // 稍后由后台的一次列表刷新校正（不要在这里整表重拉）。
+  const merged = before ? { ...before, ...product } : product;
+  if (index >= 0) state.baseProducts[index] = merged;
+  else state.baseProducts.unshift(merged);
+  const summary = `已保存 ${product.product_images?.length || 0} 张产品图、${product.recognized_colors?.length || 0} 个颜色。`;
+  baseProductSaveState.set(product.id, { status: "saved", message: summary });
+  renderBaseProducts();
+  if (state.editingBaseProductId === product.id) {
+    const result = $("base-image-editor-result");
+    if (result) result.textContent = summary;
+    renderBaseMaintenanceSummary(merged);
+    renderBaseProductSaveButton();
+  }
+  // 弹窗已关掉或已切到别的商品：只提示一句，不重开弹窗、不动正在编辑的内容。
+  showOperationFeedback(`「${task.label}」${summary}`, "success");
+  scheduleBaseProductRefresh();
+}
+
+// 后台补刷商品列表（约 0.9MB）：PUT 只回商品本体，副本数/生命周期阶段/列表排序
+// 这类派生字段要由列表接口校正。合并成一次，连点保存也只拉一遍。
+function scheduleBaseProductRefresh() {
+  window.clearTimeout(baseProductRefreshTimer);
+  baseProductRefreshTimer = window.setTimeout(() => {
+    loadBaseProducts().catch(() => {});
+  }, 1200);
+}
+
+function saveBaseImageOrder() {
+  const productId = state.editingBaseProductId;
+  if (!productId) return;
+  if (baseProductSaveQueue.some((item) => item.productId === productId)) return;
+  // 快照要脱离编辑态：入队后操作员还会继续改（或关掉弹窗），不能写进去后改的内容。
+  const payload = JSON.parse(JSON.stringify(collectBaseProductMaintenancePayload()));
+  const task = { productId, label: baseProductSaveLabel(productId), payload };
+  const result = $("base-image-editor-result");
+  if (result) result.textContent = "已加入保存队列，正在写入…";
+  enqueueBaseProductSave(task);
 }
 
 // AI 识别失败后的重试：重新跑一遍视觉生成（标题/详情/颜色），复用导入时的开关配置。
@@ -5665,6 +6331,22 @@ function selectAllBaseSizes() {
 function clearBaseSizes() {
   state.editingBaseSelectedSizes = [];
   renderBaseRecognizedSizes();
+}
+
+// 常用默认尺码（服装 XXS–XXXL）：商品还没识别出尺码时按这套兜底，
+// 也可以随时点「常用 XXS–XXXL」补齐并勾选。
+const BASE_COMMON_SIZES = ["XXS", "XS", "S", "M", "L", "XL", "XXL", "XXXL"];
+
+function applyBaseCommonSizes() {
+  for (const size of BASE_COMMON_SIZES) addBaseRecognizedSize(size);
+  // 常用码全部勾选（会上架）；其它尺码保持原有勾选状态不动。
+  const selected = [...(state.editingBaseSelectedSizes || [])];
+  for (const size of BASE_COMMON_SIZES) {
+    if (!selected.some((s) => s.toLowerCase() === size.toLowerCase())) selected.push(size);
+  }
+  state.editingBaseSelectedSizes = selected;
+  renderBaseRecognizedSizes();
+  showOperationFeedback("已应用常用尺码 XXS–XXXL（全部勾选），保存后生效", "success");
 }
 
 // ===== 尺码模板（localStorage，命名勾选组合快速复用） =====
@@ -5892,6 +6574,23 @@ function applyBasePriceFirstRowToAll() {
   showOperationFeedback("首行价格已应用到全部颜色/款式，保存后生效", "success");
 }
 
+// 「批量填成本价」：把一个成本价应用到全部颜色行（只动成本列，站点价格不受影响）。
+function applyBasePriceBatchCost() {
+  const input = $("base-price-batch-cost");
+  const raw = String(input?.value ?? "").trim();
+  if (!raw || !(Number(raw) >= 0)) {
+    showOperationFeedback("请先在批量成本价输入框里填一个不小于 0 的价格", "error");
+    return;
+  }
+  const targets = document.querySelectorAll("[data-base-price-cost]");
+  if (!targets.length) {
+    showOperationFeedback("请先在「颜色图」区添加颜色后再批量填成本价", "error");
+    return;
+  }
+  targets.forEach((el) => { el.value = raw; });
+  showOperationFeedback(`成本价 ${raw} 已应用到全部 ${targets.length} 个颜色/款式，保存后生效`, "success");
+}
+
 async function previewBasePriceMatrix() {
   const text = $("base-price-paste")?.value || "";
   if (!text.trim()) throw new Error("请先粘贴价格表");
@@ -5936,6 +6635,7 @@ function saveBasePriceColorRowsToTiers() {
 
 
 function closeBaseImageEditor() {
+  closeVariantImagePicker();
   state.editingBaseProductId = "";
   state.editingBaseProductImages = [];
   state.editingBaseVariantImageMap = {};
@@ -6129,10 +6829,17 @@ const LISTING_COPY_STATUS_LABELS = {
 function listingCopyThumbUrl(copy) {
   const base = state.baseProducts.find((item) => item.id === copy.base_product_id);
   if (!base) return "";
+  // 素材目录已被清理（assets_cleaned_at 有值）时不再拼缩略图地址：那是死链，
+  // 列表里只会显示裂图。返回空串让调用方渲染虚线占位框。
+  if (String(base.assets_cleaned_at || "").trim()) return "";
   const groupKey = String(base.group_id || "").trim().toUpperCase();
   const mainName = String(copy.main_image || base.main_image || (base.product_images || [])[0] || "").trim();
   if (!mainName) return "";
-  const asset = state.assets.find((item) =>
+  // 先按商品自己那次导入的目录找：重复导入同一个 SKU 时素材库里有同名旧图，
+  // 只按 group_id 找会取到旧导入那张，副本缩略图和商品卡片就对不上了。
+  // 找不到再退回整组（副本可能是重新导入之前建的，主图只在旧目录里）。
+  const scoped = assetsForBaseProduct(base).find((item) => String(item.file_name || "") === mainName);
+  const asset = scoped || state.assets.find((item) =>
     String((item.group_id || "")).trim().toUpperCase() === groupKey
     && String(item.file_name || "") === mainName,
   );
@@ -6154,11 +6861,17 @@ function latestJobByCopy() {
 
 // 「全选」只覆盖**新建**（没有作业、还没跑过的副本）：现场反馈原来的全选把失败/已完成
 // 的一起勾上，批量生成任务时容易误操作。失败与已完成的仍可单条勾选。
+// 已经有任务在队列里（待领取/已领取）或正在执行的副本也跳过：它们不是「还没建任务」，
+// 勾上再点批量生成只会拿到一串「已有活动任务」的报错。
 function selectableListingCopies() {
   const jobs = latestJobByCopy();
   // 跨境模式关闭时「全选新建」只覆盖可见的本土副本，不会勾到隐藏的跨境行。
   const visible = crossBorderModeEnabled() ? state.storeListingCopies : state.storeListingCopies.filter((copy) => !isCNSCListingCopy(copy));
-  return visible.filter((copy) => listingCopyTaskSection(jobs.get(copy.id)) === "new");
+  return visible.filter((copy) => {
+    const job = jobs.get(copy.id);
+    if (listingCopyTaskSection(job) !== "new") return false;
+    return !ACTIVE_AUTOMATION_STATUSES.has(String(job?.status || "").toLowerCase());
+  });
 }
 
 // 已完成区按「完成时间」分桶 + 可逐桶折叠：现场反馈已完成越积越多，把列表拖得很长。
@@ -6358,7 +7071,7 @@ function toggleSelectAllListingCopies() {
   const targets = selectableListingCopies();
   const result = $("listing-copy-batch-result");
   if (!targets.length) {
-    if (result) result.textContent = "没有新建的副本可勾选（失败/已完成的不参与全选）。";
+    if (result) result.textContent = "没有新建的副本可勾选（失败/已完成/执行中的不参与全选）。";
     updateListingCopySelectAllButton();
     return;
   }
@@ -6372,12 +7085,14 @@ function toggleSelectAllListingCopies() {
   if (result) {
     result.textContent = allSelected
       ? `已取消勾选 ${targets.length} 个新建副本。`
-      : `已勾选 ${targets.length} 个新建副本（失败/已完成的不参与全选）。`;
+      : `已勾选 ${targets.length} 个新建副本（失败/已完成/执行中的不参与全选）。`;
   }
 }
 
 // 「全选」按钮文案跟随勾选状态：部分已选显示已选数，全选时提示取消。
 function updateListingCopySelectAllButton() {
+  // 勾选数量变化时两个按钮一起更新（勾选还包括单条勾的失败/已完成行）。
+  updateListingCopyBatchDeleteButton();
   const btn = $("select-all-listing-copies-btn");
   if (!btn) return;
   const targets = selectableListingCopies();
@@ -6391,6 +7106,69 @@ function updateListingCopySelectAllButton() {
   if (selectedCount === 0) btn.textContent = `全选新建（${targets.length}）`;
   else if (selectedCount === targets.length) btn.textContent = "取消全选新建";
   else btn.textContent = `全选新建（已选 ${selectedCount}/${targets.length}）`;
+}
+
+// 「批量删除副本」按钮：勾了才可用，文案带数量（勾选包含失败/已完成的行）。
+function updateListingCopyBatchDeleteButton() {
+  const btn = $("delete-selected-listing-copies-btn");
+  if (!btn) return;
+  const count = state.selectedListingCopies.size;
+  btn.disabled = count === 0;
+  btn.textContent = count ? `批量删除副本（${count}）` : "批量删除副本";
+}
+
+// 批量删除勾选的副本：一次请求、一次落库（逐条 DELETE 每条都要重写主库，很慢）。
+// 正在执行/已不存在的副本由后端按条跳过并回报，不阻断同批其它副本。
+async function deleteSelectedListingCopies() {
+  const ids = [...state.selectedListingCopies];
+  const result = $("listing-copy-batch-result");
+  if (!ids.length) {
+    if (result) result.textContent = "请先勾选要删除的店铺刊登副本。";
+    return;
+  }
+  const jobs = latestJobByCopy();
+  const copies = state.storeListingCopies.filter((copy) => ids.includes(copy.id));
+  const jobStatus = (copy) => String(jobs.get(copy.id)?.status || "").toLowerCase();
+  // 后端只拒绝 claimed/running（worker 正拿着它跑）；ready 只是排队，会连排队任务一起删。
+  const live = copies.filter((copy) => jobStatus(copy) === "claimed" || jobStatus(copy) === "running");
+  const queued = copies.filter((copy) => jobStatus(copy) === "ready");
+  const labels = copies.slice(0, 3).map((copy) => `${copy.main_sku || copy.group_id || ""}${copy.store_name ? ` · ${copy.store_name}` : ""}`.trim());
+  const head = copies.length > 3 ? `${labels.join("、")} 等 ${copies.length} 个` : labels.join("、");
+  const notes = [];
+  if (live.length) notes.push(`其中 ${live.length} 个正在执行，会被跳过（请先在自动化页取消任务）`);
+  if (queued.length) notes.push(`其中 ${queued.length} 个已排进队列但还没开始，会连同排队任务一起删除`);
+  const confirmed = window.confirm(
+    `确认删除 ${ids.length} 个店铺刊登副本？\n\n${head}\n\n` +
+    `将删除副本的 SKU、价格和未完成自动化任务（历史自动化记录保留）。基础商品和 NAS 素材不受影响。` +
+    (notes.length ? `\n\n${notes.join("；")}。` : ""),
+  );
+  if (!confirmed) return;
+  if (result) result.textContent = `正在删除 ${ids.length} 个副本…`;
+  let data;
+  try {
+    data = await api("/api/store-listing-copies/batch-delete", {
+      method: "POST",
+      body: JSON.stringify({ ids }),
+    });
+  } catch (error) {
+    if (result) result.textContent = `批量删除失败：${error.message || error}`;
+    throw error;
+  }
+  for (const id of data.deleted_ids || []) state.selectedListingCopies.delete(id);
+  for (const id of data.not_found_ids || []) state.selectedListingCopies.delete(id);
+  await Promise.all([loadStoreListingCopies(), loadAutomationJobs(), loadBaseProducts()]).catch(() => {});
+  const deleted = Number(data.deleted_count || 0);
+  const skippedRunning = (data.running_job_ids || []).length;
+  const skippedMissing = (data.not_found_ids || []).length;
+  const parts = [`已删除 ${deleted} 个店铺刊登副本`];
+  if (deleted) {
+    parts.push(`清理 ${data.deleted_listing_sku_count || 0} 个 SKU、${data.deleted_listing_price_count || 0} 个价格、${data.deleted_automation_job_count || 0} 个未完成任务`);
+  }
+  if (skippedRunning) parts.push(`跳过 ${skippedRunning} 个（正在执行或已排进队列，请先取消）`);
+  if (skippedMissing) parts.push(`跳过 ${skippedMissing} 个（已不存在）`);
+  const message = `${parts.join("；")}。`;
+  if (result) result.textContent = message;
+  showOperationFeedback(message, (skippedRunning || skippedMissing) ? "warning" : "success");
 }
 
 // ===== 执行中卡片：实时步骤 + 人工标记 =====
@@ -6908,11 +7686,13 @@ function renderAutomationJobDetails(jobId) {
       : (isFinishedWithoutEvidence ? "任务已停止，未取得保存证据" : "等待执行到保存并核验");
     stepsSection.hidden = false;
     const stepRows = steps.map((step, index) => {
-          const label = AUTOMATION_STAGE_LABELS[step.stage] || step.stage || "步骤";
+          const label = automationLiveStepLabel(step);
           const ok = step.ok === true;
           const glyph = ok ? "done" : (step.ok === false ? "alert" : "running");
           const stepTime = formatLocalTime(step.at);
-          return `<li class="automation-step-item"><span class="automation-step-index">${index + 1}</span><span class="row-glyph row-glyph--${glyph}" aria-hidden="true"></span><strong>${escapeHtml(label)}</strong>${stepTime !== "-" ? `<time title="${escapeHtml(step.at || "")}">${escapeHtml(stepTime)}</time>` : ""}</li>`;
+          // 失败的那一步要直接写出原因，否则界面上只有「步骤」+ 红点，运营看不出为什么。
+          const reason = step.ok === false ? automationErrorLabel(step.code || "") : "";
+          return `<li class="automation-step-item"><span class="automation-step-index">${index + 1}</span><span class="row-glyph row-glyph--${glyph}" aria-hidden="true"></span><strong>${escapeHtml(label)}</strong>${reason ? `<span class="automation-step-reason">${escapeHtml(reason)}</span>` : ""}${stepTime !== "-" ? `<time title="${escapeHtml(step.at || "")}">${escapeHtml(stepTime)}</time>` : ""}</li>`;
         }).join("");
     stepsEl.innerHTML = `${stepRows}<li class="automation-step-item automation-step-item--evidence"><span class="automation-step-index">${steps.length + 1}</span><span class="row-glyph row-glyph--${evidenceGlyph}" aria-hidden="true"></span><strong>保存证据</strong><span>${escapeHtml(evidenceText)}</span></li>`;
   }
@@ -7237,6 +8017,7 @@ function renderNasBrowserSelection() {
 // AI 识别分阶段轮播：导入请求是同步的，等待期间无法拿到服务端真实阶段边界，
 // 所以按固定顺序轮播阶段文案；请求返回后用 ai_stages 显示真实结果。
 const AI_IMPORT_STAGE_MESSAGES = [
+  "AI 识别中：正在判断款式适合的人群…",
   "AI 识别中：正在识别标题和详情…",
   "AI 识别中：正在识别颜色图…",
 ];
@@ -7255,6 +8036,7 @@ function aiImportStageSummary(product) {
   if (aiError) return { error: aiError };
   const stages = product?.ai_stages || {};
   const parts = [];
+  if (stages.audience === "done") parts.push("已按 AI 识别人群选择标题规则");
   if (stages.title === "done" && (product?.listing_title || product?.description)) parts.push("标题/详情已生成");
   else if (stages.title === "skipped") parts.push("标题/详情未启用");
   if (stages.colors === "done") parts.push("颜色图已识别");
@@ -7571,7 +8353,13 @@ function cnscPriceTiers() {
 }
 
 const LOCAL_UPLOAD_EXTENSIONS = new Set([".jpg", ".jpeg", ".png", ".webp", ".mp4", ".mov", ".avi", ".mkv"]);
-const { planLocalFolderImport, createImportQueue } = window.LocalFolderBatch || {};
+const {
+  planLocalFolderImport,
+  createImportQueue,
+  splitDuplicateLocalImportGroups,
+  dropContainedLocalImportBatches,
+  folderSkuToken,
+} = window.LocalFolderBatch || {};
 
 function localUploadStatus(message, { error = false } = {}) {
   const target = $("local-base-product-upload-status");
@@ -7791,7 +8579,11 @@ function onLocalImportQueueChange(snapshot) {
 }
 
 function localImportModuleReady() {
-  return typeof planLocalFolderImport === "function" && typeof createImportQueue === "function";
+  return typeof planLocalFolderImport === "function"
+    && typeof createImportQueue === "function"
+    && typeof splitDuplicateLocalImportGroups === "function"
+    && typeof dropContainedLocalImportBatches === "function"
+    && typeof folderSkuToken === "function";
 }
 
 // 队列里的一项 = 一个商品目录：上传完成后走原有的基础商品创建接口，成功后
@@ -8002,13 +8794,32 @@ async function importDroppedFolders(dataTransfer) {
     showOperationFeedback("拖入的文件夹里没有可导入的图片 / 视频 / 源文件", "info");
     return;
   }
+  // 同一批拖入里若同时有父目录和它的子目录，只保留父目录（子目录的文件已在上传清单里）。
+  const dedupedBatches = dropContainedLocalImportBatches(batches);
+  const batchesToImport = dedupedBatches.batches;
   // 每个拖入的顶层文件夹单独规划后入队（规划器是"单根目录"语义：一次一个根）。
+  // 逐个结果汇总：重复的目录会被 createBaseProductFromLocalFiles 跳过，这里把
+  // 跳过的目录和「会覆盖已有商品」的风险一起说清楚，避免操作员以为全都进去了。
   let queued = 0;
-  for (const batch of batches) {
-    await createBaseProductFromLocalFiles(batch.files, { quiet: true });
-    queued += 1;
+  let fileCount = 0;
+  const duplicates = dedupedBatches.dropped.map((batch) => ({ folderName: batch?.name || "", reason: "nested" }));
+  const conflicts = [];
+  const sameSkuHints = [];
+  for (const batch of batchesToImport) {
+    const result = await createBaseProductFromLocalFiles(batch.files, { quiet: true });
+    queued += Number(result?.added || 0);
+    fileCount += Number(result?.fileCount || 0);
+    duplicates.push(...(result?.duplicates || []));
+    for (const name of result?.conflicts || []) if (!conflicts.includes(name)) conflicts.push(name);
+    if (result?.sameSkuHint && !sameSkuHints.includes(result.sameSkuHint)) sameSkuHints.push(result.sameSkuHint);
   }
-  showOperationFeedback(`已把 ${queued} 个文件夹加入导入队列（共 ${batches.reduce((total, batch) => total + batch.files.length, 0)} 个文件）`, "info");
+  const duplicateHint = localImportDuplicateHint(duplicates);
+  const riskHint = localImportConflictHint(conflicts) + sameSkuHints.join("");
+  if (!queued) {
+    showOperationFeedback(`没有新商品加入队列：${duplicateHint || "没有可导入的图片 / 视频 / 源文件"}`, "info");
+    return;
+  }
+  showOperationFeedback(`已把 ${queued} 个文件夹加入导入队列（共 ${fileCount} 个文件）。${duplicateHint}${riskHint}`, "info");
 }
 
 // webkitGetAsEntry 的目录条目递归（层级：根目录名/子目录/文件，与 webkitdirectory 一致）。
@@ -8091,6 +8902,77 @@ async function collectDirectoryHandleFiles(directoryHandle, prefix = "") {
   return files;
 }
 
+// 重复导入的原因要让人一眼分清：是「已经导过」还是「拖重了」。
+const LOCAL_IMPORT_DUPLICATE_REASONS = {
+  existing: "已在队列或本次会话导入",
+  repeat: "本次拖入里重复",
+  nested: "已包含在本次拖入的上级目录里",
+};
+
+function localImportDuplicateHint(duplicates) {
+  if (!duplicates.length) return "";
+  const items = duplicates.map((item) => `${item.folderName || "未命名"}（${LOCAL_IMPORT_DUPLICATE_REASONS[item.reason] || "重复"}）`);
+  return `跳过 ${duplicates.length} 个重复导入：${items.join("、")}。`;
+}
+
+// 队列里排队/正在跑 + 本次会话已经导入成功的项：用来识别「同一个目录又拖了一次」。
+function knownLocalImportGroups(snapshot) {
+  const groups = [];
+  if (snapshot?.active) groups.push(snapshot.active);
+  groups.push(...(snapshot?.pending || []));
+  const liveIds = new Set((state.baseProducts || []).map((item) => String(item?.id || "")).filter(Boolean));
+  for (const entry of snapshot?.results || []) {
+    if (entry?.status !== "succeeded" || !entry.task) continue;
+    // 那次导入的商品已经被删掉了：同一目录要能重新导入，否则「删了再拖」还是被跳过。
+    // liveIds 为空多半是列表没加载，不当成「全被删了」。
+    const productId = String(entry.value?.product?.id || "");
+    if (productId && liveIds.size && !liveIds.has(productId)) continue;
+    groups.push(entry.task);
+  }
+  return groups;
+}
+
+// 商品库里已经有同名主 SKU：后端按 group_id 覆盖旧记录（旧副本会失去关联），
+// 所以导入前提醒一句——不拦截，操作员可能就是要刷新素材。主 SKU 的推导规则
+// 与后端 / 重复导入指纹共用 folderSkuToken。
+function localImportLibraryConflicts(groups) {
+  const known = new Set();
+  for (const product of state.baseProducts || []) {
+    for (const value of [product?.main_sku, product?.group_id]) {
+      const token = String(value || "").trim().toUpperCase();
+      if (token) known.add(token);
+    }
+  }
+  if (!known.size) return [];
+  const seen = new Set();
+  const conflicts = [];
+  for (const group of groups) {
+    const token = folderSkuToken(group?.folderName);
+    if (!token || !known.has(token) || seen.has(token)) continue;
+    seen.add(token);
+    conflicts.push(String(group.folderName || token));
+  }
+  return conflicts;
+}
+
+function localImportConflictHint(conflicts) {
+  if (!conflicts.length) return "";
+  return `${conflicts.join("、")} 在商品库里已有同名主 SKU，导入会覆盖原商品记录（已建副本会失去关联）。`;
+}
+
+// 同一批里出现多个「同一主 SKU 但内容不同」的目录：后端按 group_id 归类，
+// 后导入的会顶掉先导入的那个商品，得提醒一句（内容完全相同的已被按重复跳过）。
+function localImportSameSkuHint(groups) {
+  const counts = new Map();
+  for (const group of groups) {
+    const token = folderSkuToken(group?.folderName);
+    if (token) counts.set(token, (counts.get(token) || 0) + 1);
+  }
+  const repeated = [...counts].filter(([, count]) => count > 1).map(([token]) => token);
+  if (!repeated.length) return "";
+  return `${repeated.join("、")} 在这批里对应多个目录：商品库按主 SKU 归类，后导入的会覆盖先导入的那个。`;
+}
+
 async function createBaseProductFromLocalFiles(allFiles, options = {}) {
   if (!localImportModuleReady()) {
     throw new Error("本地批量导入组件未加载，请刷新页面后重试");
@@ -8100,36 +8982,55 @@ async function createBaseProductFromLocalFiles(allFiles, options = {}) {
   const plan = planLocalFolderImport(allFiles, LOCAL_UPLOAD_EXTENSIONS);
   const snapshot = queue.snapshot();
   const waiting = localImportQueueDepth(snapshot);
-  if (plan.mode === "batch") {
-    const validFileCount = plan.groups.reduce((total, group) => total + group.files.length, 0);
-    const ignoredFileCount = plan.ignoredRootFileCount + plan.filteredFileCount;
-    const waitingHint = waiting ? `当前队列还有 ${waiting} 个商品在导入，新目录会排在它们之后。` : "";
-    // 队列让重复选择变得容易：同名目录已经在队列里时明确提醒一次。
-    const queuedKeys = new Set([snapshot.active, ...snapshot.pending].filter(Boolean)
-      .map((task) => `${task.rootName || ""}/${task.folderName}`));
-    const duplicates = plan.groups
-      .filter((group) => queuedKeys.has(`${plan.rootName}/${group.folderName}`))
-      .map((group) => group.folderName);
-    const duplicateHint = duplicates.length ? `其中 ${duplicates.join("、")} 已在队列中，继续会重复创建。` : "";
-    // 不再弹确认框（操作员反馈「总要再点一次」）：直接入队，队列行上可随时移除；
-    // 忽略文件数、重复目录等提示改在队列提示行里显示。
-    if (options.quiet !== true) {
+  // 重复导入防护：同一个商品文件夹（同名 + 同一批文件清单）在队列、本次会话、本次
+  // 拖入里只入队一次；同时拖了父目录和子目录时只留父目录。后端按 group_id 覆盖同名
+  // 商品、素材还会和旧素材混在一起，重复入队会把商品真的导两次/把旧副本顶掉，
+  // 所以这里直接跳过，并在提示里点名跳过了哪些目录、为什么。
+  const { groups, duplicates } = splitDuplicateLocalImportGroups(
+    plan.groups,
+    knownLocalImportGroups(snapshot),
+    { rootName: plan.rootName },
+  );
+  const validFileCount = groups.reduce((total, group) => total + group.files.length, 0);
+  const ignoredFileCount = plan.ignoredRootFileCount + plan.filteredFileCount;
+  const duplicateHint = localImportDuplicateHint(duplicates);
+  const conflictNames = localImportLibraryConflicts(groups);
+  const conflictHint = localImportConflictHint(conflictNames);
+  const sameSkuHint = localImportSameSkuHint(groups);
+  // 不再弹确认框（操作员反馈「总要再点一次」）：直接入队，队列行上可随时移除；
+  // 忽略文件数、重复目录等提示改在提示行里显示。单目录导入沿用原来的安静行为，
+  // 只有出现重复/覆盖风险时才提示。
+  if (options.quiet !== true && (plan.mode === "batch" || duplicates.length || conflictNames.length)) {
+    if (!groups.length) {
+      showOperationFeedback(`没有新商品加入队列：${duplicateHint || "没有可导入的图片 / 视频 / 源文件"}`, "info");
+    } else {
+      const waitingHint = waiting ? `当前队列还有 ${waiting} 个商品在导入，新目录会排在它们之后。` : "";
       showOperationFeedback(
-        `已加入 ${plan.groups.length} 个商品文件夹（${validFileCount} 个有效文件，忽略 ${ignoredFileCount} 个）。${waitingHint}${duplicateHint}`,
+        `已加入 ${groups.length} 个商品文件夹（${validFileCount} 个有效文件，忽略 ${ignoredFileCount} 个）。${waitingHint}${duplicateHint}${conflictHint}${sameSkuHint}`,
         "info",
       );
     }
   }
   const category = categoryProfile($("base-product-category").value)?.product_line || $("base-product-category").value;
   // 入队后立刻返回：上传与 AI 识别在后台串行跑，操作员可以继续选下一个目录。
-  queue.enqueue(plan.groups.map((group) => ({
-    folderName: group.folderName,
-    rootName: plan.rootName,
-    files: group.files,
-    manifest: group.manifest,
-    category,
-    mode: plan.mode,
-  })));
+  if (groups.length) {
+    queue.enqueue(groups.map((group) => ({
+      folderName: group.folderName,
+      rootName: plan.rootName,
+      files: group.files,
+      manifest: group.manifest,
+      category,
+      mode: plan.mode,
+    })));
+  }
+  return {
+    plan,
+    added: groups.length,
+    fileCount: validFileCount,
+    duplicates,
+    conflicts: conflictNames,
+    sameSkuHint,
+  };
 }
 
 function validateStoreTemplateForm() {
@@ -8462,7 +9363,11 @@ async function createStoreTemplate() {
       size_price_overrides: collectSizePriceOverrides(),
       promotion_activity_id: $("store-template-promotion")?.value || "",
       mabang_discount_id: $("store-template-promotion")?.value || "",
-      discount_label: $("store-template-promotion")?.selectedOptions?.[0]?.textContent || "",
+      // 不可用但需要保留的那条选项文案带后缀，label 用原始目录文案，别把后缀存进去。
+      discount_label: (() => {
+        const option = $("store-template-promotion")?.selectedOptions?.[0];
+        return option?.dataset?.label || option?.textContent || "";
+      })(),
       sizes: selectedTemplateSizes(),
       stock: $("store-template-stock")?.value || "",
       weight_kg: $("store-template-weight-kg")?.value || "",
@@ -8553,6 +9458,8 @@ function updateCnscTemplateVisibility() {
   $("store-template-default-sku-block")?.toggleAttribute("hidden", global);
   $("store-template-strip-parentheses-line")?.toggleAttribute("hidden", global);
   $("store-template-promotion")?.closest("label")?.toggleAttribute("hidden", global);
+  // 「重新采集活动」只对本土单店有效：跨境的活动目录走目标站点店铺，整块一起隐藏。
+  $("store-promotion-field")?.toggleAttribute("hidden", global);
   $("store-template-default-video-id")?.closest("[data-template-default-video]")?.toggleAttribute("hidden", global);
   // 「产品图最后一张放尺码表」是本土专属：跨境模板没有这条规则，直接隐藏。
   $("store-template-size-chart-last-image-line")?.toggleAttribute("hidden", global);
@@ -8798,7 +9705,11 @@ async function openStoreTemplateEditor(templateId) {
   if ($("save-as-store-template-btn")) $("save-as-store-template-btn").disabled = false;
   $("store-template-store").value = template.mabang_store_id || "";
   $("store-template-listing-mode").value = template.listing_mode || "site";
-  await Promise.all([loadStorePromotions(), loadStoreWatermarks(), loadStoreSizeChartTemplates()]);
+  await Promise.all([
+    loadStorePromotions(template.promotion_activity_id || template.mabang_discount_id || ""),
+    loadStoreWatermarks(),
+    loadStoreSizeChartTemplates(),
+  ]);
   renderStoreTemplateDescriptionProfileOptions();
   $("store-template-name").value = template.template_name || "";
   $("store-template-category-profile").value = template.category_profile_id || "";
@@ -9268,9 +10179,16 @@ function renderMabangImportPreview(run) {
       );
     }
   } else if (!cnsc) {
+    const startAt = String(selectedPromotion?.start_at || "").slice(0, 10);
+    const endAt = String(selectedPromotion?.end_at || "").slice(0, 10);
+    const validity = startAt && endAt ? `（有效期 ${startAt} 至 ${endAt}）` : "";
+    // 活动列表没读到时只有名称、没有有效期；提前说清楚补救入口，别让人以为活动坏了。
+    const hint = selectedPromotion && !validity
+      ? '<p class="muted">活动有效期没采到（「选择折扣活动」列表未读取）；导入后可在店铺模板里点「重新采集活动」补齐。</p>'
+      : "";
     setGroup(
       "mabang-import-promotions",
-      `<p>${escapeHtml(selectedPromotion?.name || "活动未配置")}</p>`,
+      `<p>${escapeHtml((selectedPromotion?.name || "活动未配置") + validity)}</p>${hint}`,
       coverage.promotions?.status,
     );
   }
@@ -9483,20 +10401,30 @@ function renderCopyTemplatePicker(query = "") {
     if (cnsc) missing.push(...cnscTemplateMissingFields(item).map(cnscConfigurationLabel));
     if (!item.weight_kg) missing.push("重量");
     const blockReason = cnsc && missing.length ? "template_needs_configuration" : "";
-    // 商品勾选/识别尺码优先：复制 SKU 按 颜色 × 商品尺码 生成；商品无尺码才用模板尺码。
-    // 多商品复制时每个商品按自身尺码生成，这里用首个商品做提示示例。
+    // 本土复制以模板尺码为准（模板 chip 就是店铺刊登的尺码轴）；跨境仍按商品尺码
+    // （勾选 → 识别 → 模板）。多商品复制时本土共用一个模板尺码轴。
     const copyItems = baseProductsToCopy();
     const firstBase = copyItems[0] || {};
     const baseSizes = ((firstBase.selected_sizes && firstBase.selected_sizes.length) ? firstBase.selected_sizes : (firstBase.recognized_sizes || [])).filter(Boolean);
     const templateSizes = (item.sizes || []).filter(Boolean);
     let sizeNote = "";
-    if (copyItems.length > 1) {
-      sizeNote = `<small class="template-size-mismatch">批量复制 ${copyItems.length} 个商品，各按自身尺码生成 SKU（示例：${escapeHtml(firstBase.product_name_cn || firstBase.main_sku || "商品")}${baseSizes.length ? ` 尺码 ${escapeHtml(baseSizes.join("/"))}` : " 未配置尺码"}）。</small>`;
-    } else if (baseSizes.length && templateSizes.length && baseSizes.join(",").toLowerCase() !== templateSizes.join(",").toLowerCase()) {
-      sizeNote = `<small class="template-size-mismatch">复制将以商品尺码（${escapeHtml(baseSizes.join("/"))}）生成 SKU（模板尺码 ${escapeHtml(templateSizes.join("/"))} 将被商品尺码覆盖）。</small>`;
-    } else if (baseSizes.length && !templateSizes.length) {
+    if (cnsc) {
+      if (copyItems.length > 1) {
+        sizeNote = `<small class="template-size-mismatch">批量复制 ${copyItems.length} 个商品，各按自身尺码生成 SKU（示例：${escapeHtml(firstBase.product_name_cn || firstBase.main_sku || "商品")}${baseSizes.length ? ` 尺码 ${escapeHtml(baseSizes.join("/"))}` : " 未配置尺码"}）。</small>`;
+      } else if (baseSizes.length && templateSizes.length && baseSizes.join(",").toLowerCase() !== templateSizes.join(",").toLowerCase()) {
+        sizeNote = `<small class="template-size-mismatch">复制将以商品尺码（${escapeHtml(baseSizes.join("/"))}）生成 SKU（模板尺码 ${escapeHtml(templateSizes.join("/"))} 将被商品尺码覆盖）。</small>`;
+      } else if (baseSizes.length && !templateSizes.length) {
+        sizeNote = `<small class="template-size-mismatch">该模板未配置尺码，复制将以商品尺码（${escapeHtml(baseSizes.join("/"))}）生成 SKU。</small>`;
+      } else if (!baseSizes.length && !templateSizes.length) {
+        sizeNote = `<small class="template-size-mismatch">商品与模板均未配置尺码，将按默认尺码生成 SKU。</small>`;
+      }
+    } else if (templateSizes.length) {
+      const baseDiffers = baseSizes.length && baseSizes.join(",").toLowerCase() !== templateSizes.join(",").toLowerCase();
+      const batch = copyItems.length > 1 ? `（${copyItems.length} 个商品共用模板尺码）` : "";
+      sizeNote = `<small class="template-size-mismatch">复制按模板尺码（${escapeHtml(templateSizes.join("/"))}）生成 SKU${baseDiffers ? `；商品尺码（${escapeHtml(baseSizes.join("/"))}）不参与` : ""}${batch}。</small>`;
+    } else if (baseSizes.length) {
       sizeNote = `<small class="template-size-mismatch">该模板未配置尺码，复制将以商品尺码（${escapeHtml(baseSizes.join("/"))}）生成 SKU。</small>`;
-    } else if (!baseSizes.length && !templateSizes.length) {
+    } else {
       sizeNote = `<small class="template-size-mismatch">商品与模板均未配置尺码，将按默认尺码生成 SKU。</small>`;
     }
     return `<label class="template-picker-item" data-block-reason="${blockReason}"><input type="checkbox" data-store-template-select="${escapeHtml(item.id)}" ${state.selectedStoreTemplates.has(item.id) ? "checked" : ""} ${missing.length ? "disabled" : ""} /><span><strong>${cnsc ? '<span class="template-mode-badge">CNSC</span> ' : ""}${escapeHtml(item.store_name)} · ${escapeHtml(item.template_name)}</strong><small>${escapeHtml(item.marketplace_category_path || "未选类目")} · ${escapeHtml(missing.join("、") || "配置完整")}</small>${sizeNote}</span></label>`;
@@ -9688,10 +10616,21 @@ function renderListingCopyPromotions(copy) {
 
 function listingCopyAssetByName(fileName) {
   const copy = state.editingListingCopy || {};
-  return state.assets.find((asset) =>
+  const wanted = String(fileName || "").toLowerCase();
+  if (!wanted) return undefined;
+  const matches = state.assets.filter((asset) =>
     String(asset.group_id || "").toUpperCase() === String(copy.group_id || "").toUpperCase()
-    && String(asset.file_name || "").toLowerCase() === String(fileName || "").toLowerCase()
+    && String(asset.file_name || "").toLowerCase() === wanted
   );
+  if (!matches.length) return undefined;
+  // 重复导入同一个 SKU 后素材库里有同名旧图（HN0244 两次导入的「服装颜色替换生成图片
+  // (1).png」名字一样、图不一样）：先认副本自己那次导入的目录，找不到再退回旧目录。
+  const root = String(copy.asset_root || "").replace(/[\\/]+$/, "").replace(/\\/g, "/").toLowerCase();
+  if (!root) return matches[0];
+  return matches.find((asset) => {
+    const path = String(asset.file_path || "").replace(/\\/g, "/").toLowerCase();
+    return path === root || path.startsWith(`${root}/`);
+  }) || matches[0];
 }
 
 function renderListingCopyProductImages() {
@@ -10794,7 +11733,7 @@ const VIEW_TITLES = {
   automation: "自动化",
   "file-management": "文件管理",
   plan: "项目计划",
-  skills: "Skills 管理",
+  skills: "Shopee 标题工作台",
   settings: "设置",
 };
 
@@ -10813,6 +11752,9 @@ function showView(id, navKey = "") {
     feedback.hidden = true;
     feedback.textContent = "";
   }
+  // 勾选同样属于它所在的页面：离开「商品维护」就清掉，回来时不会带着上次的
+  // 勾选去点「批量删除 / 重新识别」（和上面的提示条同一条规则）。
+  if (id !== "product-maintenance") clearBaseProductSelection();
   // Refresh the datasets each view actually depends on so switching in shows
   // the current state (not what was cached from the last bootstrap). API cost
   // is small — endpoints return in ~3ms thanks to the load_store mtime cache.
@@ -10982,6 +11924,8 @@ function renderUpdateStatus(status) {
 
   const resultEl = $("settings-updates-result");
   if (resultEl) resultEl.textContent = updateStatusMessage(current);
+  // 顶栏的全局提醒跟设置页共用同一份状态，避免两处判断不一致。
+  renderUpdateReminder(current);
 }
 
 async function saveUpdateSettings() {
@@ -11059,9 +12003,9 @@ async function waitForUpdateRestart({ timeoutMs = UPDATE_HEALTH_TIMEOUT_MS, inte
   return false;
 }
 
-async function applyUpdate() {
+async function applyUpdate(versionOverride = "", triggerButton = null) {
   const status = state.updateStatus;
-  const version = String(status?.latest?.version || "");
+  const version = String(versionOverride || status?.latest?.version || "");
   if (!version) {
     showOperationFeedback("没有可更新的版本：先点「检查更新」。", "error");
     return null;
@@ -11073,11 +12017,13 @@ async function applyUpdate() {
   );
   if (!confirmed) return null;
   const resultEl = $("settings-updates-result");
-  const applyButton = $("settings-updates-apply-btn");
+  const applyButton = triggerButton instanceof HTMLButtonElement ? triggerButton : $("settings-updates-apply-btn");
   const checkButton = $("settings-updates-check-btn");
   setUpdateButtonBusy(applyButton, true, "更新中…");
   if (checkButton instanceof HTMLButtonElement) checkButton.disabled = true;
   if (resultEl) resultEl.textContent = "正在下载并暂存 v" + version + "…";
+  // 从顶栏提醒点进来时设置页是隐藏的，全局提示条也要说一声。
+  showOperationFeedback("正在下载并安装 v" + version + "，完成后页面会自动刷新…", "success");
   try {
     const response = await api("/api/updates/apply", {
       method: "POST",
@@ -11098,6 +12044,109 @@ async function applyUpdate() {
     return response;
   } finally {
     setUpdateButtonBusy(applyButton, false);
+  }
+}
+
+// ------------------------------------------------------------
+// 顶栏全局更新提醒（所有视图可见）
+// 状态来自 /api/updates/status：API 启动时后台检查过一次并缓存；缓存超过
+// 半小时（或从没检查过）时，打开页面静默补查一次，避免错过新 Release。
+// ------------------------------------------------------------
+// 缓存新鲜度：30 分钟内的检查结果直接复用，不重复打 GitHub。
+const UPDATE_REMINDER_STALE_MS = 30 * 60 * 1000;
+// 页面长期开着时，每小时回读一次（真正触发 GitHub 检查的前提是缓存过期）。
+const UPDATE_REMINDER_POLL_MS = 60 * 60 * 1000;
+
+let updateReminderCheckInFlight = null;
+
+function renderUpdateReminder(status) {
+  const button = $("update-reminder-btn");
+  if (!(button instanceof HTMLButtonElement)) return;
+  const textEl = $("update-reminder-text");
+  const current = status && typeof status === "object" ? status : null;
+  const latest = current?.latest || null;
+  const pendingVersion = current?.pending && current.pending.version ? String(current.pending.version) : "";
+  let mode = "";
+  let version = "";
+  let label = "";
+  let title = "";
+  if (pendingVersion) {
+    // 已下载并校验完成，只差重启：这时「更新」其实是重启安装。
+    mode = "restart";
+    version = pendingVersion;
+    label = "v" + version + " 已下载 · 重启安装";
+    title = "v" + version + " 已下载并校验完成，点击重启安装";
+  } else if (current?.update_available && latest?.version) {
+    mode = "install";
+    version = String(latest.version);
+    label = "发现新版本 v" + version + " · 立即更新";
+    title = "点击下载并安装 v" + version;
+  }
+  button.hidden = !mode;
+  button.dataset.updateMode = mode;
+  button.dataset.updateVersion = version;
+  button.title = title;
+  if (textEl) textEl.textContent = label || "发现新版本";
+}
+
+function updateCheckIsStale(status) {
+  const checkedAt = Date.parse(String(status?.checked_at || ""));
+  if (!Number.isFinite(checkedAt)) return true;
+  return Date.now() - checkedAt > UPDATE_REMINDER_STALE_MS;
+}
+
+async function refreshUpdateReminder({ forceCheck = false } = {}) {
+  let status = null;
+  try {
+    status = await loadUpdateStatus();
+  } catch {
+    // 更新接口不可用（旧 API 进程）或网络抖动：藏起提醒即可，不打扰操作员。
+    renderUpdateReminder(null);
+    return null;
+  }
+  renderUpdateReminder(status);
+  if (!status?.configured || status.pending) return status;
+  if (!forceCheck && !updateCheckIsStale(status)) return status;
+  // 并发保护：同一时刻只发一次检查请求（启动 + 定时器可能撞上）。
+  if (!updateReminderCheckInFlight) {
+    updateReminderCheckInFlight = api("/api/updates/check", { method: "POST", body: "{}" })
+      .catch(() => null)
+      .then((fresh) => {
+        updateReminderCheckInFlight = null;
+        if (!fresh || typeof fresh !== "object") return null;
+        renderUpdateStatus(fresh);
+        renderUpdateReminder(fresh);
+        return fresh;
+      });
+  }
+  return updateReminderCheckInFlight;
+}
+
+async function handleUpdateReminderClick() {
+  const button = $("update-reminder-btn");
+  if (!(button instanceof HTMLButtonElement)) return;
+  const version = String(button.dataset.updateVersion || "");
+  if (!version) {
+    // 没有可安装版本时点它 = 手动检查一次。
+    const status = await refreshUpdateReminder({ forceCheck: true });
+    if (status && !status.error) {
+      showOperationFeedback(
+        status.update_available ? "发现新版本 v" + (status.latest?.version || "") : "已是最新版本",
+        "success",
+      );
+    }
+    return;
+  }
+  const textEl = $("update-reminder-text");
+  const originalLabel = textEl ? textEl.textContent : "";
+  button.disabled = true;
+  if (textEl) textEl.textContent = "正在更新…";
+  try {
+    await applyUpdate(version);
+  } finally {
+    button.disabled = false;
+    // 成功后页面会整体刷新；这里只兜住取消确认/失败的情况。
+    if (textEl && textEl.textContent === "正在更新…") textEl.textContent = originalLabel;
   }
 }
 
@@ -11264,7 +12313,7 @@ const VIEW_LOADERS = {
   "automation": () => [loadAutomationJobs(), loadStoreListingCopies()],
   "file-management": () => [loadAssets()],
   "plan": () => [loadProjectPlan()],
-  "skills": () => [loadTitleSkills(), loadHotWords()],
+  "skills": () => [window.TitleWorkbench?.load()],
   // 版本更新状态只在设置页用到；基础 loader 的数组字面量被
   // tests/test_lan_access_ui.py 原样断言，所以保留后再 concat 追加。
   "settings": () => [loadRuntimeSettings(), loadNetworkSettings()].concat(loadUpdateStatus()),
@@ -11282,157 +12331,6 @@ function refreshDataForView(id) {
   });
 }
 
-// ============================================================
-// Skills 管理（标题 Skill + 最新热词）
-// 标题 Skill 配置 AI 生成 Shopee 标题的规则（字数目标/补充规则/热词策略），
-// 默认 Skill 在导入与重试标题时由后端自动套用；热词是全局词库，按生效
-// Skill 的热词策略注入标题 prompt（参考融入 / 尽量包含 / 不使用）。
-// ============================================================
-
-const HOT_WORD_POLICY_LABELS = { reference: "热词:参考融入", prefer: "热词:尽量包含", off: "热词:不使用" };
-let editingTitleSkillId = "";
-
-async function loadTitleSkills() {
-  const data = await api("/api/title-skills");
-  state.titleSkills = data.items || [];
-  renderTitleSkills();
-}
-
-async function loadHotWords() {
-  const data = await api("/api/hot-words");
-  state.hotWords = data.items || [];
-  renderHotWords();
-}
-
-function renderTitleSkills() {
-  const list = $("title-skills-list");
-  if (!list) return;
-  const items = state.titleSkills || [];
-  list.innerHTML = items.length ? items.map((item) => {
-    const policy = HOT_WORD_POLICY_LABELS[item.hot_word_policy] || HOT_WORD_POLICY_LABELS.reference;
-    const summary = `${item.title_min_chars ?? 40}–${item.title_max_chars ?? 100} 字 · ${policy}${item.instructions ? " · 有补充规则" : ""}`;
-    return `
-    <div class="settings-connection-row">
-      <div><strong>${escapeHtml(item.name || "未命名 Skill")}</strong><span>${escapeHtml(summary)}</span></div>
-      <div class="settings-connection-actions"><span class="status ${item.is_default ? "ready" : ""}">${item.is_default ? "默认 Skill" : item.enabled === false ? "已停用" : "可用"}</span><button type="button" data-edit-title-skill="${escapeHtml(item.id || "")}">编辑</button>${item.is_default ? "" : `<button type="button" data-default-title-skill="${escapeHtml(item.id || "")}">设为默认</button>`}<button type="button" data-delete-title-skill="${escapeHtml(item.id || "")}">删除</button></div>
-    </div>`;
-  }).join("") : '<p class="muted">暂无标题 Skill。AI 生成标题目前使用内置默认规则（40–100 字、关键词优先）。点「新增 Skill」配置字数目标、补充规则与热词策略。</p>';
-}
-
-function renderHotWords() {
-  const list = $("hot-words-list");
-  if (!list) return;
-  const items = state.hotWords || [];
-  const enabledCount = items.filter((item) => item.enabled !== false).length;
-  const stats = $("hot-words-stats");
-  if (stats) stats.textContent = items.length ? `共 ${items.length} 个 · 启用 ${enabledCount} 个` : "";
-  list.innerHTML = items.length ? items.map((item) => `
-    <div class="hot-words-row${item.enabled === false ? " is-disabled" : ""}">
-      <label class="toggle-field"><input type="checkbox" data-toggle-hot-word="${escapeHtml(item.id || "")}"${item.enabled === false ? "" : " checked"} /><span>${escapeHtml(item.word || "")}</span></label>
-      <span class="hot-words-tag">${escapeHtml(item.tag || "")}</span>
-      <button type="button" data-delete-hot-word="${escapeHtml(item.id || "")}">删除</button>
-    </div>`).join("") : '<p class="muted">暂无热词。在上方输入框每行一个批量添加；生成标题时按生效 Skill 的策略使用。</p>';
-}
-
-function openTitleSkillDialog() {
-  editingTitleSkillId = "";
-  const dialog = $("title-skill-dialog");
-  if (!dialog) return;
-  $("title-skill-name").value = "";
-  $("title-skill-hot-word-policy").value = "reference";
-  $("title-skill-min-chars").value = "40";
-  $("title-skill-max-chars").value = "100";
-  $("title-skill-instructions").value = "";
-  $("title-skill-enabled").checked = true;
-  // 第一个 Skill 建完就能生效：后端也会把首个 Skill 自动设为默认，这里同步勾上。
-  $("title-skill-default").checked = !(state.titleSkills || []).length;
-  $("title-skill-result").textContent = "";
-  dialog.showModal();
-}
-
-function openTitleSkillEditor(skillId) {
-  const skill = (state.titleSkills || []).find((item) => item.id === skillId);
-  const dialog = $("title-skill-dialog");
-  if (!skill || !dialog) return;
-  editingTitleSkillId = skill.id;
-  $("title-skill-name").value = skill.name || "";
-  $("title-skill-hot-word-policy").value = skill.hot_word_policy || "reference";
-  $("title-skill-min-chars").value = String(skill.title_min_chars ?? 40);
-  $("title-skill-max-chars").value = String(skill.title_max_chars ?? 100);
-  $("title-skill-instructions").value = skill.instructions || "";
-  $("title-skill-enabled").checked = skill.enabled !== false;
-  $("title-skill-default").checked = Boolean(skill.is_default);
-  $("title-skill-result").textContent = "";
-  dialog.showModal();
-}
-
-function errorText(error) {
-  return typeof error === "string" ? error : error?.message || String(error);
-}
-
-async function saveTitleSkill() {
-  const name = ($("title-skill-name")?.value || "").trim();
-  const resultEl = $("title-skill-result");
-  if (!name) {
-    if (resultEl) resultEl.textContent = "请填写 Skill 名称。";
-    return;
-  }
-  const body = JSON.stringify({
-    name,
-    enabled: $("title-skill-enabled")?.checked !== false,
-    is_default: Boolean($("title-skill-default")?.checked),
-    hot_word_policy: $("title-skill-hot-word-policy")?.value || "reference",
-    title_min_chars: Number($("title-skill-min-chars")?.value || 40),
-    title_max_chars: Number($("title-skill-max-chars")?.value || 100),
-    instructions: ($("title-skill-instructions")?.value || "").trim(),
-  });
-  try {
-    if (editingTitleSkillId) {
-      await api(`/api/title-skills/${encodeURIComponent(editingTitleSkillId)}`, { method: "PUT", body });
-    } else {
-      await api("/api/title-skills", { method: "POST", body });
-    }
-  } catch (error) {
-    if (resultEl) resultEl.textContent = errorText(error);
-    return;
-  }
-  $("title-skill-dialog")?.close();
-  await loadTitleSkills();
-  showOperationFeedback("标题 Skill 已保存", "success");
-}
-
-async function setDefaultTitleSkill(skillId) {
-  await api(`/api/title-skills/${encodeURIComponent(skillId)}/set-default`, { method: "POST", body: "{}" });
-  await loadTitleSkills();
-  showOperationFeedback("已设为默认标题 Skill", "success");
-}
-
-async function addHotWords() {
-  const raw = ($("hot-words-input")?.value || "").trim();
-  const words = raw.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
-  if (!words.length) {
-    showOperationFeedback("请先在输入框里填写热词（每行一个）", "error");
-    return;
-  }
-  const tag = ($("hot-words-tag")?.value || "").trim();
-  const result = await api("/api/hot-words", { method: "POST", body: JSON.stringify({ words, tag }) });
-  if ($("hot-words-input")) $("hot-words-input").value = "";
-  await loadHotWords();
-  const skipped = result.skipped ? `，跳过 ${result.skipped} 个（重复或为空）` : "";
-  showOperationFeedback(`已添加 ${result.created || 0} 个热词${skipped}`, "success");
-}
-
-async function toggleHotWord(wordId, enabled) {
-  await api(`/api/hot-words/${encodeURIComponent(wordId)}`, { method: "PUT", body: JSON.stringify({ enabled }) });
-  await loadHotWords();
-}
-
-async function clearHotWords() {
-  if (!window.confirm("确认清空全部热词？此操作不可恢复。")) return;
-  await api("/api/hot-words", { method: "DELETE" });
-  await loadHotWords();
-  showOperationFeedback("热词已清空", "success");
-}
 
 // --- Automation live-polling (3s while on the automation view) ---
 const AUTOMATION_POLL_INTERVAL_MS = 3000;
@@ -11501,6 +12399,11 @@ const AUTOMATION_ERROR_LABELS = {
   needs_manual_login_or_verification: "马帮需要重新登录或过验证码，请在自动化浏览器里登录后重试",
   save_result_ambiguous: "保存结果不明确",
   save_result_not_proven: "无法确认草稿已保存",
+  // 马帮保存时的描述图宽度校验：提示只弹在页面顶部，不落草稿。执行器已能认出
+  // 这条提示（BlockedError code），这里给出可直接照做的处理办法。
+  description_image_width_too_small: "商品描述里的图片宽度小于 700，马帮拒绝保存：请在「商品描述」上点「编辑图片」，全选图片把宽度改成 1000 后点「更改」，再点「再次尝试」",
+  description_image_editor_not_found: "描述图片宽度不足 700，但没找到「编辑图片」入口/弹窗，未能自动修复",
+  description_image_width_fix_failed: "描述图片自动修复没成功（宽度仍小于 700）：请手动点「编辑图片」→ 全选 → 尺寸改 1000 后点「更改」，再点「再次尝试」",
   saved_success_dialog_not_unique: "保存成功弹窗不唯一",
   pre_save_validation_failed: "保存前校验未通过（价格/必填缺失）",
   field_not_editable: "字段不可编辑（类目属性多半是存成了文本、实际是下拉）",
@@ -11549,6 +12452,8 @@ const AUTOMATION_ERROR_LABELS = {
   description_product_images_not_listed: "「引用产品图」弹窗里找不到要插的图",
   description_editor_not_found: "找不到描述编辑器，已跳过插图",
   description_editor_id_missing: "描述编辑器缺少 id，已跳过插图",
+  product_image_upload_did_not_land: "产品图没有出现在马帮页面上（上传被拒或页面结构变了）",
+  product_image_slots_already_filled: "表单里已经有产品图（上次运行残留的详情页），已自动重开新表单重试",
 };
 
 function automationErrorLabel(code) {
@@ -11719,6 +12624,7 @@ document.addEventListener("click", async (event) => {
     handleBaseProductBatchAction(baseBatchAction.dataset.baseBatchAction);
     return;
   }
+  if (target.id === "update-reminder-btn") await handleUpdateReminderClick().catch((error) => operationError(error, "更新失败"));
   if (target.id === "refresh-btn") {
     target.disabled = true;
     await refreshAll().then((result) => {
@@ -11853,6 +12759,9 @@ document.addEventListener("click", async (event) => {
     $("store-template-category-dialog")?.showModal();
     await loadMarketplaceCategories("").catch((error) => operationError(error, "类目加载失败"));
   }
+  if (target.id === "store-template-promotion-recollect") {
+    await recollectStorePromotions();
+  }
   if (target.id === "mabang-page-import-btn") {
     openMabangPageImportDialog();
   }
@@ -11914,6 +12823,46 @@ document.addEventListener("click", async (event) => {
     renderLocalImportQueue();
     return;
   }
+  if (target.id === "base-title-queue-close") {
+    baseTitleQueueCollapsed = true;
+    renderBaseTitleQueue();
+    return;
+  }
+  if (target.id === "base-title-queue-show") {
+    baseTitleQueueCollapsed = false;
+    renderBaseTitleQueue();
+    return;
+  }
+  if (target.id === "base-title-queue-view") {
+    showBaseTitleResults();
+    return;
+  }
+  if (target.id === "base-title-result-copy-all") {
+    const text = baseTitleResultText();
+    if (!text) {
+      showOperationFeedback("这批判识别还没有成功的标题可复制", "info");
+      return;
+    }
+    try {
+      await copyTextToClipboard(text);
+      showOperationFeedback(`已复制 ${baseTitleQueueDone().length} 条标题（SKU + 标题）`, "success");
+    } catch (error) {
+      showOperationFeedback(error.message || "复制失败，请手动选择标题复制", "error");
+    }
+    return;
+  }
+  const titleCopy = target.closest("[data-base-title-copy]");
+  if (titleCopy instanceof HTMLElement) {
+    const item = baseTitleQueueItem(titleCopy.dataset.baseTitleCopy || "");
+    if (!item?.title) return;
+    try {
+      await copyTextToClipboard(item.title);
+      showOperationFeedback(`已复制 ${item.sku || item.name} 的标题`, "success");
+    } catch (error) {
+      showOperationFeedback(error.message || "复制失败，请手动选择标题复制", "error");
+    }
+    return;
+  }
   const importRetry = target.closest("[data-import-retry]");
   if (importRetry instanceof HTMLElement) {
     await retryImportQueueItem(importRetry.dataset.importRetry || "", importRetry.dataset.importRetryKind || "");
@@ -11966,12 +12915,24 @@ document.addEventListener("click", async (event) => {
   if (target.id === "close-base-image-editor-btn" || target.id === "close-base-maintenance-btn") closeBaseImageEditor();
   if (target.id === "base-maintenance-rollback-btn") await rollbackBaseProduct(state.editingBaseProductId || state.selectedBaseProductId);
   if (target.id === "base-maintenance-ai-retry") await retryBaseProductAiListing();
+  if (target.id === "base-maintenance-ai-title") await generateBaseProductTitleCandidates();
+  const titleSuggestion = target.closest("[data-base-title-suggestion]");
+  if (titleSuggestion instanceof HTMLElement) {
+    const titleInput = $("base-maintenance-title-input");
+    if (titleInput) {
+      titleInput.value = titleSuggestion.dataset.baseTitleSuggestion || "";
+      titleInput.dispatchEvent(new Event("input", { bubbles: true }));
+      titleInput.focus();
+    }
+    return;
+  }
   if (target.id === "base-price-collapse-btn") toggleBasePriceCollapsed();
   if (target.id === "base-price-refresh-btn") await loadBasePriceColors(state.editingBaseProductId);
   if (target.id === "base-recognize-sizes") await recognizeBaseSizeChart();
   if (target.id === "base-clear-size-chart") { state.editingBaseSizeChartImage = ""; renderBaseSizeChartSection(); }
   if (target.id === "base-sizes-select-all") selectAllBaseSizes();
   if (target.id === "base-sizes-clear") clearBaseSizes();
+  if (target.id === "base-sizes-common") applyBaseCommonSizes();
   if (target.id === "base-size-template-save") saveCurrentSizesAsTemplate();
   if (target.id === "base-size-template-delete") deleteBaseSizeTemplate($("base-size-template-select")?.value || "");
 
@@ -12010,6 +12971,7 @@ document.addEventListener("click", async (event) => {
   if (target.id === "base-price-parse-btn") await previewBasePriceMatrix().catch((error) => showOperationFeedback(error.message || "解析失败", "error"));
   if (target.id === "base-price-cnsc-site-order") openCnscSiteOrderDialog();
   if (target.id === "base-price-apply-all") applyBasePriceFirstRowToAll();
+  if (target.id === "base-price-batch-cost-apply") applyBasePriceBatchCost();
 
   if (target.id === "new-store-template-btn") await openNewStoreTemplateEditor().catch((error) => operationError(error, "打开模板编辑器失败"));
   const watermarkTrigger = target.closest("[data-watermark-trigger]");
@@ -12054,6 +13016,10 @@ document.addEventListener("click", async (event) => {
   if (target.id === "batch-create-automation-jobs-btn") await createAutomationJobsFromSelection().catch((error) => operationError(error, "批量生成自动化任务失败"));
   if (target.id === "refresh-automation-view-btn" || target.id === "refresh-automation-jobs-btn") { await refreshAutomationView(); return; }
   if (target.id === "select-all-listing-copies-btn") { toggleSelectAllListingCopies(); return; }
+  if (target.id === "delete-selected-listing-copies-btn") {
+    await deleteSelectedListingCopies().catch((error) => operationError(error, "批量删除副本失败"));
+    return;
+  }
   // 人工标记按钮在执行详情弹窗里：作用于当前打开的那条作业。
   if (target.id === "automation-manual-saved-btn") {
     await markAutomationJobManually(state.openAutomationJobId || "", "saved");
@@ -12228,6 +13194,15 @@ document.addEventListener("click", async (event) => {
   if (removeProductImageButton instanceof HTMLElement && removeProductImageButton.dataset.removeBaseProductImage) {
     removeBaseProductImage(Number(removeProductImageButton.dataset.removeBaseProductImage));
   }
+  const variantImageTrigger = target.closest("#base-variant-image-map [data-variant-image-trigger]");
+  if (variantImageTrigger instanceof HTMLElement) {
+    toggleVariantImagePicker(Number(variantImageTrigger.dataset.variantImageTrigger || -1));
+  }
+  const variantImagePick = target.closest("#variant-image-picker-popup [data-variant-image-pick]");
+  if (variantImagePick instanceof HTMLElement) {
+    const popup = variantImagePick.closest("#variant-image-picker-popup");
+    selectBaseVariantImage(Number(popup?.dataset.variantImageRow || -1), variantImagePick.dataset.variantImagePick || "");
+  }
   const fileGroup = target.closest("[data-file-group]");
   if (fileGroup instanceof HTMLElement && fileGroup.dataset.fileGroup) {
     state.selectedFileGroup = fileGroup.dataset.fileGroup;
@@ -12355,18 +13330,6 @@ document.addEventListener("change", (event) => {
   }
   if (target instanceof HTMLSelectElement && target.matches("[data-cnsc-target-activity]")) {
     selectedCnscTargetSiteStores();
-    return;
-  }
-  if (target instanceof HTMLSelectElement && target.dataset.variantImageIndex) {
-    const index = Number(target.dataset.variantImageIndex || -1);
-    syncBaseColorInputs();
-    const color = state.editingBaseColors[index] || "";
-    if (color && target.value) state.editingBaseVariantImageMap[color] = target.value;
-    else if (color) delete state.editingBaseVariantImageMap[color];
-    // 换了颜色图 = 这个颜色在产品图顺序里换了位置：联动打开时按图的位置重排颜色
-    // （清空选择则变成「未匹配」，联动下排到最后）。
-    applyBaseColorFollowFromImages();
-    renderBaseVariantImageMap();
     return;
   }
   if (target instanceof HTMLInputElement && target.id === "base-color-follow-images") {
@@ -12741,6 +13704,9 @@ if ("serviceWorker" in navigator) {
 bootstrapEssentials()
   .then(() => {
     bootstrapLocalFolderDropZone();
+    // 顶栏更新提醒：不阻塞首屏，先读缓存状态；缓存过期时静默向 GitHub 查一次。
+    refreshUpdateReminder().catch(() => {});
+    window.setInterval(() => refreshUpdateReminder().catch(() => {}), UPDATE_REMINDER_POLL_MS);
     return refreshRest();
   })
   .catch((err) => {

@@ -12,11 +12,11 @@ import base64
 import io
 import json
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Iterable
 
-from services.api import storage
+from services.api import storage, title_selection
 from services.api.model_gateway import GenerationImage, GenerationRequest
 
 
@@ -133,6 +133,7 @@ class VisionListingResult:
     error: str = ""
     attributes: dict[str, str] | None = None
     color_translations: dict[str, str] | None = None
+    title_candidates: list[dict[str, Any]] | None = None
 
     @property
     def ok(self) -> bool:
@@ -195,11 +196,53 @@ def _downscale_image(path: Path, *, edge: int = VISION_IMAGE_EDGE, quality: int 
     return buffer.getvalue() or None
 
 
+def _is_plain_main_asset(asset: dict[str, Any]) -> bool:
+    """主图角色、但文件名没有任何角色线索的照片（``1.png``、``1 (2).png``、
+    ``服装颜色替换生成 (3).png``、``变清晰 (3).png`` 这类）。
+
+    这类文件在文件夹里没有显式主图、也没有认得出的颜色名时，扫描器会把整组改判成
+    「未命名颜色图」交给视觉识别（见 scanner._apply_unnamed_variant_set_policy）。
+    但文件夹里只要出现一张显式主图（``主图.png`` / ``main-01.jpg``）或一个认得出的
+    颜色文件名，扫描器就按「多角度商品图」保留主图角色，AI 颜色识别于是完全看不到
+    它们——现场把改色图重命名成 1-9 再导入，结果一个颜色都没识别出来。"""
+    if str(asset.get("asset_type") or "").lower() != "main":
+        return False
+    if str(asset.get("sku_option") or "").strip():
+        return False
+    stem = Path(str(asset.get("file_name") or "")).stem.strip()
+    if not stem:
+        return False
+    lowered = stem.lower()
+    return not (lowered.startswith("main") or "\u4e3b\u56fe" in stem)
+
+
+def plain_main_color_assets(assets: list[dict[str, Any]] | None) -> list[dict[str, Any]]:
+    """一整套无信息主图（``1-9``、``1 (1).png``…）当作颜色图交给视觉识别。
+
+    只有它们占了本商品「主图 + 颜色图」的一半以上才算：主图 + 多角度商品图 +
+    已经命名的颜色图这种文件夹里，少量无信息图仍然是商品照片，不能拿去配色。
+    模特图/详情图是显式角色，不参与这个比例。"""
+    photos = [
+        asset
+        for asset in assets or []
+        if str(asset.get("asset_type") or "").lower() in {"main", "variant"}
+        and str(asset.get("file_name") or "").strip()
+    ]
+    plain = [asset for asset in photos if _is_plain_main_asset(asset)]
+    if len(plain) < 2 or len(plain) * 2 < len(photos):
+        return []
+    return plain
+
+
 def ordered_unnamed_variant_assets(assets: list[dict[str, Any]] | None) -> list[dict[str, Any]]:
     """没有颜色名的 SKU 图（数字文件名）按自然序排好。
 
     提示里的文件名顺序、发给模型的图片顺序、写回颜色图映射的顺序都取这一份，
-    三处必须一致。"""
+    三处必须一致。
+
+    除了扫描器判成颜色图的未命名文件，还会带上「一整套无信息主图」
+    （见 :func:`plain_main_color_assets`）：图片命名成 1-9、文件夹里另有主图时，
+    这些图仍然要被 AI 命名成预设的常用颜色。"""
     files = [
         asset
         for asset in assets or []
@@ -207,7 +250,11 @@ def ordered_unnamed_variant_assets(assets: list[dict[str, Any]] | None) -> list[
         and str(asset.get("file_name") or "").strip()
         and not str(asset.get("sku_option") or "").strip()
     ]
-    return sorted(files, key=lambda asset: storage.natural_name_key(asset.get("file_name")))
+    files.extend(plain_main_color_assets(assets))
+    unique: dict[str, dict[str, Any]] = {}
+    for asset in files:
+        unique.setdefault(str(asset.get("file_name") or "").strip().lower(), asset)
+    return sorted(unique.values(), key=lambda asset: storage.natural_name_key(asset.get("file_name")))
 
 
 def _pick_image_paths(
@@ -254,7 +301,10 @@ def _pick_image_paths(
         seen.add(name)
         picks.append(path)
 
-    take(str(base_product.get("main_image") or ""))
+    if not color_only:
+        # 颜色那一趟不预置主图：主图通常不是颜色图，混进来会顶掉一张改色图，
+        # 还会让提示里的 #N 编号与写回映射的下标错开一格（颜色整体错位）。
+        take(str(base_product.get("main_image") or ""))
 
     if not color_only:
         variant_map = base_product.get("variant_image_map") or {}
@@ -344,6 +394,7 @@ Rules:
 def build_system_prompt(
     title_skill: dict[str, Any] | None = None,
     hot_words: list[str] | None = None,
+    title_context: dict[str, Any] | None = None,
 ) -> str:
     """标题 Skill 注入点：有 Skill 时在基础 prompt 后追加补充段（标题字数目标、
     操作员补充规则、热词使用策略），没有 Skill 则原样返回基础 prompt——导入与
@@ -365,7 +416,7 @@ def build_system_prompt(
                 lines.append(f"- {line}")
     policy = str(title_skill.get("hot_word_policy") or "reference").strip().lower()
     words = [str(word or "").strip() for word in (hot_words or []) if str(word or "").strip()]
-    if policy != "off" and words:
+    if policy != "off" and words and not title_context:
         joined = ", ".join(words)
         if policy == "prefer":
             lines.append(
@@ -378,7 +429,7 @@ def build_system_prompt(
                 f"- Latest trending search keywords: {joined}. Weave in ONLY the ones that "
                 "genuinely fit this product; never force an unrelated one."
             )
-    return _SYSTEM_PROMPT + "\n\n" + "\n".join(lines)
+    return _SYSTEM_PROMPT + "\n\n" + "\n".join(lines) + (title_selection.prompt_context(title_context) if title_context else "")
 
 
 def _build_user_prompt(
@@ -455,7 +506,7 @@ def _parse_result(text: str) -> tuple[str, str, dict[str, str], dict[str, str]]:
         parsed = json.loads(match.group(0))
     if not isinstance(parsed, dict):
         raise ValueError("AI 返回的 JSON 不是对象")
-    title = str(parsed.get("title") or "").strip()[:TITLE_MAX_CHARS]
+    title = str(parsed.get("title") or "").strip()
     description = str(parsed.get("description") or "").strip()[:DESCRIPTION_MAX_CHARS]
     attributes = _normalize_attributes(parsed.get("attributes"))
     color_translations = _normalize_color_translations(parsed.get("color_translations"))
@@ -548,6 +599,111 @@ def with_attributes_block(description: str, attributes: dict[str, str]) -> str:
     return block or text
 
 
+# 款式人群识别（2026-11-03）：导入/预览时先让视觉模型判断这件款式适合男童/女童/男装/
+# 女装，再据此匹配标题规则。导入瞬间商品还没有人群证据（只能落到 unknown），
+# 靠属性推断不可靠；而「按标题里的词判人群」误伤太大，硬校验已移除。
+# 识别失败绝不阻断流程，调用方退回默认规则。
+AUDIENCE_CHOICES = ("boys", "girls", "men", "women")
+MAX_AUDIENCE_IMAGES = 2
+AUDIENCE_MAX_TOKENS = 512
+
+_AUDIENCE_SYSTEM_PROMPT = """You classify the target audience of a garment for a Chinese
+cross-border seller listing on Shopee PH. Return STRICTLY valid JSON with two keys and
+nothing else — no markdown fences, no prose.
+
+{"audience": "boys|girls|men|women|unknown", "reason": "<one short English sentence>"}
+
+Rules:
+- Judge from the garment itself: cut and fit, neckline, sleeve length, proportions, the
+  apparent age of the model in the photos, any visible size labels, and the theme/style.
+- boys = boys' childrenswear (roughly 2-12 years); girls = girls' childrenswear;
+  men / women = adult wear.
+- A character, cartoon or franchise print must NOT decide the audience on its own — the
+  same print is sold for children and for adults.
+- Flat-lay photos with no model and a unisex cut are ambiguous: answer "unknown".
+- Never output any value outside the list above."""
+
+
+def _normalize_audience(value: Any) -> str:
+    """把模型给的人群写法归到 boys/girls/men/women；认不出返回 ""。"""
+    text = re.sub(r"[^a-z\u4e00-\u9fff]+", " ", str(value or "").casefold()).strip()
+    if not text:
+        return ""
+    aliases = {
+        "boys": "boys", "boy": "boys", "male child": "boys", "男童": "boys", "男孩": "boys",
+        "girls": "girls", "girl": "girls", "female child": "girls", "女童": "girls", "女孩": "girls",
+        "men": "men", "man": "men", "mens": "men", "male": "men", "男装": "men",
+        "women": "women", "woman": "women", "womens": "women", "female": "women", "女装": "women",
+    }
+    return aliases.get(text, "")
+
+
+def _parse_audience(text: str) -> str:
+    stripped = str(text or "").strip()
+    if stripped.startswith("```"):
+        stripped = re.sub(r"^```(?:json)?\s*", "", stripped)
+        stripped = re.sub(r"\s*```$", "", stripped)
+    parsed: Any = None
+    try:
+        parsed = json.loads(stripped)
+    except (ValueError, TypeError):
+        match = re.search(r"\{[\s\S]*\}", stripped)
+        if match:
+            try:
+                parsed = json.loads(match.group(0))
+            except ValueError:
+                parsed = None
+    if isinstance(parsed, dict):
+        return _normalize_audience(parsed.get("audience"))
+    # 模型没给合法 JSON 时，只要还有 "audience": "..." 片段也认。
+    match = re.search(r'"audience"\s*[:=]\s*"?([A-Za-z ]+)', stripped)
+    return _normalize_audience(match.group(1)) if match else ""
+
+
+def detect_product_audience(
+    *,
+    gateway: Any,
+    connection: dict[str, Any] | None,
+    base_product: dict[str, Any],
+    assets: list[dict[str, Any]] | None = None,
+    attribute_hints: dict[str, str] | None = None,
+) -> tuple[str, str]:
+    """判断款式适合的人群（boys/girls/men/women）。返回 (人群, 失败原因)。
+
+    只发 1–2 张代表图、只要一个人群结论，比标题生成轻得多；任何失败都返回
+    空人群 + 原因，调用方据此退回默认规则。"""
+    if not connection:
+        return "", "没有可用的 AI 连接"
+    paths = _pick_image_paths(base_product, assets or [], max_images=MAX_AUDIENCE_IMAGES)
+    loaded = [(path, image) for path in paths if (image := _read_image(path, profile=IMAGE_PROFILE_TEXT)) is not None]
+    if not loaded:
+        return "", "没有可用的产品图片"
+    parts: list[str] = []
+    category = str(base_product.get("category") or "").strip()
+    if category:
+        parts.append(f"Category: {category}")
+    hints = {str(k): str(v) for k, v in (attribute_hints or {}).items() if str(v or "").strip()}
+    if hints:
+        parts.append("Operator attribute hints:\n" + "\n".join(f"- {k}: {v}" for k, v in hints.items()))
+    parts.append("Look at the attached product photos and answer who this garment is made for.")
+    request = GenerationRequest(
+        system=_AUDIENCE_SYSTEM_PROMPT,
+        user="\n\n".join(parts),
+        max_tokens=AUDIENCE_MAX_TOKENS,
+        temperature=0.0,
+        images=tuple(image for _, image in loaded),
+        timeout_override_seconds=90,
+    )
+    try:
+        generated = gateway.generate(connection, request)
+    except Exception as exc:  # noqa: BLE001 - 识别失败只退回默认规则
+        return "", f"AI 调用失败: {exc}"
+    audience = _parse_audience(str(getattr(generated, "text", "") or ""))
+    if not audience:
+        return "", "AI 未返回可识别的人群"
+    return audience, ""
+
+
 def generate_listing_from_images(
     *,
     gateway: Any,
@@ -561,6 +717,8 @@ def generate_listing_from_images(
     color_targets: list[str] | None = None,
     title_skill: dict[str, Any] | None = None,
     hot_words: list[str] | None = None,
+    title_context: dict[str, Any] | None = None,
+    candidate_count: int = 1,
 ) -> VisionListingResult:
     """Best-effort vision generation. Never raises — returns a result with `error`
     set on failure so callers can log and move on without breaking the create flow.
@@ -571,7 +729,10 @@ def generate_listing_from_images(
     unnamed_variant_files = ordered_unnamed_variant_assets(assets)
     target_names: list[str] | None = None
     if color_targets is None:
-        color_only = bool(unnamed_variant_files)
+        # 只有「纯颜色趟」才自动切成颜色模式。调用方明确要标题/详情时，即使还有
+        # 未命名的数字 SKU 图，也必须走文本趟；颜色由导入流程的独立颜色趟处理
+        # （它显式传 color_targets）。否则标题会被静默跳过，预览/重识别拿到空标题。
+        color_only = bool(unnamed_variant_files) and not (want_title or want_description)
     else:
         target_names = []
         seen_targets: set[str] = set()
@@ -610,7 +771,7 @@ def generate_listing_from_images(
     # 标题 Skill 只作用于会产出标题的文本趟；颜色趟不注入，避免挤占颜色指令的注意力。
     active_skill = title_skill if (want_title and not color_only) else None
     request = GenerationRequest(
-        system=build_system_prompt(active_skill, hot_words),
+        system=build_system_prompt(active_skill, hot_words, title_context if active_skill else None),
         user=_build_user_prompt(
             prompt_product,
             attribute_hints or {},
@@ -628,6 +789,8 @@ def generate_listing_from_images(
         # routinely runs past 120s — the connection default of 60s times out.
         timeout_override_seconds=180,
     )
+    if want_title and not color_only and candidate_count > 1:
+        request = replace(request, user=request.user + '\nReturn the recommended "title" and exactly two distinct alternatives in an "alternatives" array of strings. All three must satisfy the same rules. Keep other requested JSON fields.')
     generated = None
     last_error = ""
     for attempt in range(2):  # one retry: empty replies are intermittent
@@ -653,11 +816,55 @@ def generate_listing_from_images(
     if want_description and fill_attributes_into_description:
         description = with_attributes_block(description, attributes)
 
-    # Skill 定了更紧的标题上限时按它截断（_parse_result 已按 120 的平台上限截过一次）。
-    if want_title and active_skill:
-        skill_max = int(active_skill.get("title_max_chars") or 0)
-        if 0 < skill_max < len(title):
-            title = title[:skill_max]
+    title_candidates = None
+    if want_title and not color_only:
+        def inspect_titles(raw: str, primary: str) -> list[dict]:
+            alternatives = []
+            if candidate_count > 1:
+                try:
+                    match = re.search(r"\{[\s\S]*\}", raw)
+                    obj = json.loads(match.group(0) if match else raw)
+                    alternatives = obj.get("alternatives", [])
+                    if not isinstance(alternatives, list):
+                        alternatives = []
+                except (ValueError, TypeError):
+                    alternatives = []
+            titles = [primary] + [str(v).strip() for v in alternatives if isinstance(v, str)][:max(0, candidate_count - 1)]
+            audited = []
+            for value in titles:
+                if title_context:
+                    audit = title_selection.validate_title(value, title_context)
+                else:
+                    limit = min(TITLE_MAX_CHARS, int((active_skill or {}).get("title_max_chars") or TITLE_MAX_CHARS))
+                    errors = ["标题为空"] if not value else ["标题超过字符上限，需要重新缩短"] if len(value) > limit else []
+                    audit = {"title": value, "chars": len(value), "status": "BLOCKED" if errors else "PASS", "warnings": errors, "errors": errors, "accepted_terms": []}
+                if any(title_selection.tokens(a["title"]) == title_selection.tokens(value) for a in audited):
+                    audit["status"] = "BLOCKED"
+                    audit["errors"].append("备选标题重复")
+                    audit["warnings"] = list(dict.fromkeys(audit["warnings"] + ["备选标题重复"]))
+                audited.append(audit)
+            return audited
+
+        title_candidates = inspect_titles(str(generated.text or ""), title)
+        if any(t["status"] == "BLOCKED" for t in title_candidates) or len(title_candidates) < candidate_count:
+            correction = "\nTitle validation failed. Rewrite the complete JSON; do not cut a word or invent product claims. Required title count: " + str(candidate_count) + ". Validation results: " + json.dumps(title_candidates, ensure_ascii=False)
+            try:
+                generated = gateway.generate(connection, replace(request, user=request.user + correction))
+                title, description, attributes, color_translations = _parse_result(str(generated.text or ""))
+                title_candidates = inspect_titles(str(generated.text or ""), title)
+                if want_description and fill_attributes_into_description:
+                    description = with_attributes_block(description, attributes)
+            except Exception as exc:  # correction is bounded, never changes the old product on failure
+                return VisionListingResult(title="", description=description if want_description else "", model_id=str(getattr(generated, "model_id", "") or ""), input_image_count=len(images), error=f"标题校验重试失败: {exc}", title_candidates=title_candidates)
+        valid = [t for t in title_candidates if t["status"] != "BLOCKED"]
+        if not valid:
+            return VisionListingResult(title="", description=description if want_description else "", model_id=str(getattr(generated, "model_id", "") or ""), input_image_count=len(images), error="标题校验未通过，已保留原商品标题", title_candidates=title_candidates)
+        title = valid[0]["title"]
+        if len(title_candidates) < candidate_count:
+            for t in title_candidates:
+                t["warnings"].append("AI 未返回足够的不同备选，未补造标题")
+                if t["status"] == "PASS":
+                    t["status"] = "REVIEW"
 
     return VisionListingResult(
         title=title if want_title else "",
@@ -666,6 +873,7 @@ def generate_listing_from_images(
         input_image_count=len(images),
         attributes=attributes,
         color_translations=color_translations,
+        title_candidates=title_candidates,
     )
 
 

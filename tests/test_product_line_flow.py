@@ -2590,7 +2590,7 @@ def test_from_folder_import_reports_ai_stages_and_keeps_scanner_colors(tmp_path:
 
     # SKU 分支的文件名规则返回首字母大写规范名（scanner._detect_english_color_option）。
     assert product["recognized_colors"] == ["Beige", "Black"]
-    assert product["ai_stages"] == {"title": "skipped", "colors": "skipped"}
+    assert product["ai_stages"] == {"title": "skipped", "colors": "skipped", "audience": "skipped"}
 
 
 def test_base_price_rows_flow_to_copies_with_site_trimming(tmp_path: Path) -> None:
@@ -2866,8 +2866,12 @@ def test_recognized_sizes_normalize_roundtrip(tmp_path: Path) -> None:
     assert updated2["recognized_sizes"] == ["均码", "160/84A"]
 
 
-def test_copy_skus_use_selected_sizes_before_template_sizes(tmp_path: Path) -> None:
-    """SKU size source priority: base selected_sizes → recognized_sizes → template sizes."""
+def test_copy_skus_use_template_sizes_before_base_sizes(tmp_path: Path) -> None:
+    """本土 site：复制到店铺模板后 SKU 按模板尺码生成（模板 chip 就是刊登尺码轴）。
+
+    2026-10-26 起商品勾选/识别尺码只在模板没配尺码时兜底。此前商品的 AI 识别字母码
+    （XXS–XXXL）会覆盖童装模板的 cm 码，现场 HN0083/HN0084 → Oct.3H 就是这个问题。
+    """
     folder = tmp_path / "DL0001超天酱"
     folder.mkdir()
     for name in ["主图.jpg", "白色.jpg", "黑色.jpg"]:
@@ -2884,9 +2888,61 @@ def test_copy_skus_use_selected_sizes_before_template_sizes(tmp_path: Path) -> N
     })
     result = storage.copy_base_product_to_store_templates(base["id"], [template["id"]])
     skus = storage.list_listing_skus(result["created"][0]["id"])
-    # 用勾选尺码 S/XL × 2 colors = 4 SKU（模板 M/L 被忽略，识别 XL/XXL 被勾选过滤）
-    assert {sku["size"] for sku in skus} == {"S", "XL"}
+    # 模板 M/L × 2 colors = 4 SKU（商品勾选的 S/XL 不再覆盖模板尺码）
+    assert {sku["size"] for sku in skus} == {"M", "L"}
     assert len(skus) == 4
+
+
+def test_copy_skus_fall_back_to_base_sizes_when_template_has_none(tmp_path: Path) -> None:
+    """本土 site：模板没配尺码时仍按商品勾选 → 识别尺码生成 SKU。"""
+    folder = tmp_path / "DL0002无模板尺码"
+    folder.mkdir()
+    for name in ["主图.jpg", "白色.jpg"]:
+        (folder / name).write_bytes(b"image")
+    base = storage.create_base_product_from_folder({"root_path": str(folder), "category": "POD 男装T恤"})
+    storage.update_base_product(base["id"], {"recognized_sizes": ["S", "M", "L"], "selected_sizes": ["S", "L"]})
+    template = storage.create_store_template({
+        "store_name": "POD PH", "platform": "shopee", "country": "PH", "currency": "PHP",
+        "template_name": "No Sizes Tee", "product_line": "POD 男装T恤",
+        "marketplace_category_path": "Men Clothes > Tops > T-shirts",
+        "mabang_store_id": "s", "mabang_category_id": "c", "mabang_discount_id": "d",
+        "sizes": [], "description": "desc", **_transaction_defaults(),
+    })
+    result = storage.copy_base_product_to_store_templates(base["id"], [template["id"]])
+    skus = storage.list_listing_skus(result["created"][0]["id"])
+    assert {sku["size"] for sku in skus} == {"S", "L"}
+
+
+def test_cnsc_copy_skus_keep_base_sizes_before_template_sizes(tmp_path: Path) -> None:
+    """跨境 CNSC 不走模板尺码优先：网格按行号填写，优先级保持商品尺码优先，
+    跨境行为与改动前一致。"""
+    folder = tmp_path / "CNSC4001字母码"
+    folder.mkdir()
+    for name in ["主图.jpg", "白色.jpg"]:
+        (folder / name).write_bytes(b"image")
+    base = storage.create_base_product_from_folder({"root_path": str(folder), "category": "POD 男装T恤"})
+    storage.update_base_product(base["id"], {"recognized_sizes": ["S", "XL"]})
+    template = storage.create_store_template({
+        "store_name": "广州小苗服饰有限公司", "template_name": "CNSC 尺码源",
+        "listing_mode": "cnsc_global",
+        "cnsc_store": {"id": "cnsc-store", "name": "广州小苗服饰有限公司"},
+        "sizes": ["M", "L"],
+        "default_site_discount_percent": 40,
+        "target_site_stores": [
+            {"site_code": "PH", "store_id": "ph-store", "store_name": "海宁PH"}
+        ],
+        "price_tiers": [
+            {
+                "id": "uniform", "sizes": [], "global_price_cny": 19.2,
+                "site_prices": {"PH": {"sale_price": 599.4, "original_price": 999}},
+            }
+        ],
+        "warehouse_stock_defaults": {"TH": 300, "CN_GZ": 0, "PH": 0},
+    })
+    result = storage.copy_base_product_to_store_templates(base["id"], [template["id"]])
+    assert result["created"], result
+    skus = storage.list_listing_skus(result["created"][0]["id"])
+    assert {sku["size"] for sku in skus} == {"S", "XL"}
 
 
 def test_from_folder_mixed_numeric_leading_and_main_filenames_do_not_crash(tmp_path: Path) -> None:

@@ -377,6 +377,8 @@ def _empty_store() -> dict[str, list[dict[str, Any]]]:
         "description_generation_profiles": [],
         "title_skills": [],
         "hot_words": [],
+        # 标题工作台的生成历史（2026-11-03 拆出主库，见 _SPLIT_STORE_KEYS）。
+        "title_generation_history": [],
         "store_template_versions": [],
         "store_promotion_activities": [],
         "store_watermark_templates": [],
@@ -466,6 +468,19 @@ _SPLIT_STORE_KEYS: tuple[str, ...] = (
     # 17.3MB 的执行快照（按任务 id）：只有建任务/重排队/删除会动它，
     # 心跳与进度完全不碰，这样执行期的每一次写入都不用背着 17MB。
     "automation_job_snapshots",
+    # 2026-11-03 主库瘦身第二批：listing_skus 13MB + listing_prices 14.5MB +
+    # store_listing_copies 4.7MB + assets 4.2MB + title_generation_history 2.5MB +
+    # base_products 0.9MB。保存一个基础商品只改 base_products 这 0.9MB，但主库
+    # 55.7MB 意味着每次保存都要 json.loads(~500ms) + json.dumps(~380ms) + 重写整份；
+    # 拆出来以后 update_base_product 走 load_main=False 快路径（~40ms），
+    # 其它操作的保存也只重写各自变了的文件。
+    "listing_skus",
+    "listing_prices",
+    "store_listing_copies",
+    "assets",
+    "title_generation_history",
+    "base_products",
+    "title_skills",
 )
 
 # 主文件上次写出的字节。save_store 用它跳过「主库根本没变」的写入（只动 split 集合的
@@ -702,6 +717,28 @@ def _split_keys_to_skip(split_keys: tuple[str, ...] | None) -> tuple[str, ...]:
     return tuple(key for key in _SPLIT_STORE_KEYS if key not in wanted)
 
 
+def _validated_write_keys(
+    write_keys: tuple[str, ...] | None,
+    loaded: tuple[str, ...],
+) -> tuple[str, ...]:
+    """校验 write_keys ⊆ 本次加载的拆分集合，并去重；None = 全部加载的集合都可写。
+
+    只加载不写的集合（例如建任务时读副本/SKU/价格算就绪度）不进 write_keys，
+    保存时就不用为它们付「序列化后比对字节」的成本。
+    """
+
+    if write_keys is None:
+        return tuple(dict.fromkeys(str(key) for key in loaded))
+    writable = tuple(dict.fromkeys(str(key) for key in write_keys))
+    unknown = [key for key in writable if key not in loaded or key not in _SPLIT_STORE_KEYS]
+    if unknown:
+        raise ValueError(
+            f"write_keys 只能是本次 locked_store 已加载的拆分集合，越界: {unknown}"
+            f"（loaded={loaded}）"
+        )
+    return writable
+
+
 def _read_store_from_disk(
     *,
     use_cache: bool = False,
@@ -926,6 +963,16 @@ def save_store(data: dict[str, Any], *, skip_split_keys: tuple[str, ...] = ()) -
         return
 
     ensure_dirs()
+    # 护栏：skip_split_keys 声明「没加载、也不碰」的拆分集合绝不能出现在待保存数据里。
+    # 出现了就说明调用方在部分加载的 data 上动了被跳过的集合（setdefault / 整体替换），
+    # 继续写等于把这批改动静默吞掉——宁可当场报错点名 key。
+    stray = [key for key in _SPLIT_STORE_KEYS if key in set(skip_split_keys) and data.get(key)]
+    if stray:
+        raise RuntimeError(
+            "save_store(skip_split_keys=...) 的待保存数据里出现了被跳过的拆分集合 "
+            f"{stray}：调用方没有加载它们却试图保存，继续写会丢数据；"
+            "请把这些 key 加进 locked_store(split_keys=...)"
+        )
     # Split off the large collections into their own files. The main store.json
     # never carries them, so a save that only changed store_templates rewrites
     # ~800KB instead of ~4MB.
@@ -996,6 +1043,8 @@ def locked_store(
     *,
     split_keys: tuple[str, ...] | None = None,
     main_readonly: bool = False,
+    load_main: bool = True,
+    write_keys: tuple[str, ...] | None = None,
 ) -> Iterator[tuple[dict[str, Any], Callable[[dict[str, Any]], None]]]:
     """整库读写锁。
 
@@ -1013,6 +1062,16 @@ def locked_store(
     一个字节都不会改主库。
     **契约**：这个模式下 with 块里绝不能修改主库（含嵌套字段）。下面只拦得住
     「整个集合对象被替换」，原地改要调用方自己保证（有测试盯着建任务不动主库）。
+    ``write_keys``：main_readonly 模式下实际会写的拆分集合（默认=split_keys）。
+    建任务要**读**副本/SKU/价格/素材来算就绪度，但只**写**任务与快照——分开声明
+    可以避免每次保存都对 30MB 的未改动集合做「序列化后比对字节」。
+
+    ``load_main=False``（快路径）：**连主库 store.json 都不读**，只加载 ``split_keys``
+    点名的拆分集合，保存也只写这几个文件。适合只动已拆分集合、不需要任何主库数据的
+    操作（例如 ``update_base_product``：0.9MB 的 base_products + 6KB 的 title_skills，
+    原来却要为它解析+重写整份 55.7MB 主库）。
+    **契约**：这个模式下 with 块里只能改 ``split_keys`` 里的集合——data 里根本没有
+    主库数据，别把主库键 setdefault 进来再保存。
     """
 
     skipped = _split_keys_to_skip(split_keys)
@@ -1024,6 +1083,51 @@ def locked_store(
         return
 
     with _LOCK:
+        if load_main is False:
+            if not split_keys:
+                raise ValueError("load_main=False 需要显式指定 split_keys（快路径只加载点名的拆分集合）")
+            wanted = tuple(dict.fromkeys(str(key) for key in split_keys))
+            unknown = [key for key in wanted if key not in _SPLIT_STORE_KEYS]
+            if unknown:
+                raise ValueError(
+                    f"load_main=False 只能用于已拆分集合 {unknown}；主库键请走默认路径"
+                )
+            writable = _validated_write_keys(write_keys, wanted)
+            if any(not _active_split_store_path(key).exists() for key in wanted):
+                # 还没迁移（首启/旧库）：先走一次整库读，把拆分文件落出来，否则下面会
+                # 把「文件不存在」当成空集合、把改动写到一份只有本次内容的文件里。
+                _read_store_from_disk()
+            empty = _empty_store()
+            loaded: dict[str, Any] = {}
+            for key in wanted:
+                value = _read_split_key(key, use_cache=False)
+                if value is None:
+                    value = empty.get(key, [])
+                # 与整库路径同一套 URL 清洗约定：新字节在写出去之前先洗一遍。
+                view = {key: value}
+                _sanitize_view_once(_active_split_store_path(key), view)
+                loaded[key] = view[key]
+
+            def save_loaded_only(
+                updated: dict[str, Any],
+                _keys: tuple[str, ...] = writable,
+            ) -> None:
+                for key in _keys:
+                    if key in updated:
+                        _write_split_key(key, updated[key])
+                # 只把这次写过的文件标记成「已清洗」；主库一个字节没动，不要碰它的标记。
+                for key in _keys:
+                    if key not in updated:
+                        continue
+                    path = _active_split_store_path(key)
+                    state = _json_file_stat_key(path)
+                    if state != (0, 0):
+                        _SANITIZED_FILE_STATES[str(path)] = state
+                _notify_change_listeners()
+
+            yield loaded, save_loaded_only
+            return
+
         # Bypass the read-cache: writers need a fresh mutable snapshot they can
         # modify in place before calling `save_store`. If we returned the cached
         # dict here, in-place edits would pollute the cache visible to readers.
@@ -1034,7 +1138,7 @@ def locked_store(
 
         if main_readonly:
             main_ids = {key: id(value) for key, value in data.items() if key not in _SPLIT_STORE_KEYS}
-            writes = tuple(split_keys or ())
+            writes = _validated_write_keys(write_keys, tuple(split_keys or ()))
 
             def save_split_only(
                 updated: dict[str, Any],
@@ -1583,6 +1687,30 @@ def assets_for_group(group_id: str) -> list[dict[str, Any]]:
     return sorted(assets, key=lambda item: (item.get("asset_type") or "", item.get("file_name") or item.get("file_path") or ""))
 
 
+def _scope_assets_to_asset_root(assets: list[dict[str, Any]], asset_root: str) -> list[dict[str, Any]]:
+    """只保留「这次导入目录」下的素材。
+
+    同一个 SKU 文件夹重新导入会换一个上传目录，但同名文件还都留在素材库里（HN0244
+    两次导入都有「服装颜色替换生成图片 (1).png」，名字一样、图不一样）。只按 group_id
+    取素材再做按文件名查路径，就会一排全落到旧那批图上——副本/执行器上传的图因此
+    和商品维护里看到的不一样。操作员自上传的商品图（origin=manual_upload）不在素材
+    目录里，按来源标记保留；一张都匹配不上时退回整组，避免路径写法差异把图片全藏掉。
+    """
+    root = str(asset_root or "").strip()
+    if not root:
+        return assets
+    normalized = os.path.normcase(os.path.normpath(root))
+    within = [asset for asset in assets if _path_within_dir(str(asset.get("file_path") or ""), normalized)]
+    if not within:
+        # 一个都对不上说明素材路径和 asset_root 写法不一致（换过盘符/移动过目录）：
+        # 退回整组，宁可可能混进旧图，也不能把这个商品的图全藏掉。
+        return assets
+    # 操作员自上传的图不在素材目录里，按来源标记保留；其余只认这次导入目录。
+    keep = {id(asset) for asset in within}
+    keep |= {id(asset) for asset in assets if str(asset.get("origin") or "") == MANUAL_UPLOAD_ORIGIN}
+    return [asset for asset in assets if id(asset) in keep]
+
+
 def assets_for_base_product(base_product: dict[str, Any]) -> list[dict[str, Any]]:
     """只取该商品自己那次导入的素材。
 
@@ -1593,16 +1721,7 @@ def assets_for_base_product(base_product: dict[str, Any]) -> list[dict[str, Any]
     避免路径写法不一致时把商品的素材全部藏掉。"""
     payload = base_product or {}
     assets = assets_for_group(str(payload.get("group_id") or ""))
-    root = str(payload.get("asset_root") or "").strip()
-    if not root:
-        return assets
-    normalized = os.path.normcase(os.path.normpath(root))
-    scoped = [
-        asset for asset in assets
-        if _path_within_dir(str(asset.get("file_path") or ""), normalized)
-        or str(asset.get("origin") or "") == MANUAL_UPLOAD_ORIGIN
-    ]
-    return scoped or assets
+    return _scope_assets_to_asset_root(assets, str(payload.get("asset_root") or ""))
 
 
 def priority_thumbnail_asset_ids() -> list[str]:
@@ -1940,9 +2059,14 @@ def delete_description_profile(profile_id: str) -> dict[str, Any] | None:
 # 标题 Skill（Shopee 标题生成配置）与热词词库
 # ---------------------------------------------------------------------------
 
-# 与 vision_listing.TITLE_MAX_CHARS 一致：Shopee 标题的硬上限，Skill 只能更严。
-TITLE_SKILL_ABSOLUTE_MAX_CHARS = 120
+# 工作台采用项目运营规则的 100 字符上限（包含空格）。
+TITLE_SKILL_ABSOLUTE_MAX_CHARS = 100
 TITLE_SKILL_HOT_WORD_POLICIES = ("off", "reference", "prefer")
+TITLE_CATEGORIES = frozenset({"tshirt", "set", "hoodie", "dress", "other", "all"})
+# 2026-11-02 起人群主口径为 boys/girls/men（男童/女童/男装）；kids/women/adult
+# 是历史数据与旧规则仍在用的兼容值，读取/保存都继续接受，不再出现在新下拉里。
+TITLE_AUDIENCES = frozenset({"boys", "girls", "men", "kids", "women", "adult", "all", "unknown"})
+TITLE_STRUCTURE = ("theme", "core", "attributes", "audience")
 
 _TITLE_SKILL_FIELDS = (
     "name",
@@ -1952,7 +2076,89 @@ _TITLE_SKILL_FIELDS = (
     "title_min_chars",
     "title_max_chars",
     "hot_word_policy",
+    "market", "category", "audience", "language", "structure", "ranking",
+    "library_id", "max_age_days", "fixed_terms", "banned_terms", "examples",
+    "operator_allowances",
+    "generation_mode", "operator_template",
 )
+
+TITLE_GENERATION_MODES = frozenset({"standard", "operator_template"})
+
+
+def _title_enum(value: Any, allowed: Any, label: str) -> str:
+    if not isinstance(value, str) or value not in allowed:
+        raise ValueError(f"{label}无效")
+    return value
+
+
+def _title_integer(value: Any, label: str) -> int:
+    if isinstance(value, bool) or not isinstance(value, (str, int)):
+        raise ValueError(f"{label}必须是整数")
+    try:
+        return int(value)
+    except (ValueError, TypeError):
+        raise ValueError(f"{label}必须是整数") from None
+
+
+def _title_terms(value: Any, label: str) -> list[str]:
+    if not isinstance(value, list) or any(not isinstance(term, str) for term in value):
+        raise ValueError(f"{label}必须是文本列表")
+    normalized: list[str] = []
+    seen: set[str] = set()
+    for term in value:
+        term = " ".join(term.split())
+        if len(term) > TITLE_SKILL_ABSOLUTE_MAX_CHARS:
+            raise ValueError(f"{label}中的词语不能超过 100 字符")
+        if term and term.casefold() not in seen:
+            normalized.append(term)
+            seen.add(term.casefold())
+    return normalized
+
+
+def _title_template_lines(value: Any, label: str, *, max_count: int, max_chars: int) -> list[str]:
+    """模板配置里的多行文本（附加规则等）：不去重、逐条限长。"""
+    if value in (None, []):
+        return []
+    if not isinstance(value, list) or any(not isinstance(line, str) for line in value):
+        raise ValueError(f"{label}必须是文本列表")
+    lines = [line.strip() for line in value if line.strip()]
+    if len(lines) > max_count:
+        raise ValueError(f"{label}最多 {max_count} 条")
+    if any(len(line) > max_chars for line in lines):
+        raise ValueError(f"{label}每条不能超过 {max_chars} 个字符")
+    return lines
+
+
+def _normalize_operator_template(value: Any) -> dict[str, Any] | None:
+    """归一校验仿运营模板配置；空配置返回 None，由调用方决定是否允许。"""
+    if value in (None, {}, ""):
+        return None
+    if not isinstance(value, dict):
+        raise ValueError("仿运营模板配置必须是对象")
+    core_term = " ".join(str(value.get("core_term") or "").split())
+    if not core_term:
+        raise ValueError("仿运营模板必须提供核心词")
+    if len(core_term) > TITLE_SKILL_ABSOLUTE_MAX_CHARS:
+        raise ValueError("核心词不能超过 100 字符")
+    template = {
+        "core_term": core_term,
+        "style_words": _title_terms(value.get("style_words", []), "风格词")[:20],
+        "companion_words": _title_terms(value.get("companion_words", []), "搭配词")[:20],
+        "patterns": _title_terms(value.get("patterns", []), "排列方式")[:10],
+        "trim_order": _title_terms(value.get("trim_order", []), "删词顺序")[:20],
+        "reference_terms": _title_terms(value.get("reference_terms", []), "待确认参考词")[:20],
+        "rules": _title_template_lines(value.get("rules", []), "模板附加规则", max_count=20, max_chars=300),
+        "source": str(value.get("source") or "").strip()[:200],
+    }
+    if not template["patterns"]:
+        raise ValueError("仿运营模板至少要提供一个排列方式")
+    try:
+        template["version"] = int(value.get("version") or 1)
+    except (TypeError, ValueError):
+        raise ValueError("模板版本必须是整数") from None
+    if not 1 <= template["version"] <= 999:
+        raise ValueError("模板版本需在 1–999 之间")
+    return template
 
 
 def _normalize_title_skill(item: dict[str, Any]) -> dict[str, Any]:
@@ -1960,20 +2166,34 @@ def _normalize_title_skill(item: dict[str, Any]) -> dict[str, Any]:
     name = str(item.get("name") or "").strip()
     if not name:
         raise ValueError("标题 Skill 必须有名称")
-    try:
-        min_chars = int(item.get("title_min_chars", 40))
-        max_chars = int(item.get("title_max_chars", 100))
-    except (TypeError, ValueError):
-        raise ValueError("标题字数必须是数字") from None
+    min_chars = _title_integer(item.get("title_min_chars", 40), "最少字数")
+    max_chars = _title_integer(item.get("title_max_chars", 100), "最多字数")
+    if min_chars > max_chars:
+        raise ValueError("标题最少字数不能大于最多字数")
     if not 0 <= min_chars <= TITLE_SKILL_ABSOLUTE_MAX_CHARS:
         raise ValueError(f"标题最少字数需在 0–{TITLE_SKILL_ABSOLUTE_MAX_CHARS} 之间")
     if not 10 <= max_chars <= TITLE_SKILL_ABSOLUTE_MAX_CHARS:
         raise ValueError(f"标题最多字数需在 10–{TITLE_SKILL_ABSOLUTE_MAX_CHARS} 之间")
-    if min_chars > max_chars:
-        raise ValueError("标题最少字数不能大于最多字数")
     policy = str(item.get("hot_word_policy") or "reference").strip().lower()
     if policy not in TITLE_SKILL_HOT_WORD_POLICIES:
         raise ValueError("热词策略只能是不使用（off）、参考融入（reference）或尽量包含（prefer）")
+    for flag in ("enabled", "is_default"):
+        if flag in item and not isinstance(item[flag], bool):
+            raise ValueError("启用及默认状态必须是布尔值")
+    structure = item.get("structure", list(TITLE_STRUCTURE))
+    if not isinstance(structure, list) or len(structure) != 4 or any(not isinstance(slot, str) for slot in structure) or set(structure) != set(TITLE_STRUCTURE):
+        raise ValueError("标题结构必须包含主题、核心词、属性、人群各一次")
+    max_age_days = _title_integer(item.get("max_age_days", 30), "提醒周期")
+    if not 1 <= max_age_days <= 365:
+        raise ValueError("提醒周期需在 1–365 天之间")
+    generation_mode = str(item.get("generation_mode") or "standard").strip().lower()
+    if generation_mode not in TITLE_GENERATION_MODES:
+        raise ValueError("生成模式只能是现有生成方式（standard）或仿运营模板（operator_template）")
+    operator_template = None
+    if generation_mode == "operator_template":
+        operator_template = _normalize_operator_template(item.get("operator_template"))
+        if not operator_template:
+            raise ValueError("仿运营模板模式必须提供模板配置（核心词、风格词、排列方式）")
     return {
         "name": name,
         "enabled": bool(item.get("enabled", True)),
@@ -1982,7 +2202,44 @@ def _normalize_title_skill(item: dict[str, Any]) -> dict[str, Any]:
         "title_min_chars": min_chars,
         "title_max_chars": max_chars,
         "hot_word_policy": policy,
+        "market": _title_enum(item.get("market", "PH"), {"PH"}, "站点"),
+        "category": _title_enum(item.get("category", "all"), TITLE_CATEGORIES, "品类"),
+        "audience": _title_enum(item.get("audience", "all"), TITLE_AUDIENCES, "人群"),
+        "language": _title_enum(item.get("language", "en"), {"en", "taglish"}, "语言"),
+        "ranking": _title_enum(item.get("ranking", "volume"), {"volume", "growth"}, "选词偏好"),
+        "structure": list(structure),
+        "library_id": str(item.get("library_id") or "").strip(),
+        "max_age_days": max_age_days,
+        "fixed_terms": _title_terms(item.get("fixed_terms", []), "固定词"),
+        "banned_terms": _title_terms(item.get("banned_terms", []), "禁用词"),
+        "operator_allowances": _title_terms(item.get("operator_allowances", []), "运营例外"),
+        "examples": str(item.get("examples") or "").strip(),
+        "generation_mode": generation_mode,
+        "operator_template": operator_template,
     }
+
+
+def _title_scope(item: dict[str, Any]) -> tuple[str, str, str]:
+    return (str(item.get("market") or "PH"), str(item.get("category") or "all"), str(item.get("audience") or "all"))
+
+
+def _repair_title_defaults(skills: list[dict[str, Any]], *, preferred_id: str = "", skip_version_id: str = "") -> None:
+    """Exactly one enabled default per populated scope; disabled-only scopes have none."""
+    groups: dict[tuple[str, str, str], list[dict[str, Any]]] = {}
+    for rule in skills:
+        groups.setdefault(_title_scope(rule), []).append(rule)
+    for group in groups.values():
+        enabled = [rule for rule in group if rule.get("enabled", True)]
+        selected = next((rule for rule in enabled if rule.get("id") == preferred_id), None)
+        selected = selected or next((rule for rule in enabled if rule.get("is_default")), None)
+        selected = selected or (enabled[0] if enabled else None)
+        for rule in group:
+            desired = rule is selected
+            if bool(rule.get("is_default")) != desired:
+                rule["is_default"] = desired
+                if rule.get("id") != skip_version_id:
+                    rule["version"] = int(rule.get("version") or 1) + 1
+                    rule["updated_at"] = utc_now()
 
 
 def list_title_skills() -> list[dict[str, Any]]:
@@ -2005,7 +2262,10 @@ def get_active_title_skill() -> dict[str, Any] | None:
 
 
 def create_title_skill(payload: dict[str, Any]) -> dict[str, Any]:
-    normalized = _normalize_title_skill({key: payload.get(key) for key in _TITLE_SKILL_FIELDS})
+    # 只带操作员显式提交的字段：省略的字段（如字数、策略）走默认值，而不是 None。
+    normalized = _normalize_title_skill({
+        key: payload[key] for key in _TITLE_SKILL_FIELDS if payload.get(key) is not None
+    })
     now = utc_now()
     item = {
         **normalized,
@@ -2016,12 +2276,8 @@ def create_title_skill(payload: dict[str, Any]) -> dict[str, Any]:
     }
     with locked_store() as (data, save):
         skills = data.setdefault("title_skills", [])
-        # 第一个 Skill 自动成为默认：建完即生效，操作员不用再点一次「设为默认」。
-        if item["is_default"] or not any(row.get("is_default") for row in skills):
-            for row in skills:
-                row["is_default"] = False
-            item["is_default"] = True
         skills.append(item)
+        _repair_title_defaults(skills, preferred_id=item["id"] if item["is_default"] else "", skip_version_id=item["id"])
         save(data)
     return deepcopy(item)
 
@@ -2034,13 +2290,7 @@ def update_title_skill(skill_id: str, payload: dict[str, Any]) -> dict[str, Any]
         merged = {**item, **{key: payload[key] for key in _TITLE_SKILL_FIELDS if key in payload}}
         normalized = _normalize_title_skill(merged)
         item.update(normalized)
-        if item["is_default"]:
-            for row in data.get("title_skills", []):
-                if row is not item:
-                    row["is_default"] = False
-        # 保证「列表非空时恰有一个默认」：取消默认且没有别的默认项时维持原默认。
-        if not any(row.get("is_default") for row in data.get("title_skills", [])):
-            item["is_default"] = True
+        _repair_title_defaults(data.get("title_skills", []), preferred_id=item["id"] if item["is_default"] else "", skip_version_id=item["id"])
         item["version"] = int(item.get("version") or 1) + 1
         item["updated_at"] = utc_now()
         save(data)
@@ -2054,8 +2304,7 @@ def set_default_title_skill(skill_id: str) -> dict[str, Any] | None:
             return None
         if not selected.get("enabled", True):
             raise ValueError("停用的标题 Skill 不能设为默认")
-        for row in data.get("title_skills", []):
-            row["is_default"] = row is selected
+        _repair_title_defaults(data.get("title_skills", []), preferred_id=selected["id"])
         selected["updated_at"] = utc_now()
         save(data)
         return deepcopy(selected)
@@ -2070,11 +2319,8 @@ def delete_title_skill(skill_id: str) -> dict[str, Any] | None:
         skill = next((row for row in skills if row.get("id") == skill_id), None)
         if not skill:
             return None
-        was_default = bool(skill.get("is_default"))
         skills.remove(skill)
-        if was_default and skills:
-            heir = next((row for row in skills if row.get("enabled", True)), None) or skills[0]
-            heir["is_default"] = True
+        _repair_title_defaults(skills)
         save(data)
         return {"id": skill_id, "deleted": True}
 
@@ -2319,6 +2565,7 @@ def replace_store_promotion_catalog(
     now: str | None = None,
     catalog_loaded: bool = True,
 ) -> list[dict[str, Any]]:
+    from services.api.store_promotions import record_catalog_run as _record
     timestamp = now or utc_now()
     with locked_store() as (data, save):
         items = replace_promotion_catalog(
@@ -2328,8 +2575,49 @@ def replace_store_promotion_catalog(
             now=timestamp,
             catalog_loaded=catalog_loaded,
         )
+        # 采集成功也记一笔状态：界面要能显示「目录 N 条 · 采集于 …」。
+        if catalog_loaded:
+            _record(
+                data,
+                store_id=store_id,
+                status="ok",
+                count=len(items),
+                error="",
+                catalog_loaded=True,
+                now=timestamp,
+            )
         save(data)
         return items
+
+
+def get_store_promotion_catalog_status(store_id: str) -> dict[str, Any] | None:
+    """店铺活动目录的采集状态（未采集过 → None）。"""
+    from services.api.store_promotions import catalog_status as _status
+    with _LOCK:
+        return _status(load_store(), store_id)
+
+
+def record_store_promotion_collect_failure(store_id: str, message: str) -> dict[str, Any] | None:
+    """采集店铺活动失败时留痕（不动目录本身）。"""
+    from services.api.store_promotions import catalog_status as _status
+    from services.api.store_promotions import record_catalog_run as _record
+    wanted_store = str(store_id or "").strip()
+    if not wanted_store:
+        return None
+    now = utc_now()
+    with locked_store() as (data, save):
+        current = _status(data, wanted_store) or {}
+        run = _record(
+            data,
+            store_id=wanted_store,
+            status="failed",
+            count=int(current.get("count") or 0),
+            error=message,
+            catalog_loaded=False,
+            now=now,
+        )
+        save(data)
+    return run
 
 
 def create_mabang_page_import(payload: dict[str, Any]) -> dict[str, Any]:
@@ -4054,9 +4342,9 @@ def update_store_template(template_id: str, payload: dict[str, Any]) -> dict[str
         "price_tiers",
         "warehouse_stock_defaults",
     ]
-    # 保存模板只动主库（模板/副本/SKU/价格）与任务集合的就绪度：不解析 13MB 类目、
-    # 17.7MB 执行快照。实测整库路径 894ms → 约 320ms。
-    with locked_store(split_keys=("automation_jobs",)) as (data, save):
+    # 保存模板只动主库（模板）+ 已拆分的副本/SKU/价格/基础商品 + 任务就绪度：
+    # 不解析 13MB 类目、17.7MB 执行快照。实测整库路径 894ms → 约 320ms。
+    with locked_store(split_keys=("automation_jobs", "store_listing_copies", "listing_skus", "listing_prices", "base_products")) as (data, save):
         for template in data.get("store_templates", []):
             if template.get("id") != template_id:
                 continue
@@ -4355,7 +4643,7 @@ def delete_base_product(base_product_id: str) -> dict[str, Any] | None:
     base_product_id = str(base_product_id or "").strip()
     if not base_product_id:
         return None
-    with locked_store(split_keys=("automation_jobs", "automation_job_snapshots")) as (data, save):
+    with locked_store(split_keys=("automation_jobs", "automation_job_snapshots", "base_products", "store_listing_copies", "listing_skus", "listing_prices")) as (data, save):
         result = _delete_base_product_from_store(data, base_product_id)
         if result is None:
             return None
@@ -4368,7 +4656,7 @@ def delete_base_products(base_product_ids: list[str]) -> dict[str, Any]:
     per-product rather than aborting the batch, so a stale selection can never block
     the rest. Returns aggregate counts plus per-product results keyed by requested id."""
     requested = [str(item or "").strip() for item in (base_product_ids or []) if str(item or "").strip()]
-    with locked_store(split_keys=("automation_jobs", "automation_job_snapshots")) as (data, save):
+    with locked_store(split_keys=("automation_jobs", "automation_job_snapshots", "base_products", "store_listing_copies", "listing_skus", "listing_prices")) as (data, save):
         results: dict[str, Any] = {}
         for base_product_id in requested:
             result = _delete_base_product_from_store(data, base_product_id)
@@ -4392,6 +4680,54 @@ def delete_base_products(base_product_ids: list[str]) -> dict[str, Any]:
         }
 
 
+# 副本上有这些状态的任务时不能删：worker 正拿着它跑，删掉就是把执行状态抽走。
+_LIVE_LISTING_COPY_JOB_STATUSES = frozenset({"claimed", "running"})
+# 终态任务留作审计，只有没跑完的才跟着副本一起清掉。
+_TERMINAL_LISTING_COPY_JOB_STATUSES = frozenset(
+    {"saved", "saved_with_warnings", "failed", "blocked", "needs_confirmation", "canceled"}
+)
+
+
+def _purge_store_listing_copy(data: dict[str, Any], listing_copy_id: str) -> dict[str, Any]:
+    """从整库快照里删掉一个副本及其可再生成数据（SKU / 价格 / 未完成任务 / 任务快照）。
+
+    只改内存里的 ``data``，不落盘；调用方决定 save。返回 ``skipped`` 说明没动它的原因：
+    ``not_found``（副本不存在）、``running_job``（有 claimed/running 的任务）。"""
+    copy = next((item for item in data.get("store_listing_copies", []) if item.get("id") == listing_copy_id), None)
+    if not copy:
+        return {"id": listing_copy_id, "skipped": "not_found"}
+    linked_jobs = [item for item in data.get("automation_jobs", []) if item.get("listing_copy_id") == listing_copy_id]
+    if any(str(job.get("status") or "").lower() in _LIVE_LISTING_COPY_JOB_STATUSES for job in linked_jobs):
+        return {"id": listing_copy_id, "skipped": "running_job", "linked_automation_job_count": len(linked_jobs)}
+    linked_skus = [item for item in data.get("listing_skus", []) if item.get("listing_copy_id") == listing_copy_id]
+    linked_prices = [item for item in data.get("listing_prices", []) if item.get("listing_copy_id") == listing_copy_id]
+    retained_jobs = [
+        item for item in linked_jobs
+        if str(item.get("status") or "").lower() in _TERMINAL_LISTING_COPY_JOB_STATUSES
+    ]
+    retained_job_ids = {str(item.get("id") or "") for item in retained_jobs}
+    deleted_job_ids = {str(item.get("id") or "") for item in linked_jobs if str(item.get("id") or "") not in retained_job_ids}
+
+    data["store_listing_copies"] = [item for item in data.get("store_listing_copies", []) if item.get("id") != listing_copy_id]
+    data["listing_skus"] = [item for item in data.get("listing_skus", []) if item.get("listing_copy_id") != listing_copy_id]
+    data["listing_prices"] = [item for item in data.get("listing_prices", []) if item.get("listing_copy_id") != listing_copy_id]
+    data["automation_jobs"] = [item for item in data.get("automation_jobs", []) if item.get("id") not in deleted_job_ids]
+    snapshots = data.get("automation_job_snapshots")
+    if isinstance(snapshots, dict):
+        for job_id in deleted_job_ids:
+            snapshots.pop(job_id, None)
+    return {
+        "id": listing_copy_id,
+        "skipped": "",
+        "base_product_id": str(copy.get("base_product_id") or ""),
+        "store_name": str(copy.get("store_name") or ""),
+        "deleted_listing_sku_count": len(linked_skus),
+        "deleted_listing_price_count": len(linked_prices),
+        "deleted_automation_job_count": len(deleted_job_ids),
+        "retained_automation_job_count": len(retained_jobs),
+    }
+
+
 def delete_store_listing_copy(listing_copy_id: str) -> dict[str, Any] | None:
     """Delete one store listing copy plus its regenerable data. Terminal automation
     jobs are kept for audit; non-terminal jobs are dropped alongside the copy. Refuses
@@ -4400,39 +4736,46 @@ def delete_store_listing_copy(listing_copy_id: str) -> dict[str, Any] | None:
     listing_copy_id = str(listing_copy_id or "").strip()
     if not listing_copy_id:
         return None
-    live_job_statuses = {"claimed", "running"}
-    terminal_job_statuses = {"saved", "saved_with_warnings", "failed", "blocked", "needs_confirmation", "canceled"}
-    with locked_store(split_keys=("automation_jobs", "automation_job_snapshots")) as (data, save):
-        copy = next((item for item in data.get("store_listing_copies", []) if item.get("id") == listing_copy_id), None)
-        if not copy:
+    with locked_store(split_keys=("automation_jobs", "automation_job_snapshots", "store_listing_copies", "listing_skus", "listing_prices")) as (data, save):
+        result = _purge_store_listing_copy(data, listing_copy_id)
+        if result.get("skipped") == "not_found":
             return None
-        linked_jobs = [item for item in data.get("automation_jobs", []) if item.get("listing_copy_id") == listing_copy_id]
-        if any(str(job.get("status") or "").lower() in live_job_statuses for job in linked_jobs):
+        if result.get("skipped") == "running_job":
             raise ValueError("有正在执行的自动化任务，请先取消后再删除副本")
-        linked_skus = [item for item in data.get("listing_skus", []) if item.get("listing_copy_id") == listing_copy_id]
-        linked_prices = [item for item in data.get("listing_prices", []) if item.get("listing_copy_id") == listing_copy_id]
-        retained_jobs = [item for item in linked_jobs if str(item.get("status") or "").lower() in terminal_job_statuses]
-        retained_job_ids = {str(item.get("id") or "") for item in retained_jobs}
-        deleted_job_ids = {str(item.get("id") or "") for item in linked_jobs if str(item.get("id") or "") not in retained_job_ids}
-
-        data["store_listing_copies"] = [item for item in data.get("store_listing_copies", []) if item.get("id") != listing_copy_id]
-        data["listing_skus"] = [item for item in data.get("listing_skus", []) if item.get("listing_copy_id") != listing_copy_id]
-        data["listing_prices"] = [item for item in data.get("listing_prices", []) if item.get("listing_copy_id") != listing_copy_id]
-        data["automation_jobs"] = [item for item in data.get("automation_jobs", []) if item.get("id") not in deleted_job_ids]
-        snapshots = data.get("automation_job_snapshots")
-        if isinstance(snapshots, dict):
-            for job_id in deleted_job_ids:
-                snapshots.pop(job_id, None)
         save(data)
-        return {
-            "id": listing_copy_id,
-            "base_product_id": str(copy.get("base_product_id") or ""),
-            "store_name": str(copy.get("store_name") or ""),
-            "deleted_listing_sku_count": len(linked_skus),
-            "deleted_listing_price_count": len(linked_prices),
-            "deleted_automation_job_count": len(deleted_job_ids),
-            "retained_automation_job_count": len(retained_jobs),
-        }
+        return {key: value for key, value in result.items() if key != "skipped"}
+
+
+def delete_store_listing_copies(listing_copy_ids: list[str]) -> dict[str, Any]:
+    """批量删除副本：整库只加载/保存一次（逐条删每回都要重写 51MB 主库，现场就是卡）。
+
+    正在执行（claimed/running）或已不存在的副本按条跳过并回报，不阻断同批其它副本。"""
+    requested = [str(item or "").strip() for item in (listing_copy_ids or []) if str(item or "").strip()]
+    deleted: list[dict[str, Any]] = []
+    skipped: list[dict[str, Any]] = []
+    with locked_store(split_keys=("automation_jobs", "automation_job_snapshots", "store_listing_copies", "listing_skus", "listing_prices")) as (data, save):
+        for listing_copy_id in requested:
+            outcome = _purge_store_listing_copy(data, listing_copy_id)
+            if outcome.get("skipped"):
+                skipped.append({"id": listing_copy_id, "reason": outcome["skipped"]})
+                continue
+            deleted.append({key: value for key, value in outcome.items() if key != "skipped"})
+        if deleted:
+            save(data)
+    return {
+        "ok": True,
+        "requested_count": len(requested),
+        "deleted_count": len(deleted),
+        "deleted_listing_sku_count": sum(item.get("deleted_listing_sku_count") or 0 for item in deleted),
+        "deleted_listing_price_count": sum(item.get("deleted_listing_price_count") or 0 for item in deleted),
+        "deleted_automation_job_count": sum(item.get("deleted_automation_job_count") or 0 for item in deleted),
+        "retained_automation_job_count": sum(item.get("retained_automation_job_count") or 0 for item in deleted),
+        "deleted_ids": [item.get("id") for item in deleted],
+        "not_found_ids": [item["id"] for item in skipped if item["reason"] == "not_found"],
+        "running_job_ids": [item["id"] for item in skipped if item["reason"] == "running_job"],
+        "skipped": skipped,
+        "results": deleted,
+    }
 
 
 def create_base_product_from_folder(payload: dict[str, Any]) -> dict[str, Any] | None:
@@ -4568,12 +4911,26 @@ def update_base_product(
         # （见 _build_store_listing_copy），执行器据此填马帮表单。
         "attribute_values",
         "ai_generation_error",
+        "title_skill_id",
+        "title_category",
+        "title_audience",
     }
-    # 保存基础商品只动主库 + 任务就绪度：不解析 13MB 类目、17.7MB 执行快照。
-    with locked_store(split_keys=("automation_jobs",)) as (data, save):
+    # 保存基础商品快路径：base_products（0.9MB）+ title_skills（6KB）都是拆分集合，
+    # load_main=False 连 55MB 主库都不解析、不重写（实测 1.3~2.2s → ~40ms）。
+    # 副本/SKU/价格的派生同步早已不在这条路径上（见下方历史注释），需要时由
+    # update_store_listing_copy / 复制链路自己算。
+    with locked_store(split_keys=("base_products", "title_skills"), load_main=False) as (data, save):
         for base in data.get("base_products", []):
             if base.get("id") != base_product_id:
                 continue
+            if "title_skill_id" in payload:
+                selected_rule = str(payload.get("title_skill_id") or "").strip()
+                if selected_rule and not any(rule.get("id") == selected_rule for rule in data.get("title_skills", [])):
+                    raise ValueError("指定的标题规则不存在")
+            if "title_category" in payload and payload.get("title_category"):
+                _title_enum(payload["title_category"], TITLE_CATEGORIES, "标题品类")
+            if "title_audience" in payload and payload.get("title_audience"):
+                _title_enum(payload["title_audience"], TITLE_AUDIENCES, "标题人群")
             before = {
                 key: _editable_snapshot(base.get(key))
                 for key in editable_fields
@@ -4625,46 +4982,6 @@ def update_base_product(
             base["updated_at"] = now
             save(data)
             return dict(base)
-            changed_sync = {
-                "main_image": base.get("main_image") or "",
-                "product_images": list(base.get("product_images") or []),
-                "variant_image_map": dict(base.get("variant_image_map") or {}),
-                "product_name_cn": base.get("product_name_cn") or "",
-                "base_name": base.get("base_name") or "",
-                "main_sku": base.get("main_sku") or base.get("group_id") or "",
-            }
-            if "listing_title" in payload:
-                changed_sync["listing_title"] = base.get("listing_title") or ""
-            if "description" in payload:
-                changed_sync["description"] = base.get("description") or ""
-            if "recognized_colors" in payload:
-                changed_sync["recognized_colors"] = list(base.get("recognized_colors") or [])
-            for listing_copy in data.get("store_listing_copies", []):
-                if listing_copy.get("base_product_id") != base_product_id:
-                    continue
-                listing_copy.update(changed_sync)
-                listing_copy["updated_at"] = now
-                template = next((item for item in data.get("store_templates", []) if item.get("id") == listing_copy.get("template_id")), listing_copy)
-                if "recognized_colors" in payload:
-                    skus = _replace_listing_skus_and_prices(data, base, template, listing_copy, now=now)
-                    prices = [item for item in data.get("listing_prices", []) if item.get("listing_copy_id") == listing_copy.get("id")]
-                else:
-                    for sku in data.get("listing_skus", []):
-                        if sku.get("listing_copy_id") != listing_copy.get("id"):
-                            continue
-                        sku["variant_image"] = _variant_image_for_color(base, sku.get("color_code") or sku.get("color_cn") or "")
-                        sku["updated_at"] = now
-                    skus = [item for item in data.get("listing_skus", []) if item.get("listing_copy_id") == listing_copy.get("id")]
-                    prices = [item for item in data.get("listing_prices", []) if item.get("listing_copy_id") == listing_copy.get("id")]
-                if "main_sku" in payload:
-                    _sync_listing_sku_codes(skus, prices, base, template, now=now)
-                readiness = _check_automation_readiness(listing_copy, skus=skus, prices=prices)
-                for job in data.get("automation_jobs", []):
-                    if job.get("listing_copy_id") != listing_copy.get("id"):
-                        continue
-                    _sync_automation_job_readiness(job, listing_copy, readiness, now=now)
-            save(data)
-            return dict(base)
     return None
 
 
@@ -4691,8 +5008,8 @@ def add_base_product_product_image(base_product_id: str, payload: dict[str, Any]
     base_product_id = str(base_product_id or "").strip()
     if not base_product_id:
         return None
-    # 上传商品图只动主库（base_products + assets）。
-    with locked_store(split_keys=()) as (data, save):
+    # 上传商品图只动 base_products + assets（两者都是拆分集合）：主库不读也不写。
+    with locked_store(split_keys=("base_products", "assets")) as (data, save):
         base = next((row for row in data.get("base_products", []) if row.get("id") == base_product_id), None)
         if not base:
             return None
@@ -4784,8 +5101,8 @@ def _save_entity_video(collection: str, entity_id: str, payload: dict[str, Any])
         **validation,
         "validated_at": utc_now(),
     }
-    # 视频只挂在主库的实体上。
-    with locked_store(split_keys=()) as (data, save):
+    # 视频只挂在实体上（base_products / store_listing_copies 都是拆分集合）。
+    with locked_store(split_keys=(str(collection),)) as (data, save):
         item = next((row for row in data.get(collection, []) if row.get("id") == entity_id), None)
         if not item:
             path.unlink(missing_ok=True)
@@ -4797,7 +5114,7 @@ def _save_entity_video(collection: str, entity_id: str, payload: dict[str, Any])
 
 
 def remove_listing_copy_video(listing_copy_id: str) -> dict[str, Any] | None:
-    with locked_store(split_keys=()) as (data, save):
+    with locked_store(split_keys=("store_listing_copies",)) as (data, save):
         item = next((row for row in data.get("store_listing_copies", []) if row.get("id") == listing_copy_id), None)
         if not item:
             return None
@@ -4849,8 +5166,8 @@ def update_store_listing_copy(listing_copy_id: str, payload: dict[str, Any]) -> 
         # 必须能跟着换（2026-09-26 修存量 FL0067 属性错配走的同一条路）。
         "category_profile_id", "category_profile_version_id", "category_profile_snapshot",
     }
-    # 保存副本只动主库 + 修订集合：不解析 13MB 类目、17.7MB 执行快照。
-    with locked_store(split_keys=("listing_copy_revisions",)) as (data, save):
+    # 保存副本只动副本/SKU/价格/基础商品 + 修订集合：不解析 13MB 类目、17.7MB 执行快照。
+    with locked_store(split_keys=("listing_copy_revisions", "store_listing_copies", "listing_skus", "listing_prices", "base_products")) as (data, save):
         item = next((row for row in data.get("store_listing_copies", []) if row.get("id") == listing_copy_id), None)
         if not item:
             return None
@@ -4944,6 +5261,21 @@ def update_store_listing_copy(listing_copy_id: str, payload: dict[str, Any]) -> 
             if "sale_price" in update:
                 row["sale_price"] = _validated_non_negative_number(update.get("sale_price"), "折后价")
             row["updated_at"] = now
+        # 维护入口（不在编辑器 UI 里）：按当前商品 × 当前模板重生成 SKU/价格行。
+        # 用途是把"复制时按旧规则生成的尺码"（如商品识别字母码覆盖了模板 cm 码）
+        # 对齐到模板现在的尺码轴，省掉"删副本再重复制"。
+        if bool(payload.get("rebuild_skus")):
+            base = next(
+                (row for row in data.get("base_products", []) if row.get("id") == item.get("base_product_id")),
+                None,
+            )
+            template = next(
+                (row for row in data.get("store_templates", []) if row.get("id") == item.get("template_id")),
+                None,
+            ) or item
+            if base is None:
+                raise ValueError("基础商品不存在，无法重建 SKU 行")
+            _replace_listing_skus_and_prices(data, base, template, item, now=now)
         # After an editor tier edit, re-derive each SKU row's CNSC price fields by
         # (color,size)→tier match so the per-SKU global price / site matrix stay
         # consistent with the copy-level price_tiers (mirrors _generate_listing_skus).
@@ -5242,8 +5574,8 @@ def copy_base_product_to_store_templates(base_product_id: str, template_ids: lis
     if not base_product_id or not wanted_template_ids:
         return {"ok": False, "created": [], "skipped": [], "errors": [{"reason": "missing_base_or_templates"}], "created_count": 0, "per_base": []}
     now = utc_now()
-    # 生成副本只动主库（副本 / SKU / 价格）：跳过全部拆分集合。
-    with locked_store(split_keys=()) as (data, save):
+    # 生成副本只动基础商品 + 副本/SKU/价格（都是拆分集合）：主库不读也不写。
+    with locked_store(split_keys=("base_products", "store_listing_copies", "listing_skus", "listing_prices")) as (data, save):
         result = _copy_base_products_to_templates_in_store(data, [base_product_id], wanted_template_ids, now)
         if result["created"]:
             save(data)
@@ -5260,8 +5592,8 @@ def copy_base_products_to_store_templates(base_product_ids: list[str], template_
     if not requested or not wanted_template_ids:
         return {"ok": False, "created": [], "skipped": [], "errors": [{"reason": "missing_base_or_templates"}], "created_count": 0, "per_base": []}
     now = utc_now()
-    # 同上：批量生成副本也只动主库。
-    with locked_store(split_keys=()) as (data, save):
+    # 同上：批量生成副本也只动基础商品 + 副本/SKU/价格。
+    with locked_store(split_keys=("base_products", "store_listing_copies", "listing_skus", "listing_prices")) as (data, save):
         result = _copy_base_products_to_templates_in_store(data, requested, wanted_template_ids, now)
         if result["created"]:
             save(data)
@@ -5681,7 +6013,9 @@ def finish_automation_job(
     ):
         raise ValueError("Saved automation job requires save evidence and publish_clicked=false")
     current = now or utc_now()
-    with locked_store(split_keys=("automation_jobs",)) as (data, save):
+    # 任务落终态会级联副本/基础商品状态（_cascade_completed_from_job）和模板默认视频，
+    # 所以副本与基础商品两个拆分集合必须一起加载。
+    with locked_store(split_keys=("automation_jobs", "store_listing_copies", "base_products")) as (data, save):
         existing = next((item for item in data.get("automation_jobs", []) if item.get("id") == job_id), None)
         if (
             existing
@@ -5818,8 +6152,8 @@ def rollback_base_product(base_product_id: str) -> dict[str, Any] | None:
     if not base_product_id:
         return None
     now = utc_now()
-    # 回滚只动主库（基础商品 + 副本状态）。
-    with locked_store(split_keys=()) as (data, save):
+    # 回滚只动基础商品 + 副本状态（都是拆分集合）。
+    with locked_store(split_keys=("base_products", "store_listing_copies")) as (data, save):
         base_product = next(
             (item for item in data.get("base_products", []) if item.get("id") == base_product_id),
             None,
@@ -5863,7 +6197,7 @@ def apply_asset_pointer_repair(updates: list[dict[str, Any]], *, now: str = "") 
     if not entries:
         return 0
     changed = 0
-    with locked_store(split_keys=()) as (data, save):
+    with locked_store(split_keys=("assets",)) as (data, save):
         by_id = {str(item.get("id") or ""): item for item in data.get("assets", []) or []}
         for entry in entries:
             asset = by_id.get(str(entry["asset_id"]))
@@ -5999,7 +6333,7 @@ def apply_asset_name_map(
     }
     now_value = now or utc_now()
     summary = {"updated_assets": 0, "renamed": renamed, "records": 0}
-    with locked_store(split_keys=()) as (data, save):
+    with locked_store(split_keys=("assets", "base_products", "listing_skus", "store_listing_copies")) as (data, save):
         base = next(
             (item for item in data.get("base_products", []) if item.get("id") == base_product_id),
             None,
@@ -6056,7 +6390,7 @@ def mark_assets_cleaned(base_product_id: str, deleted_bytes: int = 0, *, now: st
     if not base_product_id:
         return None
     now_value = now or utc_now()
-    with locked_store(split_keys=()) as (data, save):
+    with locked_store(split_keys=("base_products",)) as (data, save):
         base = next(
             (item for item in data.get("base_products", []) if item.get("id") == base_product_id),
             None,
@@ -6091,7 +6425,11 @@ def _listing_prices_in_store(data: dict[str, Any], listing_copy_id: str) -> list
     return sorted(rows, key=lambda item: item.get("sku_code") or "")
 
 
-def _assets_for_group_in_store(data: dict[str, Any], group_id: str) -> list[dict[str, Any]]:
+def _assets_for_group_in_store(
+    data: dict[str, Any],
+    group_id: str,
+    asset_root: str = "",
+) -> list[dict[str, Any]]:
     normalized = (group_id or "").strip().upper()
     if not normalized:
         return []
@@ -6100,10 +6438,12 @@ def _assets_for_group_in_store(data: dict[str, Any], group_id: str) -> list[dict
         for asset in data.get("assets", [])
         if (asset.get("group_id") or "").strip().upper() == normalized
     ]
-    return sorted(assets, key=lambda item: (
+    assets.sort(key=lambda item: (
         item.get("asset_type") or "",
         item.get("file_name") or item.get("file_path") or "",
     ))
+    # 同名文件会跨导入重复：有 asset_root 时只认这次导入目录（见 _scope_assets_to_asset_root）。
+    return _scope_assets_to_asset_root(assets, asset_root)
 
 
 def _template_attribute_values_for_copy(
@@ -6156,8 +6496,8 @@ def fill_listing_copy_missing_attributes(listing_copy_ids: list[str] | str | Non
         listing_copy_ids = [item.strip() for item in listing_copy_ids.split(",") if item.strip()]
     wanted = [str(item or "").strip() for item in (listing_copy_ids or []) if str(item or "").strip()]
     filled_copies: list[dict[str, Any]] = []
-    # 补全属性只动主库里的副本：类目 / 任务 / 快照都不必解析（原 448ms → 约 170ms）。
-    with locked_store(split_keys=()) as (data, save):
+    # 补全属性只动副本集合（模板在主库）：类目 / 任务 / 快照都不必解析（原 448ms → 约 170ms）。
+    with locked_store(split_keys=("store_listing_copies",)) as (data, save):
         copies = data.get("store_listing_copies", [])
         targets = [item for item in copies if item.get("id") in wanted] if wanted else list(copies)
         for listing_copy in targets:
@@ -6233,7 +6573,11 @@ def _build_automation_job_in_store(
             *(readiness.get("warnings") or []),
             *[f"template_attribute_not_copied.{field_id}" for field_id in missing_from_template],
         ]))
-    assets = _assets_for_group_in_store(data, listing_copy.get("group_id") or "")
+    assets = _assets_for_group_in_store(
+        data,
+        listing_copy.get("group_id") or "",
+        listing_copy.get("asset_root") or "",
+    )
     browser_inputs = _build_browser_inputs(listing_copy, skus, prices, assets, data)
     # 传入 skus/prices 时执行快照要沿用界面顺序（见原实现注释）：list_listing_skus 按 color_code
     # 排序，browser_inputs.variation.colors 也由它生成，顺序不一致会把默认 SKU 插到中间。
@@ -6293,7 +6637,19 @@ def create_automation_job_from_listing_copy(listing_copy_id: str, payload: dict[
     listing_copy_id = str(listing_copy_id or "").strip()
     snapshot = None
     with locked_store(
-        split_keys=("automation_jobs", "automation_job_snapshots"), main_readonly=True
+        # 建任务/重排队要读副本、SKU、价格、素材来算就绪度并冻结快照：
+        # 这些都是拆分集合，必须点名加载，否则读到的全是空。
+        # 写只落任务与快照两个文件（write_keys），读过的集合不付序列化比对的成本。
+        split_keys=(
+            "automation_jobs",
+            "automation_job_snapshots",
+            "store_listing_copies",
+            "listing_skus",
+            "listing_prices",
+            "assets",
+        ),
+        write_keys=("automation_jobs", "automation_job_snapshots"),
+        main_readonly=True,
     ) as (data, save):
         job = _build_automation_job_in_store(data, listing_copy_id, now=utc_now(), payload=payload)
         if not job.get("id"):
@@ -6324,7 +6680,19 @@ def create_automation_jobs_from_listing_copies(listing_copy_ids: list[str] | str
     # 生成任务需要主库（副本/SKU/价格）+ 任务集合 + 快照集合：不解析 13.1MB 的类目，
     # 也不重写主库（main_readonly：省掉 85ms 的整库序列化比对）。
     with locked_store(
-        split_keys=("automation_jobs", "automation_job_snapshots"), main_readonly=True
+        # 建任务/重排队要读副本、SKU、价格、素材来算就绪度并冻结快照：
+        # 这些都是拆分集合，必须点名加载，否则读到的全是空。
+        # 写只落任务与快照两个文件（write_keys），读过的集合不付序列化比对的成本。
+        split_keys=(
+            "automation_jobs",
+            "automation_job_snapshots",
+            "store_listing_copies",
+            "listing_skus",
+            "listing_prices",
+            "assets",
+        ),
+        write_keys=("automation_jobs", "automation_job_snapshots"),
+        main_readonly=True,
     ) as (data, save):
         now = utc_now()
         for listing_copy_id in listing_copy_ids:
@@ -6375,7 +6743,19 @@ def requeue_automation_job(job_id: str, payload: dict[str, Any] | None = None) -
         raise LookupError("Automation job not found")
     # 重排队读主库（副本/SKU/价格）但只写任务与快照；原 1145ms → 约 220ms。
     with locked_store(
-        split_keys=("automation_jobs", "automation_job_snapshots"), main_readonly=True
+        # 建任务/重排队要读副本、SKU、价格、素材来算就绪度并冻结快照：
+        # 这些都是拆分集合，必须点名加载，否则读到的全是空。
+        # 写只落任务与快照两个文件（write_keys），读过的集合不付序列化比对的成本。
+        split_keys=(
+            "automation_jobs",
+            "automation_job_snapshots",
+            "store_listing_copies",
+            "listing_skus",
+            "listing_prices",
+            "assets",
+        ),
+        write_keys=("automation_jobs", "automation_job_snapshots"),
+        main_readonly=True,
     ) as (data, save):
         target = next((item for item in data.get("automation_jobs", []) if item.get("id") == job_id), None)
         if not target:
@@ -6411,7 +6791,11 @@ def requeue_automation_job(job_id: str, payload: dict[str, Any] | None = None) -
         configuration_missing = _runtime_configuration_missing(data, listing_copy, now=now)
         readiness["missing_fields"].extend(item for item in configuration_missing if item not in readiness["missing_fields"])
         _apply_automation_warning_policy(readiness)
-        assets = _assets_for_group_in_store(data, listing_copy.get("group_id") or "")
+        assets = _assets_for_group_in_store(
+        data,
+        listing_copy.get("group_id") or "",
+        listing_copy.get("asset_root") or "",
+    )
         browser_inputs = _build_browser_inputs(listing_copy, skus, prices, assets, data)
         execution_snapshot = {
             "listing_copy": deepcopy(listing_copy),
@@ -6632,7 +7016,8 @@ def build_automation_payload(job_id: str) -> dict[str, Any]:
         return {"ok": False, "error": "Listing copy not found", "job": job}
     skus = list_listing_skus(listing_copy.get("id") or "")
     prices = list_listing_prices(listing_copy.get("id") or "")
-    assets = assets_for_group(listing_copy.get("group_id") or "")
+    # 只取这次导入目录的素材：同名文件在重复导入后会有两份，混着取会拿到旧图。
+    assets = assets_for_base_product(listing_copy)
     readiness = _check_automation_readiness(
         listing_copy,
         skus=skus,
@@ -9017,7 +9402,8 @@ def _cnsc_sale_price(original: Any, sale: Any, discount_percent: float | None = 
 def _generate_listing_skus(base: dict[str, Any], template: dict[str, Any], listing_copy: dict[str, Any]) -> list[dict[str, Any]]:
     colors = [str(item or "").strip() for item in base.get("recognized_colors") or [] if str(item or "").strip()] or ["default"]
     cnsc = listing_copy.get("listing_mode") == "cnsc_global"
-    # SKU 尺码源：base 勾选尺码(selected_sizes) → base 识别尺码(recognized_sizes) → 模板 sizes。
+    # SKU 尺码源：本土按模板尺码（模板 chip 顺序即上架顺序），模板没配尺码才回退
+    # 商品勾选/识别尺码；跨境仍以商品勾选/识别尺码优先。见 _listing_sizes。
     # 跨境与本土一致：SKU 均为 颜色×尺码；价格仍按颜色档（同色不同码同价）。
     sizes = _listing_sizes(base, template)
     rows = []
@@ -9165,22 +9551,29 @@ def _ordered_size_sort_key(size: Any, rank: dict[str, int] | None) -> tuple[int,
 
 
 def _listing_sizes(base: dict[str, Any], template: dict[str, Any]) -> list[str]:
-    """SKU 尺码源：base 勾选尺码(selected_sizes) → base 识别尺码(recognized_sizes)
-    → 模板 sizes → ``["default"]``。默认 SKU 组与主颜色共用这一份尺码。
-    本土(site)最终按模板的尺码顺序排（chip 拖动顺序即上架顺序）；跨境保持原
-    顺序（网格按行号填写，换序需单独验证）。"""
+    """SKU 尺码源。
+
+    本土(site)：**模板尺码优先**。模板 chip 就是店铺刊登的尺码轴（拖动顺序即上架
+    顺序），复制到模板后 SKU 一律按模板的尺码生成；模板没配尺码才回退到商品勾选/
+    识别尺码(selected_sizes → recognized_sizes)，最后 ``["default"]``。
+    2026-10-26 起：商品 AI 识别的字母码（XXS–XXXL）不再覆盖童装模板的 cm 码
+    （现场 HN0083/HN0084 复制到 Oct.3H 模板生成的是 XXS–XXXL 而不是 90cm…）。
+
+    跨境(cnsc_global)：保持旧优先级 商品勾选 → 识别 → 模板尺码。跨境网格按行号
+    填写，改优先级属于跨境行为变更，需单独验证。"""
+    template_sizes = [
+        str(item or "").strip()
+        for item in (template or {}).get("sizes") or []
+        if str(item or "").strip()
+    ]
     base_sizes = [
         str(item or "").strip()
         for item in (base.get("selected_sizes") or base.get("recognized_sizes") or [])
         if str(item or "").strip()
     ]
-    sizes = base_sizes or (
-        [str(item or "").strip() for item in (template or {}).get("sizes") or [] if str(item or "").strip()]
-        or ["default"]
-    )
-    if str((template or {}).get("listing_mode") or "site") != "cnsc_global":
-        sizes = _order_sizes_by_template(sizes, (template or {}).get("sizes"))
-    return sizes
+    if str((template or {}).get("listing_mode") or "site") == "cnsc_global":
+        return base_sizes or template_sizes or ["default"]
+    return template_sizes or base_sizes or ["default"]
 
 
 def _default_sku_rows(

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import uuid
 from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from typing import Any
@@ -126,6 +127,73 @@ def _keep_previous_details(item: dict[str, Any], previous: Any) -> dict[str, Any
         item["discount_percent"] = previous.get("discount_percent")
     item["label"] = promotion_label(item)
     return item
+
+
+def record_catalog_run(
+    data: dict[str, Any],
+    *,
+    store_id: str,
+    status: str,
+    count: int = 0,
+    error: str = "",
+    catalog_loaded: bool = False,
+    now: str,
+) -> dict[str, Any]:
+    """记录一次「采集店铺活动目录」的结果（每店一条）。
+
+    与水印目录同一套语义：只写采集状态，不碰目录本身；``collected_at`` 只记最后一次
+    成功时间，``attempted_at`` 记最后一次尝试时间，界面据此区分「从没采到」和「上次失败」。
+    """
+    wanted_store = str(store_id or "").strip()
+    if not wanted_store:
+        raise ValueError("店铺活动目录缺少店铺")
+    previous = next(
+        (
+            item
+            for item in data.get("store_promotion_catalog_runs") or []
+            if str(item.get("store_id") or "") == wanted_store
+        ),
+        None,
+    ) or {}
+    succeeded = str(status or "").strip().lower() == "ok"
+    run = {
+        "id": str(previous.get("id") or uuid.uuid4()),
+        "store_id": wanted_store,
+        "status": "ok" if succeeded else "failed",
+        "count": int(count or 0),
+        "catalog_loaded": bool(catalog_loaded),
+        "error": "" if succeeded else str(error or "").strip()[:500],
+        "collected_at": now if succeeded else str(previous.get("collected_at") or ""),
+        "attempted_at": now,
+        "created_at": str(previous.get("created_at") or now),
+        "updated_at": now,
+    }
+    data["store_promotion_catalog_runs"] = [
+        item
+        for item in data.get("store_promotion_catalog_runs") or []
+        if str(item.get("store_id") or "") != wanted_store
+    ] + [run]
+    return run
+
+
+def catalog_status(data: dict[str, Any], store_id: str) -> dict[str, Any] | None:
+    """某店铺的活动目录采集状态（没有记录时返回 None）。"""
+    wanted_store = str(store_id or "").strip()
+    if not wanted_store:
+        return None
+    item = next(
+        (
+            row
+            for row in data.get("store_promotion_catalog_runs") or []
+            if str(row.get("store_id") or "") == wanted_store
+        ),
+        None,
+    )
+    if not item:
+        return None
+    status = dict(item)
+    status["count"] = int(status.get("count") or 0)
+    return status
 
 
 def _discount_ratio(value: Any) -> Decimal:

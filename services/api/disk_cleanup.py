@@ -42,6 +42,13 @@ ACTIVE_JOB_STATUSES = {
 }
 AUTO_INTERVAL_SECONDS = 24 * 60 * 60
 
+
+def assets_cleanup_enabled(config: dict[str, Any] | None) -> bool:
+    """商品素材删除总开关。缺省（旧库）按「开」处理，显式 false 才是永不删除。"""
+
+    value = (config or {}).get("assets_cleanup_enabled", True)
+    return value is not False
+
 _BROWSER_PROFILE_NAMES = ("browser-use-profile", "mabang-cdp-profile")
 _BROWSER_ROOT_CACHE_DIRS = {
     "OptGuideOnDeviceModel",
@@ -135,6 +142,9 @@ def scan_usage(
             candidates = list(
                 dict.fromkeys(_cleanup_files(category, config, active_job_ids=active_job_ids, now=current))
             )
+        note = _PROTECTED_NOTES[category]
+        if category in ASSET_CATEGORIES and not assets_cleanup_enabled(config):
+            note = "商品素材删除已关闭：这里只统计占用，素材不会被删除（压缩仍按商品素材压缩设置执行）。"
         categories[category] = {
             "id": category,
             "label": _CATEGORY_LABELS[category],
@@ -143,7 +153,7 @@ def scan_usage(
             "file_count": len(total_files),
             "reclaimable_file_count": len(candidates),
             "automatic": category in AUTOMATIC_CATEGORIES,
-            "protected_note": _PROTECTED_NOTES[category],
+            "protected_note": note,
         }
     return {
         "total_bytes": sum(item["total_bytes"] for item in categories.values()),
@@ -182,6 +192,18 @@ def cleanup_categories(
         all_skipped: list[str] = []
         all_errors: list[str] = []
         for category in selected:
+            if category in ASSET_CATEGORIES and not assets_cleanup_enabled(config):
+                # 关闭「删除商品素材」时连候选都不算：不删任何素材目录/文件，
+                # 只在结果里留一条 disabled 说明（手动点清理也一样不删）。
+                details[category] = {
+                    "label": _CATEGORY_LABELS[category],
+                    "freed_bytes": 0,
+                    "deleted_files": 0,
+                    "skipped": [],
+                    "errors": [],
+                    "disabled": True,
+                }
+                continue
             asset_dirs: list[Path] = []
             if category in ASSET_CATEGORIES:
                 _total, files, asset_dirs = _asset_category_files(
@@ -356,6 +378,9 @@ def _asset_dir_sets(
             )
             if root is not None and root.is_dir()
         ]
+        if not assets_cleanup_enabled(config):
+            # 删除总开关关闭：总量照常统计（面板能看占用），但一个候选都不给。
+            return all_dirs, []
         candidates, _legacy = asset_compaction.cleanup_candidate_dirs(
             store,
             storage_dir=storage_dir,
@@ -367,6 +392,8 @@ def _asset_dir_sets(
     all_dirs = asset_compaction.unowned_asset_dirs(
         store, storage_dir=storage_dir, older_than_days=0, now=moment
     )
+    if not assets_cleanup_enabled(config):
+        return all_dirs, []
     candidates = asset_compaction.unowned_asset_dirs(
         store, storage_dir=storage_dir, older_than_days=retention, now=moment
     )

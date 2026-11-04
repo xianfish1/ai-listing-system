@@ -422,9 +422,13 @@
       ref?.$data?.activityOptions,
       ref?.$data?.discountOptions,
     ];
+    // 弹窗分页（默认 10 条/页）：列表读到了也可能只读到当前页。分页总数用来区分
+    // "选中活动在别的页"（不能把它判成失效）和"列表里确实没有它"（草稿从别处带来）。
+    const totalCandidates = [];
     for (const element of document.querySelectorAll('.el-dialog,.el-dialog__wrapper,[role="dialog"]')) {
       if (!clean(element.textContent).includes('选择折扣活动')) continue;
       for (let vm = element.__vue__ || element.__vueParentComponent?.proxy, depth = 0; vm && depth < 8; vm = vm.$parent, depth += 1) {
+        totalCandidates.push(vm?.total, vm?.$data?.total, vm?.pagination?.total, vm?.$data?.pagination?.total);
         optionLists.push(
           vm?.tableData,
           vm?.activityList,
@@ -445,19 +449,48 @@
         : [];
       for (const table of tables) {
         const tableVm = table?.__vue__ || table?.__vueParentComponent?.proxy;
-        optionLists.push(tableVm?.tableData, tableVm?.$data?.tableData, tableVm?.list, tableVm?.$data?.list);
+        if (!tableVm) continue;
+        // vxe-table 把行放在 prop `data` / `internalData.fullData` 上，组件自己的
+        // 父组件才有 `tableData`。几种形态都读一遍，避免只能读到空列表。
+        let tableRows = null;
+        try {
+          tableRows = typeof tableVm.getTableData === 'function' ? tableVm.getTableData() : null;
+        } catch (_error) {
+          tableRows = null;
+        }
+        optionLists.push(
+          tableVm.tableData,
+          tableVm.$data?.tableData,
+          tableVm.data,
+          tableVm.$props?.data,
+          tableVm.internalData?.fullData,
+          tableVm.internalData?.tableData,
+          tableVm.$data?.internalData?.fullData,
+          tableRows,
+          tableVm.list,
+          tableVm.$data?.list,
+        );
       }
     }
     const options = optionLists.flatMap((items) => Array.isArray(items) ? items : []);
+    const listTotal = totalCandidates
+      .map((value) => Number(value))
+      .filter((value) => Number.isFinite(value) && value > 0)
+      .reduce((max, value) => Math.max(max, value), 0) || null;
     // 列表是否真的读到：只有在弹窗/表格里拿到过活动行时才算"目录已加载"。否则
     // 这次采集只是回显了当前选中项，没有资格把别的活动判成失效。
     const listLoaded = options.length > 0;
-    // 只有在"没读到店铺活动列表"时才回显当前选中项。列表读到的情况下以列表为准：
-    // 页面上选中的活动可能早已不属于该店铺（草稿是从别处带过来的），回显并绑定它
-    // 会让模板/副本一直显示"活动不可用"。
-    if (!listLoaded && selectedId && !options.some((option) => clean(option?.activity_id ?? option?.activityId ?? option?.discount_id ?? option?.discountId ?? option?.id ?? option?.value) === selectedId)) {
-      // 列表里确实查不到选中项时才补一条；该条只有 id+名称，所以状态留空由后端
-      // 判成"未解析"，绝不冒充可用活动。
+    const optionId = (option) => clean(option?.activity_id ?? option?.activityId ?? option?.discount_id ?? option?.discountId ?? option?.id ?? option?.value);
+    const hasSelected = () => options.some((option) => optionId(option) === selectedId);
+    // 回显当前选中项的条件：
+    //   - 没读到列表（只有选中项可回显）；
+    //   - 读到了但列表分页、选中的那条不在当前页（total > 本页行数时不能判它失效，
+    //     否则保存时会提示"不属于当前店铺采集目录"）。
+    // 列表完整读到且就是没有它 → 不回显（草稿从别处带来的旧活动），避免绑定失效活动。
+    const loadedIds = new Set(options.map(optionId).filter(Boolean));
+    const paginated = Boolean(listTotal && listTotal > loadedIds.size);
+    if (selectedId && !hasSelected() && (!listLoaded || paginated)) {
+      // 该条只有 id+名称，所以状态留空由后端判成"未解析"，绝不冒充可用活动。
       options.push({
         activity_id: selectedId,
         name: clean(firstValue(selectedPromotion?.discount_name, selectedPromotion?.discountName, ref?.changeDiscountInfo?.discountName)),
@@ -472,8 +505,24 @@
         activity_id: activityId,
         name: clean(option?.name ?? option?.activity_name ?? option?.activityName ?? option?.discount_name ?? option?.discountName ?? option?.label),
         discount_rate: clean(option?.discount_rate ?? option?.discountRate),
-        start_at: clean(option?.start_at ?? option?.startTime ?? option?.start_time),
-        end_at: clean(option?.end_at ?? option?.endTime ?? option?.end_time),
+        start_at: clean(firstValue(
+          option?.start_at,
+          option?.startAt,
+          option?.startTime,
+          option?.start_time,
+          option?.begin_time,
+          option?.beginTime,
+          option?.start_date,
+        )),
+        end_at: clean(firstValue(
+          option?.end_at,
+          option?.endAt,
+          option?.endTime,
+          option?.end_time,
+          option?.finish_time,
+          option?.finishTime,
+          option?.end_date,
+        )),
         // 马帮行自带 discount_status(ongoing/…) 与 flag(1 未开始/2 进行中/3 已结束)；
         // 两者都取不到时状态留空，由后端判成"未解析"而不是"已停用"。
         status: clean(firstValue(

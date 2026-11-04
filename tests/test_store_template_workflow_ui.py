@@ -113,8 +113,9 @@ def test_local_import_queue_lets_operators_queue_several_directories():
     assert len(local_entry) < 3000, "函数体切片失败：后续断言会退化成整文件匹配"
     assert "queue.enqueue(" in local_entry
     assert "已加入" in local_entry and "个商品文件夹" in local_entry
-    # 队列里已经有同名目录时提醒一次，避免重复创建基础商品。
-    assert "重复创建" in local_entry
+    # 队列里已经有同名目录时直接跳过并点名，避免重复创建基础商品。
+    assert "splitDuplicateLocalImportGroups(" in local_entry
+    assert "localImportDuplicateHint(duplicates)" in local_entry
     assert ".disabled = true" not in local_entry
     assert "await runSequentialImport" not in local_entry
 

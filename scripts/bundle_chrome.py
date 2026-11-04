@@ -31,9 +31,19 @@ def _existing_bundled_chrome() -> Path | None:
     if not VENDOR_CHROME_DIR.is_dir():
         return None
     for pattern in ("chrome.exe", "*/chrome.exe", "*/*/chrome.exe", "chrome", "*/chrome"):
-        match = next((c for c in sorted(VENDOR_CHROME_DIR.glob(pattern)) if c.is_file()), None)
+        matches = [
+            c
+            for c in sorted(VENDOR_CHROME_DIR.glob(pattern))
+            if c.is_file() and not (os.name != "nt" and c.suffix.lower() == ".exe")
+        ]
+        match = matches[0] if matches else None
         if match:
             return match
+    # macOS 的 Playwright 布局藏得更深（chrome-mac/Chromium.app/Contents/MacOS/Chromium）。
+    if os.name != "nt":
+        for candidate in sorted(VENDOR_CHROME_DIR.rglob("*")):
+            if candidate.is_file() and candidate.name in {"chrome", "Chromium"}:
+                return candidate
     return None
 
 
@@ -47,6 +57,8 @@ def _playwright_cache_dirs() -> list[Path]:
         dirs.append(Path(local_app) / "ms-playwright")
     dirs.append(Path.home() / "AppData" / "Local" / "ms-playwright")
     dirs.append(Path.home() / ".cache" / "ms-playwright")
+    if sys.platform == "darwin":
+        dirs.append(Path.home() / "Library" / "Caches" / "ms-playwright")
     seen: set[Path] = set()
     unique: list[Path] = []
     for candidate in dirs:

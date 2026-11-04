@@ -13,6 +13,7 @@ from services.api.mabang_import_snapshot import (
     normalize_mabang_capture,
     snapshot_template_payload,
 )
+from services.api.store_promotions import record_catalog_run as record_promotion_catalog_run
 from services.api.store_promotions import replace_promotion_catalog
 from services.api.store_watermarks import replace_watermark_catalog
 from services.api.store_size_chart_templates import replace_size_chart_catalog
@@ -154,12 +155,24 @@ def confirm_page_import(
     )
     promotions = []
     if payload.get("listing_mode") != "cnsc_global":
+        catalog_loaded = snapshot.get("promotion_catalog_loaded") is True
         promotions = replace_promotion_catalog(
             staged,
             store_id=store["id"],
             raw_items=snapshot.get("promotion_catalog") or [],
             now=now,
-            catalog_loaded=snapshot.get("promotion_catalog_loaded") is True,
+            catalog_loaded=catalog_loaded,
+        )
+        # 导入也记一笔活动目录采集状态：模板编辑器要能显示「目录 N 条 · 采集于 …」，
+        # 没读到活动列表时也能直接看到原因（有效期缺失就出在这里）。
+        record_promotion_catalog_run(
+            staged,
+            store_id=store["id"],
+            status="ok" if catalog_loaded else "failed",
+            count=len(promotions),
+            error="" if catalog_loaded else "页面导入没读到「选择折扣活动」列表；活动只有名称、没有有效期",
+            catalog_loaded=catalog_loaded,
+            now=now,
         )
     watermarks = None
     if snapshot.get("watermark_catalog_loaded") is True:

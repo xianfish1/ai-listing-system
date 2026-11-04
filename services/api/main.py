@@ -23,7 +23,8 @@ from socketserver import TCPServer
 from typing import Any
 from urllib.parse import parse_qs, urlparse
 
-from services.api import asset_thumbnails, disk_cleanup, github_updates, network_access, project_plan, settings, storage
+from services.api import asset_thumbnails, disk_cleanup, github_updates, keyword_workbench, network_access, project_plan, settings, storage, title_selection, title_skill_presets
+from services.api.subprocess_utils import no_console_window_kwargs
 from services.api.runtime_configuration import (
     worker_idle_shutdown_seconds,
     worker_slots_per_account,
@@ -65,6 +66,7 @@ from services.api.model_gateway import GenerationRequest, ModelGateway
 from services.api.store_collection_service import run_store_collection
 from services.api.worker_supervisor import MultiWorkerSupervisor, WorkerSupervisor, normalize_worker_target
 from scripts.browser_use_runner import collect_mabang_page_import_via_playwright as run_mabang_page_import_collect
+from scripts.browser_use_runner import collect_store_promotions_via_playwright as run_store_promotion_collect
 from scripts.browser_use_runner import collect_store_watermarks_via_playwright as run_store_watermark_collect
 from workers.asset_scanner.scanner import scan_asset_root
 from workers.executor.deepseek_adapter import DeepSeekAdapter
@@ -78,6 +80,8 @@ MAX_VIDEO_BODY_BYTES = 42_000_000
 # 图片上传走 base64 JSON（膨胀 4/3），商品图单张上限 10 MiB → 预留到 16 MiB。
 # 用默认的 1 MiB JSON 上限会让 1 MB 以上的图直接 413，浏览器只报 Failed to fetch。
 MAX_IMAGE_UPLOAD_BODY_BYTES = 16 * 1024 * 1024
+# 关键词 Excel 走 base64 JSON：文件上限 12 MB × 4/3 ≈ 16.8 MB，留到 20 MB。
+MAX_KEYWORD_IMPORT_BODY_BYTES = 20 * 1024 * 1024
 MAX_LOCAL_UPLOAD_FILE_BYTES = 512 * 1024 * 1024
 _WORKER_SUPERVISOR: WorkerSupervisor | None = None
 _WORKER_RUNTIME_DIR: Path | None = None
@@ -143,6 +147,26 @@ def _nas_import_task_snapshot(task_id: str) -> dict[str, Any] | None:
     with _NAS_IMPORT_TASKS_LOCK:
         task = _NAS_IMPORT_TASKS.get(task_id)
         return copy.deepcopy(task) if task is not None else None
+
+
+def _title_skill_public(skill: dict[str, Any]) -> dict[str, Any]:
+    """预览响应与生成记录共用的规则快照：身份 + 生成模式 + 模板配置，
+    便于核对当时实际使用的规则版本。"""
+    template = skill.get("operator_template")
+    return {
+        "id": skill.get("id") or "builtin",
+        "name": skill.get("name") or "通用标题",
+        "version": skill.get("version", 1),
+        "generation_mode": skill.get("generation_mode") or "standard",
+        "operator_template": (
+            {
+                key: template.get(key)
+                for key in ("core_term", "style_words", "companion_words", "patterns", "trim_order", "rules", "source", "version")
+            }
+            if template
+            else None
+        ),
+    }
 
 
 def _update_nas_import_task(task_id: str, **changes: Any) -> None:
@@ -450,6 +474,79 @@ def _persist_ai_generation_error(product: dict[str, Any], error: str) -> dict[st
     return updated or {**product, "ai_generation_error": error}
 
 
+_TITLE_AUDIENCE_LABELS = {"boys": "男童", "girls": "女童", "men": "男装", "women": "女装"}
+
+
+def _apply_ai_audience_to_title_context(
+    context: dict[str, Any],
+    product: dict[str, Any],
+    assets: list[dict[str, Any]],
+    gateway: Any,
+    connection: dict[str, Any] | None,
+    overrides: dict[str, Any],
+    attribute_hints: dict[str, str] | None = None,
+) -> tuple[dict[str, Any], str, str]:
+    """人群未确认时先让 AI 识别款式适合谁，再按识别结果重新匹配标题规则。
+
+    返回 (context, 识别到的人群, 失败原因)。操作员已指定规则/人群、或商品本身已经
+    有人群证据（title_audience / 属性里的 Gender）时直接跳过；AI 失败时原样返回
+    context——这一步只是选规则的依据，绝不能阻断导入和预览。"""
+    if overrides.get("audience") or overrides.get("skill_id"):
+        return context, "", ""
+    try:
+        if not title_selection.scope_undetermined(title_selection.product_scope(product, overrides)):
+            return context, "", ""
+    except Exception:  # noqa: BLE001 - 范围推断失败按「未确认」以外的保守路径处理
+        return context, "", ""
+    from services.api import vision_listing
+
+    detected, error = vision_listing.detect_product_audience(
+        gateway=gateway,
+        connection=connection,
+        base_product=product,
+        assets=assets,
+        attribute_hints=attribute_hints,
+    )
+    if not detected:
+        return context, "", error
+    try:
+        rebuilt = _build_context_with_audience(product, overrides, detected)
+    except ValueError:
+        # 手动指定的批次是按旧人群筛的，识别人群变了就不匹配：退回按新人群自动取
+        # 最新批次，别让一次「指定批次」把 AI 识别的结果整个作废。
+        try:
+            rebuilt = _build_context_with_audience(product, overrides, detected, drop_batch=True)
+        except Exception as exc:  # noqa: BLE001 - 保留原 context，按默认规则生成
+            return context, "", f"按识别人群匹配标题规则失败: {exc}"
+    except Exception as exc:  # noqa: BLE001 - 保留原 context，按默认规则生成
+        return context, "", f"按识别人群匹配标题规则失败: {exc}"
+    label = _TITLE_AUDIENCE_LABELS.get(detected, detected)
+    rebuilt.setdefault("warnings", []).insert(0, f"款式人群由 AI 识别为「{label}」，已按此匹配标题规则")
+    return rebuilt, detected, ""
+
+
+def _build_context_with_audience(
+    product: dict[str, Any],
+    overrides: dict[str, Any],
+    audience: str,
+    *,
+    drop_batch: bool = False,
+) -> dict[str, Any]:
+    """按识别到的人群重建标题上下文；drop_batch 时放弃手动指定的批次。"""
+    rebuilt_overrides = {**overrides, "audience": audience}
+    if drop_batch:
+        rebuilt_overrides.pop("batch_id", None)
+    return title_selection.build_context(
+        product,
+        storage.list_title_skills(),
+        keyword_workbench.list_batches(),
+        keyword_workbench.rows_for_batch,
+        overrides=rebuilt_overrides,
+    )
+
+
+
+
 def _enrich_with_vision_listing(
     product: dict[str, Any],
     payload: dict[str, Any],
@@ -513,12 +610,11 @@ def _enrich_with_vision_listing(
     # 素材只取本次导入目录：同一个 SKU 重新导入后，上一批素材还在素材库里，
     # 按分组取会把两次导入的图片混进同一次颜色识别（也会写回旧文件名）。
     assets = storage.assets_for_base_product(product)
+    # 未命名 SKU 图 = 扫描器判成颜色图但没认出颜色的文件 + 一整套无信息主图
+    # （1-9 / 1 (1).png 这类；文件夹里另有主图或已命名颜色时扫描器不会改判它们）。
     unnamed_variant_files = [
         str(asset.get("file_name") or "").strip()
-        for asset in assets
-        if str(asset.get("asset_type") or "").lower() == "variant"
-        and str(asset.get("file_name") or "").strip()
-        and not str(asset.get("sku_option") or "").strip()
+        for asset in vision_listing.ordered_unnamed_variant_assets(assets)
     ]
     color_targets: list[str] = []
     if run_color_stage is not False:
@@ -529,7 +625,7 @@ def _enrich_with_vision_listing(
             if force_colors
             else list(unnamed_variant_files)
         )
-    stages = {"title": "skipped", "colors": "skipped"}
+    stages = {"title": "skipped", "colors": "skipped", "audience": "skipped"}
     if force_colors and not color_targets:
         return {**_persist_ai_generation_error(product, "没有可重新识别的颜色图"), "ai_stages": stages}
     if not (want_title or want_description or color_targets):
@@ -546,12 +642,41 @@ def _enrich_with_vision_listing(
     hints = payload.get("attribute_hints") if isinstance(payload.get("attribute_hints"), dict) else {}
     hints = {str(k): str(v) for k, v in hints.items() if str(v or "").strip()}
 
-    # 标题 Skill（Skills 管理页维护）：默认 Skill 自动生效，只影响标题部分；
-    # 热词按 Skill 的策略注入，策略为「不使用」或词库为空时都不占 prompt。
-    title_skill = storage.get_active_title_skill() if want_title else None
+    # 标题生成统一走「Shopee 标题工作台」：规则匹配 → 最新启用批次 → 候选词
+    # 筛选/排序前 20 → 生成后校验（不合格让 AI 缩短重试，仍不合格保留原标题）。
+    # 上下文构建失败时退回旧的 Skill 注入逻辑，绝不阻断导入。
+    title_skill = None
+    title_context = None
     hot_words_for_title: list[str] = []
-    if title_skill and str(title_skill.get("hot_word_policy") or "").lower() != "off":
-        hot_words_for_title = storage.list_enabled_hot_words()
+    # 明确传入的规则/品类/人群是操作员的确认，优先级高于 AI 识别的款式人群。
+    title_overrides = {
+        key: payload[key]
+        for key in ("skill_id", "batch_id", "category", "audience")
+        if str(payload.get(key) or "").strip()
+    }
+    # 「重新识别标题」按钮上手动选的规则：操作员已经明确指定，
+    # 不再因为商品范围推断不出来而回退成内置规则。
+    if payload.get("force_skill"):
+        title_overrides["force_skill"] = True
+    if want_title:
+        try:
+            title_context = title_selection.build_context(
+                product,
+                storage.list_title_skills(),
+                keyword_workbench.list_batches(),
+                keyword_workbench.rows_for_batch,
+                overrides=title_overrides,
+            )
+            title_skill = title_context["skill"]
+        except Exception:  # noqa: BLE001 - 词库/规则异常不能挡住导入
+            # 手动指定的规则只在这个兜底里也保持优先，但停用的规则不参与。
+            explicit_skill = storage.get_title_skill(str(payload.get("skill_id") or ""))
+            title_skill = (
+                explicit_skill if explicit_skill and explicit_skill.get("enabled", True)
+                else storage.get_active_title_skill()
+            )
+            if title_skill and str(title_skill.get("hot_word_policy") or "").lower() != "off":
+                hot_words_for_title = storage.list_enabled_hot_words()
 
     try:
         gateway = ModelGateway(
@@ -563,6 +688,18 @@ def _enrich_with_vision_listing(
 
     patch: dict[str, Any] = {}
     errors: list[str] = []
+
+    # 人群还没确认时先让 AI 看款式（男童/女童/男装/女装），再按结果匹配标题规则，
+    # 识别到的人群写回 title_audience，后续「重新识别标题」沿用、操作员可在维护弹窗改。
+    detected_audience = ""
+    if title_context is not None and want_title:
+        title_context, detected_audience, audience_error = _apply_ai_audience_to_title_context(
+            title_context, product, assets, gateway, connection, title_overrides, hints
+        )
+        stages["audience"] = "done" if detected_audience else ("failed" if audience_error else "skipped")
+        if detected_audience:
+            title_skill = title_context["skill"]
+            patch["title_audience"] = detected_audience
 
     title_errors: list[str] = []
     color_errors: list[str] = []
@@ -583,6 +720,7 @@ def _enrich_with_vision_listing(
                     fill_attributes_into_description=fill_attributes,
                     title_skill=title_skill,
                     hot_words=hot_words_for_title,
+                    title_context=title_context,
                 )
             except Exception as exc:  # noqa: BLE001 - vision must never break create
                 result = None
@@ -601,6 +739,28 @@ def _enrich_with_vision_listing(
                         patch["recognized_attributes"] = dict(result.attributes)
                     if not any(key in patch for key in ("listing_title", "description")):
                         title_errors.append("AI 生成结果为空")
+            # 每次生成标题都留下可追溯记录：规则版本、数据批次、候选词、最终标题
+            # 与校验结果（采用预览标题的记录在 /api/title-workbench/apply 里单独写）。
+            if want_title and title_context is not None:
+                try:
+                    batch = title_context.get("batch") or {}
+                    keyword_workbench.record_generation({
+                        "source": f"regenerate:{aspect}" if aspect else "import",
+                        "product_id": product.get("id") or "",
+                        "main_sku": str(product.get("main_sku") or product.get("group_id") or ""),
+                        "skill": _title_skill_public(title_context.get("skill") or {}),
+                        "batch": {key: batch.get(key) for key in ("id", "name", "data_date", "source")},
+                        "scope": title_context.get("scope"),
+                        "stale": title_context.get("stale"),
+                        "age_days": title_context.get("age_days"),
+                        "warnings": title_context.get("warnings"),
+                        "candidate_words": [row.get("word") for row in title_context.get("candidates", [])],
+                        "titles": [dict(item) for item in (getattr(result, "title_candidates", None) or [])] if result is not None else [],
+                        "applied_title": str(patch.get("listing_title") or ""),
+                        "error": "" if result is not None and result.ok else str((result.error if result is not None else "") or "AI 生成过程异常"),
+                    })
+                except Exception:  # noqa: BLE001 - 记录失败不影响导入/重试
+                    pass
 
 
     target_asset_by_name = {
@@ -726,6 +886,12 @@ def _color_recognition_target_names(
     for asset in assets or []:
         if str(asset.get("asset_type") or "").lower() == "variant":
             add(asset.get("file_name"))
+    # 已导入的老商品：图片命名成 1-9、文件夹里另有主图时，这些图被扫描器保留成了
+    # 主图角色，只按 variant 取会让「重新识别颜色图」看不到它们（现场症状）。
+    from services.api import vision_listing
+
+    for asset in vision_listing.plain_main_color_assets(assets):
+        add(asset.get("file_name"))
     return sorted(names, key=storage.natural_name_key)
 
 
@@ -3124,8 +3290,96 @@ class ApiHandler(BaseHTTPRequestHandler):
             self._json({"items": storage.list_title_skills()})
             return
 
+        if path == "/api/title-skill-presets":
+            # 只读预设（来源与版本随预设自带）；从预设创建规则仍走 POST /api/title-skills。
+            self._json({"items": title_skill_presets.list_presets()})
+            return
+
         if path == "/api/hot-words":
             self._json({"items": storage.list_hot_words()})
+            return
+
+        if path == "/api/keyword-libraries":
+            self._json({"items": keyword_workbench.list_libraries()})
+            return
+
+        if path == "/api/keyword-batches":
+            library_id = (query.get("library_id") or [""])[0].strip()
+            self._json({"items": keyword_workbench.list_batches(library_id)})
+            return
+
+        if path == "/api/keyword-rows":
+            params = {key: (query.get(key) or [""])[0] for key in (
+                "library_id", "batch_id", "search", "category", "audience", "status",
+                "sort", "direction", "page", "page_size",
+            )}
+            try:
+                self._json(keyword_workbench.query_rows(params))
+            except ValueError as exc:
+                raise ApiRequestError(str(exc), 422) from exc
+            return
+
+        if path == "/api/keyword-workbench/export":
+            params = {key: (query.get(key) or [""])[0] for key in (
+                "library_id", "batch_id", "search", "category", "audience", "status",
+                "sort", "direction",
+            )}
+            try:
+                content = keyword_workbench.export_rows(params)
+            except ValueError as exc:
+                raise ApiRequestError(str(exc), 422) from exc
+            self.send_response(200)
+            self.send_header("Content-Type", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+            self.send_header("Content-Disposition", 'attachment; filename="keywords.xlsx"')
+            self.send_header("Content-Length", str(len(content)))
+            if self.close_connection:
+                self.send_header("Connection", "close")
+            self.end_headers()
+            self.wfile.write(content)
+            return
+
+        if path == "/api/title-workbench/products":
+            store = storage.load_store()
+            # 一次扫描建 group_id → 首图 asset id 的映射：主图/产品图优先，兜底变体图。
+            asset_by_group: dict[str, str] = {}
+            fallback_by_group: dict[str, str] = {}
+            for asset in store.get("assets", []):
+                group = str(asset.get("group_id") or "")
+                asset_id = str(asset.get("id") or "")
+                if not group or not asset_id:
+                    continue
+                asset_type = str(asset.get("asset_type") or "").lower()
+                if asset_type in {"main", "product"} and group not in asset_by_group:
+                    asset_by_group[group] = asset_id
+                elif group not in fallback_by_group:
+                    fallback_by_group[group] = asset_id
+            products = sorted(
+                store.get("base_products", []),
+                key=lambda item: str(item.get("updated_at") or ""),
+                reverse=True,
+            )[:300]
+            items = []
+            for product in products:
+                group = str(product.get("group_id") or "")
+                asset_id = asset_by_group.get(group) or fallback_by_group.get(group) or ""
+                items.append({
+                    "id": product.get("id") or "",
+                    "main_sku": str(product.get("main_sku") or product.get("group_id") or ""),
+                    "name": str(product.get("base_name") or product.get("product_name_cn") or ""),
+                    "listing_title": str(product.get("listing_title") or ""),
+                    "title_category": str(product.get("title_category") or ""),
+                    "title_audience": str(product.get("title_audience") or ""),
+                    "audience": str(product.get("title_audience") or ""),
+                    "category": str(product.get("category") or ""),
+                    "recognized_attributes": copy.deepcopy(product.get("recognized_attributes") or {}),
+                    "image_url": f"/api/assets/{asset_id}/thumb" if asset_id else "",
+                })
+            self._json({"items": items})
+            return
+
+        if path == "/api/title-workbench/history":
+            product_id = (query.get("product_id") or [""])[0].strip()
+            self._json({"items": keyword_workbench.list_generations(product_id)[:50]})
             return
 
         if path == "/api/category-profiles/for-category":
@@ -3189,7 +3443,12 @@ class ApiHandler(BaseHTTPRequestHandler):
                 store_id,
                 available_only=_truthy((query.get("available_only") or ["false"])[0]),
             )
-            self._json({"items": items, "count": len(items)})
+            self._json({
+                "items": items,
+                "count": len(items),
+                # 界面要能显示「目录 N 条 · 采集于 …」/「上次采集失败：…」，没有记录时为 null。
+                "status": storage.get_store_promotion_catalog_status(store_id),
+            })
             return
 
         if path == "/api/store-watermarks":
@@ -3452,11 +3711,20 @@ class ApiHandler(BaseHTTPRequestHandler):
             self._json({"ok": False, "error": "Asset path not found"}, status=404)
             return
         try:
-            if open_dir:
-                target = asset.get("group_root") or str(file_path.parent)
-                subprocess.Popen(["explorer", str(target)])
+            target = asset.get("group_root") or str(file_path.parent)
+            if os.name == "nt":
+                # Windows：保持历史行为（资源管理器 / 选中文件）。
+                if open_dir:
+                    subprocess.Popen(["explorer", str(target)])
+                else:
+                    subprocess.Popen(["explorer", "/select,", str(file_path)])
+            elif sys.platform == "darwin":
+                if open_dir:
+                    subprocess.Popen(["open", str(target)], **no_console_window_kwargs())
+                else:
+                    subprocess.Popen(["open", "-R", str(file_path)], **no_console_window_kwargs())
             else:
-                subprocess.Popen(["explorer", "/select,", str(file_path)])
+                subprocess.Popen(["xdg-open", str(target if open_dir else file_path.parent)], **no_console_window_kwargs())
             self._json({"ok": True})
         except Exception as exc:
             self._json({"ok": False, "error": str(exc)}, status=500)
@@ -3645,6 +3913,9 @@ class ApiHandler(BaseHTTPRequestHandler):
             self._json(product, status=201)
             return
         body_limit = (
+            MAX_KEYWORD_IMPORT_BODY_BYTES
+            if path == "/api/keyword-import/preview"
+            else
             MAX_VIDEO_BODY_BYTES
             if path.endswith("/video")
             else
@@ -3738,6 +4009,14 @@ class ApiHandler(BaseHTTPRequestHandler):
                 raise ApiRequestError("ids must be a list", 422)
             result = storage.delete_base_products(ids)
             self._json(result)
+            return
+
+        if path == "/api/store-listing-copies/batch-delete":
+            # 批量删除副本：一次锁、一次写。正在执行/不存在的副本按条跳过，不阻断其它。
+            ids = payload.get("ids") or payload.get("listing_copy_ids") or []
+            if not isinstance(ids, list):
+                raise ApiRequestError("ids must be a list", 422)
+            self._json(storage.delete_store_listing_copies(ids))
             return
 
         if path == "/api/base-products/from-folders":
@@ -3930,6 +4209,63 @@ class ApiHandler(BaseHTTPRequestHandler):
                 self._json(storage.create_hot_word(payload), status=201)
             except ValueError as exc:
                 raise ApiRequestError(str(exc), 422) from exc
+            return
+
+        if path == "/api/keyword-libraries":
+            try:
+                self._json(keyword_workbench.create_library(payload), status=201)
+            except ValueError as exc:
+                raise ApiRequestError(str(exc), 422) from exc
+            return
+
+        if path == "/api/keyword-import/preview":
+            try:
+                self._json(keyword_workbench.preview_import(payload))
+            except ValueError as exc:
+                raise ApiRequestError(str(exc), 422) from exc
+            return
+
+        if path == "/api/keyword-import/confirm":
+            try:
+                self._json(keyword_workbench.confirm_import(payload), status=201)
+            except ValueError as exc:
+                raise ApiRequestError(str(exc), 422) from exc
+            return
+
+        if path == "/api/keyword-rows":
+            try:
+                self._json(keyword_workbench.update_rows(payload))
+            except ValueError as exc:
+                raise ApiRequestError(str(exc), 422) from exc
+            return
+
+        if path == "/api/keyword-workbench/initialize":
+            self._json(keyword_workbench.initialize())
+            return
+
+        if path == "/api/title-workbench/apply":
+            product_id = str(payload.get("product_id") or "").strip()
+            title = str(payload.get("title") or "").strip()
+            if not product_id or not title:
+                self._json({"error": "请提供商品和要采用的标题"}, status=422)
+                return
+            try:
+                updated = storage.update_base_product(product_id, {"listing_title": title}, mark_edited=True)
+            except ValueError as exc:
+                raise ApiRequestError(str(exc), 422) from exc
+            if not updated:
+                self._json({"error": "Base product not found"}, status=404)
+                return
+            keyword_workbench.record_generation({
+                "source": "apply", "product_id": product_id,
+                "main_sku": str(updated.get("main_sku") or updated.get("group_id") or ""),
+                "applied_title": title,
+            })
+            self._json({"listing_title": updated.get("listing_title") or ""})
+            return
+
+        if path == "/api/title-workbench/preview":
+            self._json(self._title_workbench_preview(payload))
             return
 
         if path == "/api/uploads/size-chart":
@@ -4211,6 +4547,49 @@ class ApiHandler(BaseHTTPRequestHandler):
                 "range_probe": collect_result.get("range_probe") or {},
                 "catalog_source": collect_result.get("catalog_source") or "",
                 "page_url": collect_result.get("page_url") or "",
+            })
+            return
+
+        if path == "/api/store-promotions/collect":
+            # 定向重采：只刷新该店铺的促销活动目录（页面导入没读到活动列表时的补采入口）。
+            store_id = str(payload.get("store_id") or "").strip()
+            if not store_id:
+                raise ApiRequestError("store_id is required", 400)
+            account_id = str(payload.get("account_id") or "").strip() or None
+            cdp_url = str(payload.get("cdp_url") or "").strip()
+            if not cdp_url:
+                cdp_url = str(
+                    storage.resolve_mabang_account_runtime(account_id).get("cdp_url")
+                    or "http://127.0.0.1:9223"
+                )
+            collect_result = run_store_promotion_collect(store_id, cdp_url=cdp_url)
+            if not collect_result.get("ok"):
+                message = str(collect_result.get("error") or "读取马帮店铺活动失败")
+                storage.record_store_promotion_collect_failure(store_id, message)
+                raise ApiRequestError(message, 422)
+            captured_store_id = str((collect_result.get("store") or {}).get("id") or "").strip()
+            captured_store_name = str((collect_result.get("store") or {}).get("name") or "").strip()
+            if captured_store_id and captured_store_id != store_id:
+                message = (
+                    f"当前马帮页面是店铺「{captured_store_name or captured_store_id}」，"
+                    f"不是要采集的店铺；活动目录未写入"
+                )
+                storage.record_store_promotion_collect_failure(store_id, message)
+                raise ApiRequestError(message, 422)
+            raw_items = collect_result.get("items")
+            if not isinstance(raw_items, list):
+                message = "活动采集结果里没有活动列表，未写入（原目录保持不变）"
+                storage.record_store_promotion_collect_failure(store_id, message)
+                raise ApiRequestError(message, 422)
+            items = storage.replace_store_promotion_catalog(store_id, raw_items, catalog_loaded=True)
+            self._json({
+                "ok": True,
+                "store_id": store_id,
+                "store": collect_result.get("store") or {},
+                "count": len(items),
+                "items": items,
+                "status": storage.get_store_promotion_catalog_status(store_id),
+                "diagnostics": collect_result.get("diagnostics") or {},
             })
             return
 
@@ -4787,6 +5166,18 @@ class ApiHandler(BaseHTTPRequestHandler):
             self._json(word)
             return
 
+        if path.startswith("/api/keyword-batches/"):
+            batch_id = path.rsplit("/", 1)[-1]
+            try:
+                batch = keyword_workbench.update_batch(batch_id, payload)
+            except ValueError as exc:
+                raise ApiRequestError(str(exc), 422) from exc
+            if not batch:
+                self._json({"error": "Keyword batch not found"}, status=404)
+                return
+            self._json(batch)
+            return
+
         self._json({"error": f"Unknown route: {path}"}, status=404)
 
     def _handle_delete(self) -> None:
@@ -4964,6 +5355,123 @@ class ApiHandler(BaseHTTPRequestHandler):
             "filename": result["filename"],
             "xlsx_path": Path(result["xlsx_path"]),
             "validation": result.get("validation") or {},
+        }
+
+    def _title_workbench_preview(self, payload: dict[str, Any]) -> dict[str, Any]:
+        """生成预览：推荐 + 两个备选标题，附选词依据与校验结果；不改写商品
+        （采用标题走 /api/title-workbench/apply，由操作员点击确认）。"""
+        from services.api import vision_listing
+
+        product_id = str(payload.get("product_id") or "").strip()
+        product = storage.get_item("base_products", product_id)
+        if not product:
+            raise ApiRequestError("Base product not found", 404)
+        connection = storage.get_default_ai_model_connection_private()
+        if not connection:
+            raise ApiRequestError("未配置默认 AI 模型连接", 422)
+        overrides = {
+            key: payload[key]
+            for key in ("skill_id", "batch_id", "category", "audience")
+            if str(payload.get(key) or "").strip()
+        }
+        # 预览面板的下拉默认是「自动匹配规则」，一旦操作员手动选了一条规则，
+        # 就是「我要试这条规则」：商品范围是系统推断出来的（导入瞬间常常还是
+        # unknown），不能反过来把操作员的选择顶回去。与「重新识别标题」按钮
+        # 一致按 force_skill 处理，范围不匹配时按规则自身范围选词并给出提示。
+        # 但操作员若已手动确认品类/人群（category/audience），那份确认是权威的，
+        # 仍然要求规则与之匹配。
+        if overrides.get("skill_id") and not overrides.get("category") and not overrides.get("audience"):
+            overrides["force_skill"] = True
+        try:
+            context = title_selection.build_context(
+                product,
+                storage.list_title_skills(),
+                keyword_workbench.list_batches(),
+                keyword_workbench.rows_for_batch,
+                overrides=overrides,
+            )
+        except ValueError as exc:
+            raise ApiRequestError(str(exc), 422) from exc
+        try:
+            gateway = ModelGateway(
+                crypto=CredentialCrypto(settings.get_ai_credentials_master_key()),
+                adapters=_model_adapters(),
+            )
+        except Exception as exc:  # noqa: BLE001
+            raise ApiRequestError(f"AI 生成过程异常: {exc}", 422) from exc
+        # 「自动匹配规则」且商品人群未确认时，先让 AI 看款式再选规则；预览不改写商品，
+        # 识别结果只用于这一次取规则（采用标题后的人群由导入/重识别路径写回）。
+        preview_assets = storage.assets_for_base_product(product)
+        context, _detected_audience, _audience_error = _apply_ai_audience_to_title_context(
+            context, product, preview_assets, gateway, connection, overrides
+        )
+        result = vision_listing.generate_listing_from_images(
+            gateway=gateway,
+            connection=connection,
+            base_product=product,
+            assets=preview_assets,
+            want_title=True,
+            want_description=False,
+            fill_attributes_into_description=False,
+            title_skill=context["skill"],
+            title_context=context,
+            candidate_count=3,
+        )
+        titles = [dict(item) for item in (getattr(result, "title_candidates", None) or [])]
+        recommended_index = next(
+            (index for index, item in enumerate(titles) if item.get("status") != "BLOCKED"), 0
+        )
+        candidates = [
+            {
+                key: row.get(key)
+                for key in (
+                    "word", "category", "audience", "search_volume",
+                    "avg_30d_search_volume", "growth_rate_percent", "data_date", "evidence_level",
+                )
+            }
+            for row in context.get("candidates", [])
+        ]
+        batch = context.get("batch")
+        public_context = {
+            "scope": context.get("scope"),
+            "batch": (
+                {key: batch.get(key) for key in ("id", "name", "data_date", "source", "source_type", "row_count")}
+                if batch else None
+            ),
+            "stale": context.get("stale"),
+            "age_days": context.get("age_days"),
+            "warnings": context.get("warnings"),
+            "candidates": candidates,
+            "rejected": [
+                {"word": row.get("word"), "reason": row.get("reason")}
+                for row in context.get("rejected", [])
+            ][:50],
+        }
+        skill = context["skill"]
+        skill_public = _title_skill_public(skill)
+        record = keyword_workbench.record_generation({
+            "source": "preview",
+            "product_id": product_id,
+            "main_sku": str(product.get("main_sku") or product.get("group_id") or ""),
+            "skill": dict(skill_public),
+            "batch": public_context["batch"],
+            "scope": public_context["scope"],
+            "stale": public_context["stale"],
+            "age_days": public_context["age_days"],
+            "warnings": public_context["warnings"],
+            "candidate_words": [row.get("word") for row in candidates],
+            "titles": copy.deepcopy(titles),
+            "applied_title": "",
+            "error": str(result.error or ""),
+        })
+        return {
+            "id": record["id"],
+            "product_id": product_id,
+            "skill": skill_public,
+            "context": public_context,
+            "recommended_index": recommended_index,
+            "titles": titles,
+            "error": str(result.error or ""),
         }
 
     def _send_file(self, file_path: Path, download_name: str | None = None) -> None:
@@ -5941,6 +6449,13 @@ def main() -> None:
                 _start_workers()
             except RuntimeError as exc:
                 print(f"Automation worker did not auto-start: {exc}")
+    # 首次启动播种「Shopee 标题工作台」：2026-09-20 历史快照 + 旧版热词迁入
+    # 「历史手动词库」。initialize 幂等（keyword_workbench_version 门），迁移前
+    # 会先把整库备份到 data/backups/；失败只打日志，绝不阻断 API 启动。
+    try:
+        keyword_workbench.initialize()
+    except Exception as exc:  # noqa: BLE001
+        print(f"Keyword workbench init failed: {exc}")
     stop_event = threading.Event()
     _start_worker_watchdog(stop_event)
     _start_storage_cleanup_scheduler(stop_event)

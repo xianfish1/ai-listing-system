@@ -148,9 +148,16 @@ def test_automation_job_creation_reads_only_the_jobs_collection(monkeypatch: pyt
     monkeypatch.setattr(storage, "_read_split_key", recording)
     storage.create_automation_jobs_from_listing_copies([])
 
-    assert reads == ["automation_jobs", "automation_job_snapshots"], (
-        f"建任务只该读任务集合与快照集合（不碰 13MB 类目），实际读了 {reads}"
-    )
+    # 2026-11-03 副本/SKU/价格/素材拆出主库后，建任务的就绪度与快照要从这几个
+    # 拆分文件读；13MB 类目和整份主库仍然一个字节都不碰。
+    assert set(reads) == {
+        "automation_jobs",
+        "automation_job_snapshots",
+        "store_listing_copies",
+        "listing_skus",
+        "listing_prices",
+        "assets",
+    }, f"建任务只该读任务/快照/副本/SKU/价格/素材集合，实际读了 {reads}"
 
 def test_job_creation_keeps_the_main_store_byte_identical(tmp_path: Path) -> None:
     """main_readonly 的契约：建任务一个字节都不改主库（否则那次改动会被吞掉）。"""
@@ -234,7 +241,8 @@ def test_remaining_write_paths_load_only_what_they_need(monkeypatch: pytest.Monk
 
     reads = record_reads()
     filled = storage.fill_listing_copy_missing_attributes(["c1"])
-    assert reads == [], f"补全属性读了 {reads}"
+    # 副本集合拆出主库后，这条路径显式点名加载它（模板仍在主库）。
+    assert set(reads) == {"store_listing_copies"}, f"补全属性读了 {reads}"
     assert filled["filled_count"] == 1, filled
     assert storage.get_item("store_listing_copies", "c1")["attribute_values"]["101639"] == "M"
 
@@ -296,12 +304,13 @@ def test_settings_and_media_writes_stay_on_the_main_store(monkeypatch: pytest.Mo
     reads = record_reads()
     saved = storage.add_base_product_product_image("bp1", payload)
     assert saved and saved["asset"]["file_name"], saved
-    assert reads == [], f"上传商品图读了 {reads}"
+    # base_products / assets 都是拆分集合：上传只点这两个，不碰主库。
+    assert set(reads) == {"base_products", "assets"}, f"上传商品图读了 {reads}"
 
     reads = record_reads()
     rolled = storage.rollback_base_product("bp1")
     assert rolled and rolled["id"] == "bp1"
-    assert reads == [], f"回滚读了 {reads}"
+    assert set(reads) == {"base_products", "store_listing_copies"}, f"回滚读了 {reads}"
 
 
 def test_save_paths_load_only_the_collections_they_touch(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -333,6 +342,10 @@ def test_save_paths_load_only_the_collections_they_touch(monkeypatch: pytest.Mon
             "automation_job_snapshots": {"j1": {"listing_copy": {"id": "c1"}}},
             "marketplace_categories": [{"id": "cat-1"}],
             "listing_copy_revisions": [],
+            # 拆分集合的空文件也要在 seed 时落出来，否则第一次保存会先触发整库迁移。
+            "assets": [],
+            "title_skills": [],
+            "title_generation_history": [],
         }
     )
     storage.load_store()
@@ -350,19 +363,39 @@ def test_save_paths_load_only_the_collections_they_touch(monkeypatch: pytest.Mon
 
     reads = record_reads()
     storage.update_base_product("bp1", {"product_name_cn": "新名"}, mark_edited=True)
-    assert set(reads) == {"automation_jobs"}, f"保存基础商品读了 {reads}"
+    # 2026-11-03 快路径：base_products/title_skills 都是拆分集合，主库 store.json
+    # 一个字节都不读、不写（实测生产库副本 1.3~2.2s → ~40ms）。
+    assert set(reads) == {"base_products", "title_skills"}, f"保存基础商品读了 {reads}"
 
     reads = record_reads()
     storage.update_store_template("t1", {"template_name": "T1", "normal_price": 11})
-    assert set(reads) == {"automation_jobs"}, f"保存模板读了 {reads}"
+    assert set(reads) == {
+        "automation_jobs",
+        "store_listing_copies",
+        "listing_skus",
+        "listing_prices",
+        "base_products",
+    }, f"保存模板读了 {reads}"
 
     reads = record_reads()
     storage.update_store_listing_copy("c1", {"title": "新标题", "normal_price": 11})
-    assert set(reads) == {"listing_copy_revisions"}, f"保存副本读了 {reads}"
+    assert set(reads) == {
+        "listing_copy_revisions",
+        "store_listing_copies",
+        "listing_skus",
+        "listing_prices",
+        "base_products",
+    }, f"保存副本读了 {reads}"
 
     reads = record_reads()
     storage.delete_store_listing_copy("c1")
-    assert set(reads) <= {"automation_jobs", "automation_job_snapshots"}, f"删副本读了 {reads}"
+    assert set(reads) <= {
+        "automation_jobs",
+        "automation_job_snapshots",
+        "store_listing_copies",
+        "listing_skus",
+        "listing_prices",
+    }, f"删副本读了 {reads}"
 
 
 

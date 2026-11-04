@@ -136,3 +136,78 @@ def test_size_order_rank_is_site_only_and_appends_unknown() -> None:
         ["100cm(13-18kg)", "90cm(10-12kg)", "80cm"],
     )
     assert rank == {"90cm(10-12kg)": 0, "100cm(13-18kg)": 1, "80cm": 2}
+
+
+def test_site_copy_ignores_ai_recognized_letter_sizes_when_template_has_cm_sizes(tmp_path: Path) -> None:
+    """现场 2026-10-26：童装模板尺码是 90cm…150cm，商品被 AI 识别成字母码
+    XXS–XXXL（未勾选），复制后 SKU 却是字母码。本土必须按模板尺码生成 SKU，
+    识别尺码只在模板没配尺码时兜底。"""
+    template_sizes = [
+        "100cm(2-3Y)", "110cm(3-4Y)", "120cm(5-6Y)",
+        "130cm(7-8Y)", "140cm(8-9Y)", "150cm(10-12Y)", "90cm(1-2Y)",
+    ]
+    folder = tmp_path / "HN0083 Kids Tee"
+    folder.mkdir()
+    for name in ["main.jpg", "White.jpg", "Black.jpg"]:
+        (folder / name).write_bytes(b"image")
+    base = storage.create_base_product_from_folder({"root_path": str(folder), "category": "POD Kids T-Shirt"})
+    base = storage.update_base_product(
+        base["id"],
+        {"recognized_sizes": ["XXS", "XS", "S", "M", "L", "XL", "XXL", "XXXL"]},
+    )
+    template = storage.create_store_template(
+        {
+            "store_name": "Oct.3H",
+            "platform": "shopee",
+            "country": "PH",
+            "currency": "PHP",
+            "template_name": "Oct.3H - Kids Tee",
+            "product_line": "POD Kids T-Shirt",
+            "marketplace_category_path": "Baby & Kids Fashion > Boy Clothes > Tops > T-shirts",
+            "mabang_store_id": "store-A",
+            "mabang_category_id": "cat-456",
+            "mabang_discount_id": "discount-789",
+            "normal_price": 199,
+            "sale_price": 139,
+            "sizes": template_sizes,
+            "description": "Kids tee.",
+            **_transaction_defaults(),
+        }
+    )
+    result = storage.copy_base_product_to_store_templates(base["id"], [template["id"]])
+    copy = storage.get_item("store_listing_copies", result["created"][0]["id"])
+
+    assert storage._listing_sizes(storage.get_item("base_products", base["id"]), template) == template_sizes
+    sizes_of_white = [sku["size"] for sku in storage.list_listing_skus(copy["id"]) if sku.get("color_code") == "White"]
+    assert sizes_of_white == template_sizes
+    # 执行器的尺码轴同源：从 SKU 行来，也必须是模板 cm 码
+    browser_inputs = storage._build_browser_inputs(
+        copy,
+        storage.list_listing_skus(copy["id"]),
+        storage.list_listing_prices(copy["id"]),
+        storage.assets_for_group(copy.get("group_id") or ""),
+    )
+    assert browser_inputs["variation"]["sizes"] == template_sizes
+
+
+def test_rebuild_skus_flag_realigns_existing_copy_to_current_template_sizes(tmp_path: Path) -> None:
+    """存量副本修复入口：模板后来改了尺码，已有副本的 SKU 行不会自动重建
+    （避免冲掉操作员改过的价格），用 update_store_listing_copy(rebuild_skus=True)
+    按当前模板重排整张网格——2026-10-26 那两个 XXS–XXXL 的副本就是这么修的。"""
+    template, copy, _base = _make_site_copy(
+        tmp_path, template_sizes=["S", "M"], selected_sizes=["S", "M"]
+    )
+
+    def white_sizes() -> list[str]:
+        return [row["size"] for row in storage.list_listing_skus(copy["id"]) if row.get("color_code") == "White"]
+
+    assert white_sizes() == ["S", "M"]
+
+    new_sizes = ["90cm(1-2Y)", "100cm(2-3Y)"]
+    storage.update_store_template(template["id"], {"sizes": new_sizes})
+    assert white_sizes() == ["S", "M"], "模板改尺码不应隐式重建副本行"
+
+    storage.update_store_listing_copy(copy["id"], {"rebuild_skus": True})
+    assert white_sizes() == new_sizes
+    prices = storage.list_listing_prices(copy["id"])
+    assert len(prices) == len(storage.list_listing_skus(copy["id"]))

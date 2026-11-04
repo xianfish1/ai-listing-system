@@ -41,8 +41,10 @@ def test_cleanup_settings_have_safe_defaults_and_validate_retention() -> None:
         "screenshot_retention_days": 30,
         "export_retention_days": 90,
         "log_retention_days": 30,
-        # 商品素材：保留 30 天；上架完成满 3 天后压成长边 1000 / 质量 88 的 JPEG。
+        # 商品素材：默认保留 30 天；上架完成满 3 天后压成长边 1000 / 质量 88 的 JPEG。
+        # assets_cleanup_enabled=False = 永不删除商品素材（压缩仍走 compact_*）。
         "assets_retention_days": 30,
+        "assets_cleanup_enabled": True,
         "compact_enabled": True,
         "compact_delay_days": 3,
         "compact_max_edge": 1000,
@@ -134,6 +136,52 @@ def test_retention_cleanup_skips_current_files_and_active_jobs(cleanup_roots: di
     assert not stale_tmp.exists() and not stale_job.exists() and not stale_session.parent.exists()
     assert current_tmp.exists() and active_job.exists() and completed_upload.exists()
     assert result["deleted_files"] >= 3
+
+
+def test_assets_cleanup_switch_off_never_deletes_product_assets(cleanup_roots: dict[str, Path]) -> None:
+    """关闭「删除商品素材」后，即使素材目录早已超期也一个文件都不能删。"""
+
+    storage_dir = cleanup_roots["storage"]
+    root = storage_dir / "uploads" / "base-products" / "session-1" / "HN0001"
+    image = _write(root / "A红色.png", age_days=120)
+    store = {
+        "base_products": [
+            {
+                "id": "base-1",
+                "group_id": "HN0001",
+                "status": "completed",
+                "completed_at": "2026-01-01T00:00:00+00:00",
+                "asset_root": str(root),
+                "main_image": "A红色.png",
+            }
+        ],
+        "store_listing_copies": [{"id": "copy-1", "base_product_id": "base-1", "status": "completed"}],
+        "automation_jobs": [],
+        "assets": [],
+    }
+    config = dict(default_configuration()["storage_cleanup"])
+    config["assets_cleanup_enabled"] = False
+
+    result = disk_cleanup.cleanup_categories(
+        ["product_assets", "product_assets_legacy"],
+        config,
+        active_job_ids=set(),
+        cdp_available=lambda: False,
+        store=store,
+    )
+
+    assert image.is_file(), "关闭删除后素材文件必须原样保留"
+    assert result["deleted_files"] == 0
+    assert result["categories"]["product_assets"]["disabled"] is True
+
+    usage = disk_cleanup.scan_usage(config, active_job_ids=set(), store=store)
+    product_assets = usage["categories"]["product_assets"]
+    assert product_assets["file_count"] >= 1, "占用仍然要统计"
+    assert product_assets["reclaimable_file_count"] == 0, "关闭删除后不能再给可清理候选"
+    assert "删除已关闭" in product_assets["protected_note"]
+
+    assert disk_cleanup.assets_cleanup_enabled({"assets_cleanup_enabled": True}) is True
+    assert disk_cleanup.assets_cleanup_enabled({}) is True
 
 
 def test_cleanup_rejects_unknown_categories_and_running_browser(cleanup_roots: dict[str, Path]) -> None:

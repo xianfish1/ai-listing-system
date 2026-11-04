@@ -50,6 +50,12 @@ const TEXT = Object.freeze({
   savedSuccess: '\u520a\u767b\u4fe1\u606f\u4fdd\u5b58\u6210\u529f',
   closeThisPage: '\u5173\u95ed\u6b64\u9875\u9762',
   listingDraftBox: '\u520a\u767b\u8349\u7a3f\u7bb1',
+  editDescriptionImages: '\u7f16\u8f91\u56fe\u7247',
+  selectAllImages: '\u5168\u9009',
+  resizeSection: '\u4fee\u6539\u5c3a\u5bf8',
+  proportionalResize: '\u7b49\u6bd4\u4f8b\u8c03\u6574',
+  smallEdgeResize: '\u56fe\u7247\u5c0f\u8fb9',
+  changeImageSize: '\u66f4\u6539',
 });
 
 const PUBLISH_TEXTS = [TEXT.saveAndList, TEXT.list, TEXT.publish, TEXT.submitReview];
@@ -96,6 +102,7 @@ const RETRYABLE_ERRORS = new Set([
   'pre_save_validation_failed',
   'playwright_timeout',
   'product_image_upload_did_not_land',
+  'product_image_slots_already_filled',
   'cnsc_site_picker_not_ready',
 ]);
 
@@ -3272,23 +3279,27 @@ async function selectSizeChartTemplate(frame, sizeChart, options = {}) {
   }
 }
 
-// Count the product-image cards that are currently rendered in the 产品图 section.
-// The Mabang form uses two upload widgets (product images + size chart), so we
-// scope the counter to the section that owns the first `<input multiple>`.
+// 图片满 9 张（Shopee 上限）后，马帮会把整个 <input type="file" multiple> 从 DOM 里
+// 移除。计数不能以 input 为锚点：否则最后一张刚落地 input 就消失，计数返回 -1，
+// 循环判定"没落地"干等满 90s —— 而且是否抢在移除前读到 9 全看时序，表现为时灵时不灵
+// （2026-10-27 任务 9da6b384：第 1 次 attempt 在 index 8 / expected_after 9 卡死，
+//  第 2 次 attempt 抢到 9 就过了；实页复现见 .scratch/probe_nine_clean.cjs）。
 async function countProductImageCards(frame) {
   return frame.evaluate(() => {
     const input = document.querySelector('input[type="file"][multiple]');
-    if (!input) return -1;
-    const section = input.closest('.el-form-item, .form-item, .panel, section') || document;
-    // 只数上传列表里已经出现的卡片：Element UI 用 .el-upload-list__item，马帮
-    // 自定义上传器的卡片也落在同一上传列表容器里（li）。上传中的占位卡片同样在
-    // DOM 里，所以它是 productPictureList 当前位置的稳定代理。
-    const items = section.querySelectorAll(
-      '.el-upload-list__item, [class*="upload-list"] li',
-    );
-    // 空列表就是 0 张。不再退到整页 li（会把下拉/类目树/站点选择等全页 li 也算进来，
-    // 得到 160 之类的噪声值，让 beforeCount 失真并误报 product_image_upload_did_not_land）。
-    return items.length;
+    // 上传控件自己的分组：卡片和 input 同一个 .picture-group，范围最小、最稳。
+    const group = input ? input.closest('.picture-group') : null;
+    if (group) return group.querySelectorAll('.images-item').length;
+    // input 已经不在了（图片满 9 张）或不在分组里：页面只有一个产品图分组时按它数。
+    const groups = document.querySelectorAll('.picture-group');
+    if (groups.length === 1) return groups[0].querySelectorAll('.images-item').length;
+    // 结构微调时仍只数图片卡片类，绝不数 <li>（整页 li 曾产生 160 噪声）。
+    if (input) {
+      const holder = input.closest('.picture-box') || input.closest('.upload-img');
+      if (holder) return holder.querySelectorAll('.images-item').length;
+      return 0;
+    }
+    return -1;
   });
 }
 
@@ -3303,11 +3314,40 @@ async function uploadProductImages(frame, task) {
     .map((path) => cleanFilePath(path))
     .filter(Boolean);
   if (!paths.length) throw new BlockedError('product_images_missing');
+
+  // 表单里已经带了图片（上一次运行卡住/被超时杀掉后留下的详情页被复用）时，
+  // 继续按 0 张起算会把整套图再传一遍：页面上出现两份、顺序也乱。
+  // 这里直接判成可重试错误，让 attempt 重开一张干净的「新增刊登」再传。
+  // 必须排在 input 唯一性检查之前：图片满 9 张时马帮会把 input 整个移除，
+  // 先查 input 会把这种残留页误报成不可重试的 product_image_input_not_unique。
+  const existingCount = await countProductImageCards(frame).catch(() => 0);
+  if (existingCount > 0) {
+    throw new BlockedError('product_image_slots_already_filled', { count: existingCount });
+  }
+
   const productInputs = frame.locator('input[type="file"][multiple]');
   if ((await productInputs.count()) !== 1) {
     throw new BlockedError('product_image_input_not_unique', { count: await productInputs.count() });
   }
   const productInput = productInputs.first();
+
+  // 图片满 9 张后 input 会被马帮移除，循环里不能再靠 input 定位卡片：
+  // 上传前先抓住 .picture-group 句柄，句柄失效时再退回按页面分组计数。
+  let cardGroup = null;
+  try {
+    cardGroup = await productInput.evaluateHandle((el) => el.closest('.picture-group'));
+  } catch {
+    cardGroup = null;
+  }
+  const countCards = async () => {
+    if (cardGroup) {
+      const value = await cardGroup
+        .evaluate((el) => (el && el.isConnected ? el.querySelectorAll('.images-item').length : -1))
+        .catch(() => -1);
+      if (value >= 0) return value;
+    }
+    return countProductImageCards(frame);
+  };
 
   // Upload files ONE AT A TIME and wait for each to land in the picture list
   // before feeding the next. A single setInputFiles([...paths]) triggers the
@@ -3320,14 +3360,14 @@ async function uploadProductImages(frame, task) {
     if (!fs.existsSync(path)) {
       throw new BlockedError('upload_file_missing', { file: require('path').basename(path) });
     }
-    const beforeCount = Math.max(0, await countProductImageCards(frame).catch(() => 0));
+    const beforeCount = Math.max(0, await countCards().catch(() => 0));
     await productInput.setInputFiles(path);
     // Wait for this file's card to appear before starting the next upload. Give
     // each image up to 90s — large images (1.9MB PNG) on flaky NAS have been observed here.
     const deadline = Date.now() + 90000;
     let landed = false;
     while (Date.now() < deadline) {
-      const now = await countProductImageCards(frame).catch(() => beforeCount);
+      const now = await countCards().catch(() => beforeCount);
       if (now > beforeCount) { landed = true; break; }
       await sleep(150);
     }
@@ -3440,33 +3480,52 @@ function descriptionImageKey(url) {
   return segments.length ? segments[segments.length - 1].toLowerCase() : '';
 }
 
-// 产品图区（拥有 <input multiple> 的那块）里已上传图片的地址，按页面顺序取回。
+// 产品图区里已上传图片的地址，按页面顺序取回。
+//
+// 定位产品图区有两条路，必须都留着：
+//  - 不满 9 张时上传 input（<input type=file multiple>）还在，用它的表单项；
+//  - **满 9 张后马帮会把 input 整个移除**（现场 2026-10-27，任务 6f4ff5af/78fce435），
+//    这时只能按图片卡片找：有 .images-item 的 .picture-group 就是产品图区
+//    （主图区那块 .picture-group 里没有卡片）。原先只认 input，满 9 张时恒返回 []，
+//    插图计划里只剩尺码表，函数随即 already:true 提前返回 —— 产品图一张都不插，
+//    尺码表也不再校验位置。
 async function collectProductImageUrls(frame, limit = DESCRIPTION_MEDIA_MAX_IMAGES) {
   return frame.evaluate((cap) => {
     const input = document.querySelector('input[type="file"][multiple]');
     const section = input ? input.closest('.el-form-item, .form-item, .panel, section') : null;
-    if (!section) return [];
+    const cardGroups = typeof document.querySelectorAll === 'function'
+      ? [...document.querySelectorAll('.picture-group')]
+        .map((group) => ({ group, cards: group.querySelectorAll('.images-item').length }))
+        .filter((entry) => entry.cards > 0)
+        .sort((left, right) => right.cards - left.cards)
+      : [];
+    const roots = [];
+    if (section) roots.push(section);
+    if (cardGroups.length) roots.push(cardGroups[0].group);
+    if (!roots.length) return [];
     const seen = new Set();
     const urls = [];
-    for (const image of section.querySelectorAll('img')) {
-      // 读原始属性而不是 .src：src 缺失/为空时浏览器会把 .src 解析成当前页面地址。
-      // 现场 2026-09-23：产品图区里 <div class="img-content"><img src=""></div> 这种占位图
-      // 让 .src === https://publish.mabangerp.com/publish-ui/ 混进插图计划，它既插不进描述、
-      // 也不在「引用产品图」弹窗里，校验时永远缺一张 → 整批插图被判「没插全」后回滚。
-      const src = String(image.getAttribute('src') || '').trim();
-      if (!/^https?:/i.test(src) || /\/static\//.test(src) || seen.has(src)) continue;
-      // 末尾没有文件名（页面地址这类）的地址在「引用产品图」弹窗里根本列不出来，
-      // 留着只会让整批插图被判成「有图没插上」。
-      let pathname = src;
-      try {
-        pathname = new URL(src).pathname;
-      } catch (_error) {
-        pathname = String(src).split('#')[0].split('?')[0];
+    for (const root of roots) {
+      for (const image of root.querySelectorAll('img')) {
+        // 读原始属性而不是 .src：src 缺失/为空时浏览器会把 .src 解析成当前页面地址。
+        // 现场 2026-09-23：产品图区里 <div class="img-content"><img src=""></div> 这种占位图
+        // 让 .src === https://publish.mabangerp.com/publish-ui/ 混进插图计划，它既插不进描述、
+        // 也不在「引用产品图」弹窗里，校验时永远缺一张 → 整批插图被判「没插全」后回滚。
+        const src = String(image.getAttribute('src') || '').trim();
+        if (!/^https?:/i.test(src) || /\/static\//.test(src) || seen.has(src)) continue;
+        // 末尾没有文件名（页面地址这类）的地址在「引用产品图」弹窗里根本列不出来，
+        // 留着只会让整批插图被判成「有图没插上」。
+        let pathname = src;
+        try {
+          pathname = new URL(src).pathname;
+        } catch (_error) {
+          pathname = String(src).split('#')[0].split('?')[0];
+        }
+        if (!String(pathname).split('/').filter(Boolean).length) continue;
+        seen.add(src);
+        urls.push(src);
+        if (urls.length >= cap) return urls;
       }
-      if (!String(pathname).split('/').filter(Boolean).length) continue;
-      seen.add(src);
-      urls.push(src);
-      if (urls.length >= cap) break;
     }
     return urls;
   }, limit);
@@ -3636,7 +3695,14 @@ async function descriptionEditorContext(frame) {
     editor = item.locator('.wangEditor-txt[contenteditable="true"]').first();
   }
   if (!(await editor.count())) throw new BlockedError('description_editor_not_found');
-  const editorId = cleanText(await editor.getAttribute('id'));
+  // id 是 Vue 绑定上去的：编辑器刚挂上时偶尔还读不到（现场 2026-10-27 19:57 有一次
+  // description_editor_id_missing，同批任务重试就正常）。给它两秒把 id 写上来。
+  let editorId = cleanText(await editor.getAttribute('id').catch(() => ''));
+  const idDeadline = Date.now() + 2000;
+  while (!editorId && Date.now() < idDeadline) {
+    await sleep(200);
+    editorId = cleanText(await editor.getAttribute('id').catch(() => ''));
+  }
   if (!editorId) throw new BlockedError('description_editor_id_missing');
   return { item, editor, editorId };
 }
@@ -3754,6 +3820,61 @@ async function focusDescriptionEnd(frame, editor, editorId) {
     await sleep(150);
   }
   return '';
+}
+
+// 描述里那张尺码图后面还有正文 → 它不在末尾（历史坏数据：插到了正文最前面）。
+function descriptionImageInsideBody(html, url) {
+  const text = String(html || '');
+  const index = descriptionImageIndexOf(text, url);
+  if (index < 0) return false;
+  const tagEnd = text.indexOf('>', index);
+  return tagEnd >= 0 && !isDescriptionMediaFiller(text.slice(tagEnd + 1));
+}
+
+// 本地尺码图的文件名（去掉扩展名），用来认描述里那张图是不是同一张。
+function descriptionFileStem(filePath) {
+  const name = String(filePath || '').split(/[\\/]/).pop() || '';
+  return name.replace(/\.[^.]+$/, '').trim().toLowerCase();
+}
+
+// 描述里是不是已经有这张尺码图。wangEditor 的「上传图片」会把本地文件名写进 img 的
+// alt（现场 2026-10-27：alt="511692cc-70fd-4b85-9054-318c9168a7cf"），按它能认出来；
+// 每次上传马帮都会给新地址，只按 src 认不出来。按地址插进来的那张由
+// markDescriptionSizeChart 补上同样的标记，所以两条路都认得出。有了它，
+// --resume-from-stage 复用页面时不会把同一张尺码表再传一遍（描述里出现两张尺码表）。
+async function findInsertedDescriptionSizeChart(frame, editorId, filePath) {
+  const stem = descriptionFileStem(filePath);
+  if (!stem) return '';
+  return frame.evaluate(({ id, needle }) => {
+    const editor = document.getElementById(id);
+    if (!editor) return '';
+    for (const image of editor.querySelectorAll('img')) {
+      const marker = String(image.getAttribute('data-mabang-size-chart') || '').toLowerCase();
+      const alt = String(image.getAttribute('alt') || '').toLowerCase();
+      const src = String(image.getAttribute('src') || '');
+      if (marker === needle || alt.includes(needle) || src.toLowerCase().includes(needle)) return src;
+    }
+    return '';
+  }, { id: editorId, needle: stem }).catch(() => '');
+}
+
+// 给描述里这张尺码图打标记：alt 用文件名（子上传时 wangEditor 自己写的就是它），
+// 另加 data-mabang-size-chart。描述正文就是 wangEditor 的 DOM，改属性能跟着保存；
+// 不这样做的话，按地址插入的图没有 alt，复用页面时会认不出来又传一张。
+async function markDescriptionSizeChart(frame, editorId, url, stem) {
+  if (!url) return false;
+  return frame.evaluate(({ id, target, marker }) => {
+    const editor = document.getElementById(id);
+    if (!editor) return false;
+    let marked = false;
+    for (const image of editor.querySelectorAll('img')) {
+      if (String(image.getAttribute('src') || '') !== target) continue;
+      image.setAttribute('data-mabang-size-chart', marker || '1');
+      if (!image.getAttribute('alt') && marker) image.setAttribute('alt', marker);
+      marked = true;
+    }
+    return marked;
+  }, { id: editorId, target: url, marker: stem }).catch(() => false);
 }
 
 async function readDescriptionImageUrls(frame, editorId) {
@@ -3876,7 +3997,11 @@ async function insertDescriptionProductImages(frame, editorId, wantedUrls) {
     const image = node.querySelector('img.img') || node.querySelector('img');
     return image ? String(image.src || '') : '';
   }));
-  const indexes = listed.reduce((picked, url, index) => (wanted.has(url) ? [...picked, index] : picked), []);
+  // 按地址勾选，整串对不上时再按文件名（CDN 主机名/参数不同也算同一张）。
+  const wantedKeys = new Set([...wanted].map(descriptionImageKey).filter(Boolean));
+  const indexes = listed.reduce((picked, url, index) => (
+    wanted.has(url) || wantedKeys.has(descriptionImageKey(url)) ? [...picked, index] : picked
+  ), []);
   if (!indexes.length) {
     await closeReferenceProductImageDialog(dialog);
     throw new BlockedError('description_product_images_not_listed', { wanted: wanted.size, listed: listed.length });
@@ -3928,9 +4053,40 @@ async function appendDescriptionMediaOnce(frame, task) {
   let sizeChartMethod = '';
   if (wantsSizeChart && sizeChartSource.kind === 'file') {
     try {
-      sizeChartUrl = await uploadDescriptionSizeChartFile(frame, { item, editor, editorId }, sizeChartSource.path, existing.length);
-      sizeChartExisting = [...existing, sizeChartUrl].filter(Boolean);
-      sizeChartMethod = 'size_chart:upload';
+      // 复用页面（--resume-from-stage）时描述里可能已经有这张尺码图了：再传一次就会
+      // 出现两张。认出了就直接用它，不再上传。
+      const alreadyInserted = await findInsertedDescriptionSizeChart(frame, editorId, sizeChartSource.path);
+      if (alreadyInserted) {
+        sizeChartUrl = alreadyInserted;
+        sizeChartExisting = [...existing, alreadyInserted].filter(Boolean);
+        sizeChartMethod = 'size_chart:already_in_description';
+        const existingHtml = await readDescriptionHtml(frame, editorId);
+        if (descriptionImageInsideBody(existingHtml, alreadyInserted)) {
+          sizeChartMethod = 'size_chart:already_in_description-position-not-at-tail';
+          warnings.push('description_size_chart_position_not_at_tail');
+        }
+      } else {
+        sizeChartUrl = await uploadDescriptionSizeChartFile(frame, { item, editor, editorId }, sizeChartSource.path, existing.length);
+        // 「上传图片」这条路由 wangEditor 自己按内部保存的 range 落图，落点不受我们的
+        // Range 控制：现场 2026-10-27（任务 6f4ff5af / 78fce435）它把尺码表插到了正文
+        // 最前面。这里必须验位置——不在末尾就撤掉这张，交给下面按地址的批量插图重插
+        // （那条路有 ensureCaret 与末尾校验，能插回正文底部）。
+        const uploadedHtml = await readDescriptionHtml(frame, editorId);
+        if (descriptionMediaAppendedAtTail(uploadedHtml, [sizeChartUrl], existing)) {
+          sizeChartExisting = [...existing, sizeChartUrl].filter(Boolean);
+          sizeChartMethod = 'size_chart:upload';
+        } else {
+          const undone = await undoDescriptionInserts(frame, editor, editorId, existing.length, 1);
+          if (undone) {
+            sizeChartMethod = 'size_chart:upload-reinsert';
+          } else {
+            // 撤不回来就别再插第二张：留在原处，把位置问题作为警告交给运营。
+            sizeChartExisting = [...existing, sizeChartUrl].filter(Boolean);
+            sizeChartMethod = 'size_chart:upload-position-not-verified';
+            warnings.push('description_size_chart_position_not_at_tail');
+          }
+        }
+      }
     } catch (error) {
       // 本地尺码图没传上去不阻断：产品图照插，尺码图让运营人工补。
       warnings.push('description_size_chart_upload_failed');
@@ -3956,6 +4112,17 @@ async function appendDescriptionMediaOnce(frame, task) {
   if (wantsSizeChart && !sizeChartUrl) {
     warnings.push('description_size_chart_source_missing');
   }
+  // 任务里带着产品图，页面上却一张地址都没收集到：这是收集失败，不是「描述里已经有了」。
+  // 不报出来的话计划里只剩尺码表，插完尺码表就 already:true 假装成功（2026-10-27 现场）。
+  const declaredProductImages = [
+    ...((task.images || {}).product_image_paths || []),
+    ...((task.images || {}).product_image_form_paths || []),
+  ].filter(Boolean).length;
+  if (!productImageUrlCandidates.length && declaredProductImages) {
+    warnings.push('description_product_images_not_collected');
+  }
+  // 描述里已经有这张尺码图（上一次运行插过的）时补个标记，下次复用页面才认得出。
+  await markDescriptionSizeChart(frame, editorId, sizeChartUrl, descriptionFileStem(sizeChartSource.path));
   if (!pending.length && !warnings.length) {
     return {
       already: true,
@@ -4016,6 +4183,9 @@ async function appendDescriptionMediaOnce(frame, task) {
     });
   }
   const { caret, methods, round } = attempt;
+  // 这批插完给尺码图打标记：下次复用同一个详情页时（--resume-from-stage）认得出来，
+  // 不会再传一张。
+  await markDescriptionSizeChart(frame, editorId, sizeChartUrl, descriptionFileStem(sizeChartSource.path));
 
   return {
     size_chart: Boolean(sizeCharts),
@@ -4103,6 +4273,9 @@ async function appendDescriptionMedia(frame, task) {
   if (String((task.store || {}).listing_mode || '') === 'cnsc_global') return { skipped: true };
   try {
     const result = await appendDescriptionMediaOnce(frame, task);
+    // 步骤追踪只留 stage/ok，具体是哪条路（upload / upload-reinsert / already）与
+    // 收集到几张图看不出来；写进调试日志，下次「描述里没图」能直接读原因。
+    attrPickDebug({ phase: 'description_media', ...result });
     emit('stage', { stage: 'append_description_media', ok: true, ...result });
     return result;
   } catch (error) {
@@ -4111,9 +4284,228 @@ async function appendDescriptionMedia(frame, task) {
       code: cleanText(error && error.message) || 'description_media_failed',
       details: (error && error.details) || {},
     };
+    attrPickDebug({ phase: 'description_media', ...warning });
     emit('stage', { stage: 'append_description_media', ...warning });
     return warning;
   }
+}
+
+// ---------------------------------------------------------------------------
+// 描述图片宽度自动修复（马帮保存闸：商品描述里的图片宽度不能小于 700）
+//
+// 马帮保存时校验描述正文里每张图片的**实际像素宽度**（img.naturalWidth），
+// 小于 700 就拒绝保存，只在页面顶部弹一句「商品描述中的图片宽度不能小于700，
+// 请点击上方编辑图片按钮进行修改」，草稿不会落库。运营的标准处理是：
+// 点描述上方的「编辑图片」→ 全选 → 修改尺寸「变化至」1000px → 更改。
+//
+// 2026-10-27 真机验证（HN0110 的详情页）：9 张 620–679px 的图点「更改」后约 2 秒
+// 全部重编码成 1000px，描述正文的 img 地址原地换新（新的 COS 对象），弹窗保持打开，
+// 关掉即可。所以这条路可以在保存前做完，不需要再点一次保存（保存只点一次是硬约束）。
+// ---------------------------------------------------------------------------
+const DESCRIPTION_IMAGE_MIN_WIDTH = 700;
+const DESCRIPTION_IMAGE_TARGET_WIDTH = 1000;
+const DESCRIPTION_IMAGE_LOAD_TIMEOUT = 10000;
+const DESCRIPTION_IMAGE_FIX_TIMEOUT = 90000;
+
+// 描述正文里每张图的地址与实际像素尺寸。没加载完的图 width=0（loaded=false）。
+async function readDescriptionImageSizes(frame) {
+  return frame.evaluate((label) => {
+    const compact = (value) => String(value ?? '').replace(/\s+/g, '').trim();
+    const item = [...document.querySelectorAll('.el-form-item')].find((candidate) => (
+      compact(candidate.querySelector(':scope > .el-form-item__label')?.textContent).includes(label)
+    ));
+    const editor = item && item.querySelector('.wangEditor-txt[contenteditable="true"]');
+    if (!editor) return [];
+    return [...editor.querySelectorAll('img')].map((image) => {
+      const width = Number(image.naturalWidth) || 0;
+      return {
+        src: String(image.getAttribute('src') || ''),
+        width,
+        height: Number(image.naturalHeight) || 0,
+        loaded: Boolean(image.complete) && width > 0,
+      };
+    });
+  }, TEXT.description).catch(() => []);
+}
+
+async function waitForDescriptionImageSizes(frame, timeoutMs = DESCRIPTION_IMAGE_LOAD_TIMEOUT) {
+  const deadline = Date.now() + timeoutMs;
+  let sizes = await readDescriptionImageSizes(frame);
+  while (Date.now() < deadline && sizes.length && sizes.some((entry) => !entry.loaded)) {
+    await sleep(200);
+    sizes = await readDescriptionImageSizes(frame);
+  }
+  return sizes;
+}
+
+async function openDescriptionImageEditor(frame) {
+  const item = await waitForFormItemForLabels(frame, [TEXT.description]);
+  const trigger = item.locator('button.el-button').filter({ hasText: TEXT.editDescriptionImages }).first();
+  if (!(await trigger.count())) {
+    throw new BlockedError('description_image_editor_not_found', { reason: 'button_missing' });
+  }
+  await trigger.click();
+  const dialog = frame.locator('.el-dialog__wrapper:visible').filter({ hasText: TEXT.resizeSection }).first();
+  const deadline = Date.now() + 15000;
+  while (Date.now() < deadline) {
+    if (await isVisible(dialog)) return dialog;
+    await sleep(200);
+  }
+  throw new BlockedError('description_image_editor_not_found', { reason: 'dialog_not_visible' });
+}
+
+async function closeDescriptionImageEditor(frame) {
+  const dialog = frame.locator('.el-dialog__wrapper:visible').filter({ hasText: TEXT.resizeSection }).first();
+  if (!(await isVisible(dialog))) return true;
+  await dialog.locator('.el-dialog__headerbtn').first().click({ timeout: 5000 }).catch(() => {});
+  if (await isVisible(dialog)) {
+    // Frame 上没有 keyboard（见水印收尾）：要发给 page。
+    await frame.page?.()?.keyboard?.press('Escape').catch(() => {});
+  }
+  const deadline = Date.now() + 5000;
+  while (Date.now() < deadline && await isVisible(dialog)) await sleep(200);
+  return !(await isVisible(dialog));
+}
+
+async function readSelectedDescriptionImageCount(dialog) {
+  const text = await dialog.innerText().catch(() => '');
+  const match = String(text || '').match(/\u5df2\u9009\s*(\d+)\s*\u5f20/);
+  return match ? Number(match[1]) : -1;
+}
+
+// 只在下拉值漂了的时候才动：默认就是「等比例调整 / 图片小边」。
+async function ensureDescriptionResizeSelect(frame, selectRoot, wanted) {
+  const input = selectRoot.locator('input.el-input__inner').first();
+  const current = cleanText(await input.inputValue().catch(() => ''));
+  if (current === wanted) return current;
+  await selectRoot.click().catch(() => {});
+  await sleep(300);
+  let option = selectRoot.locator('.el-select-dropdown__item').filter({ hasText: wanted }).first();
+  if (!(await option.count())) {
+    option = frame.locator('.el-select-dropdown:visible .el-select-dropdown__item').filter({ hasText: wanted }).first();
+  }
+  if (await option.count()) {
+    await option.click().catch(() => {});
+  } else {
+    // 没找到目标选项时别把下拉留在打开状态挡住「更改」按钮。
+    await frame.page?.()?.keyboard?.press('Escape').catch(() => {});
+  }
+  return cleanText(await input.inputValue().catch(() => ''));
+}
+
+// 保存前调用：描述里有宽 < 700 的图就走马帮自己的「编辑图片 → 全选 → 1000px → 更改」。
+// 返回 {status:'skipped'|'fixed'}；修不好就抛 BlockedError（保存必被拒，别浪费一次 save）。
+async function ensureDescriptionImageWidths(frame, options = {}) {
+  const minWidth = Number(options.minWidth || DESCRIPTION_IMAGE_MIN_WIDTH);
+  const targetWidth = Number(options.targetWidth || DESCRIPTION_IMAGE_TARGET_WIDTH);
+  const before = await waitForDescriptionImageSizes(frame);
+  const widths = before.map((entry) => entry.width);
+  if (!before.length) {
+    emit('stage', { stage: 'fix_description_image_widths', ok: true, skipped: 'no_description_images' });
+    return { status: 'skipped', reason: 'no_description_images' };
+  }
+  const tooSmall = before.filter((entry) => entry.width > 0 && entry.width < minWidth);
+  if (!tooSmall.length) {
+    emit('stage', { stage: 'fix_description_image_widths', ok: true, skipped: 'widths_ok', widths });
+    return { status: 'skipped', reason: 'widths_ok', widths };
+  }
+
+  const dialog = await openDescriptionImageEditor(frame);
+  let after = [];
+  try {
+    const selectAllLabel = dialog.locator('.el-checkbox').filter({ hasText: TEXT.selectAllImages }).first();
+    if (!(await selectAllLabel.count())) {
+      throw new BlockedError('description_image_fix_failed', { step: 'select_all_missing' });
+    }
+    // 弹窗里是「全选 + 每张图一行」，图片数 = 复选框数 - 1。
+    const checkboxes = dialog.locator('.el-checkbox');
+    const total = Math.max(0, (await checkboxes.count()) - 1);
+    if ((await readSelectedDescriptionImageCount(dialog)) !== total) {
+      const checked = await selectAllLabel.locator('input.el-checkbox__original').first()
+        .isChecked().catch(() => false);
+      if (checked) await selectAllLabel.click();  // 重跑时可能已全选，再点一次会取消
+      // label 的点击会被浏览器转发给内部 input（可能被组件按"切换"语义处理），
+      // 所以点完必须回读「已选N张」，没到全选就逐张补勾，别信一次点击。
+      await selectAllLabel.click();
+      await sleep(300);
+      if ((await readSelectedDescriptionImageCount(dialog)) !== total) {
+        for (let index = 1; index <= total; index += 1) {
+          const rowInput = checkboxes.nth(index).locator('input.el-checkbox__original').first();
+          if (await rowInput.isChecked().catch(() => false)) continue;
+          await checkboxes.nth(index).click().catch(() => {});
+        }
+        await sleep(300);
+      }
+    }
+    const selected = await readSelectedDescriptionImageCount(dialog);
+    if (selected <= 0 || (total > 0 && selected !== total)) {
+      throw new BlockedError('description_image_fix_failed', { step: 'select_all_not_applied', selected, total });
+    }
+
+    const sizeBlock = dialog.locator('.background-block').filter({ hasText: TEXT.resizeSection }).first();
+    const sizeInput = sizeBlock.locator('.el-autocomplete input.el-input__inner').first();
+    if (!(await sizeInput.count())) {
+      throw new BlockedError('description_image_fix_failed', { step: 'size_input_missing' });
+    }
+    const selects = sizeBlock.locator('.el-select');
+    if ((await selects.count()) >= 2) {
+      await ensureDescriptionResizeSelect(frame, selects.nth(0), TEXT.proportionalResize);
+      await ensureDescriptionResizeSelect(frame, selects.nth(1), TEXT.smallEdgeResize);
+    }
+    await sizeInput.fill(String(targetWidth));
+    if (cleanText(await sizeInput.inputValue().catch(() => '')) !== String(targetWidth)) {
+      throw new BlockedError('description_image_fix_failed', { step: 'size_input_not_applied' });
+    }
+
+    const changeButton = dialog.locator('button').filter({ hasText: TEXT.changeImageSize }).first();
+    if (!(await changeButton.count())) {
+      throw new BlockedError('description_image_fix_failed', { step: 'change_button_missing' });
+    }
+    await changeButton.click();
+
+    // 真机约 2 秒重编码完：正文 img 换新地址并重新加载，轮询到全部 >= 700 为止。
+    const deadline = Date.now() + DESCRIPTION_IMAGE_FIX_TIMEOUT;
+    while (Date.now() < deadline) {
+      await sleep(500);
+      after = await readDescriptionImageSizes(frame);
+      if (after.length && after.every((entry) => entry.loaded && entry.width >= minWidth)) break;
+    }
+  } finally {
+    await closeDescriptionImageEditor(frame);
+  }
+
+  after = after.length ? after : await readDescriptionImageSizes(frame);
+  const stillSmall = after.filter((entry) => entry.width > 0 && entry.width < minWidth);
+  const unloaded = after.filter((entry) => !entry.loaded);
+  // 张数变了说明不是"改尺寸"而是被删/被替换了——绝不能当成功放过去。
+  if (after.length !== before.length) {
+    throw new BlockedError('description_image_width_fix_failed', {
+      step: 'image_count_changed',
+      before_count: before.length,
+      after_count: after.length,
+      before: widths,
+      after: after.map((entry) => entry.width),
+    });
+  }
+  if (stillSmall.length) {
+    throw new BlockedError('description_image_width_fix_failed', {
+      min_width: minWidth,
+      before: widths,
+      after: after.map((entry) => entry.width),
+      still_small: stillSmall.map((entry) => entry.width).slice(0, 10),
+      unloaded: unloaded.length,
+    });
+  }
+  const result = {
+    status: 'fixed',
+    target_width: targetWidth,
+    count: after.length,
+    before: widths,
+    after: after.map((entry) => entry.width),
+    unloaded: unloaded.length,
+  };
+  emit('stage', { stage: 'fix_description_image_widths', ok: true, ...result });
+  return result;
 }
 
 // 水印下拉里不是"模板"的那几行：管理入口和空态。匹配模板时必须排除。
@@ -6153,6 +6545,95 @@ function validateCNSCTaskPayload(task) {
   return { ok: errors.length === 0, errors };
 }
 
+// 马帮的保存前置校验只有点了「保存」才跑，被拒时不落草稿、也不写字段行内错误，
+// 只在页面顶部弹一条提示。执行器原先完全没读这些提示，15 秒证据窗口耗尽后只能报
+// save_result_not_proven（界面「无法确认草稿已保存」），运营看不出真正原因。
+// 这里把已知提示归成稳定错误码，原始提示原文一并带进日志（details.page_message）。
+const SAVE_REJECTION_SELECTORS = [
+  '.el-message',
+  '.el-message-box__message',
+  '.el-notification',
+  '.el-dialog__body',
+  '.el-form-item__error',
+].join(',');
+
+// 页面正文里出现这些片段就当候选行抓回来（具体归哪个错误码由 Node 侧的规则决定）。
+// 这样即使马帮把提示换成非 Element UI 的浮层，也能从 innerText 里读到。
+const SAVE_REJECTION_HINTS = Object.freeze([
+  '\u56fe\u7247\u5bbd\u5ea6\u4e0d\u80fd\u5c0f\u4e8e',
+  '\u7f16\u8f91\u56fe\u7247\u6309\u94ae\u8fdb\u884c\u4fee\u6539',
+]);
+
+const SAVE_REJECTION_RULES = Object.freeze([
+  {
+    code: 'description_image_width_too_small',
+    pattern: /商品描述中的图片宽度不能小于|图片宽度不能小于\s*700/,
+  },
+]);
+
+function classifySaveRejection(texts) {
+  const candidates = (Array.isArray(texts) ? texts : [])
+    .map((text) => cleanText(text))
+    .filter(Boolean);
+  for (const rule of SAVE_REJECTION_RULES) {
+    const hit = candidates.find((text) => rule.pattern.test(text));
+    if (hit) return { code: rule.code, message: hit };
+  }
+  return null;
+}
+
+// 读当前 frame 里可见的提示原文：先看 toast / 消息框 / 表单行内错误节点，
+// 再按已知片段扫一遍正文（正文里看不见的隐藏文案不会进 innerText）。
+async function readSaveRejectionTexts(frame) {
+  return frame.evaluate(([selector, hints]) => {
+    const visible = (node) => {
+      if (!node) return false;
+      const style = window.getComputedStyle(node);
+      if (style.display === 'none' || style.visibility === 'hidden' || Number(style.opacity) === 0) return false;
+      const rect = node.getBoundingClientRect();
+      return rect.width > 0 && rect.height > 0;
+    };
+    const texts = [...document.querySelectorAll(selector)]
+      .filter(visible)
+      .map((node) => String(node.innerText || node.textContent || '').trim())
+      .filter(Boolean);
+    const bodyText = String((document.body && document.body.innerText) || '');
+    for (const line of bodyText.split(/\n+/)) {
+      const trimmed = line.trim();
+      if (trimmed && trimmed.length <= 300 && hints.some((hint) => trimmed.includes(hint))) {
+        texts.push(trimmed);
+      }
+    }
+    return [...new Set(texts)].slice(0, 20);
+  }, [SAVE_REJECTION_SELECTORS, SAVE_REJECTION_HINTS]).catch(() => []);
+}
+
+// 提示也可能挂在父页面而不是详情 iframe 上：详情 frame 没读到就顺带扫一遍其它 frame。
+async function readSaveRejectionTextsAcrossFrames(page, detailFrame) {
+  const own = await readSaveRejectionTexts(detailFrame);
+  if (classifySaveRejection(own)) return own;
+  const frames = page && typeof page.frames === 'function' ? page.frames() : [];
+  for (const candidate of frames) {
+    if (candidate === detailFrame) continue;
+    if (typeof candidate.isDetached === 'function' && candidate.isDetached()) continue;
+    const extra = await readSaveRejectionTexts(candidate);
+    if (classifySaveRejection(extra)) return extra;
+  }
+  return own;
+}
+
+function saveRejectionError(rejection, evidence, saveResult) {
+  emit('stage', { stage: 'save_draft_rejected', ok: false, code: rejection.code, message: rejection.message });
+  return new BlockedError(rejection.code, {
+    save_clicked: true,
+    publish_clicked: false,
+    page_message: rejection.message,
+    success_message: Boolean(evidence && evidence.success_message),
+    product_id: Boolean(evidence && evidence.product_id),
+    save_response: Boolean(saveResult && (saveResult.network || []).length),
+  });
+}
+
 // 保存请求的响应监听。响应回来的时间不受控：早先这里点完固定等 1.8s 就把监听摘掉，
 // 稍慢的一次响应就永远记不到（现场 HN0012：草稿其实存下来了、页面上也有保存成功
 // 提示，但网络那条证据是空的 → 只剩一条证据 → 报 save_result_not_proven，任务停在
@@ -6426,6 +6907,10 @@ async function verifySavedDraftEvidence(page, frame, saveResult, task, stages = 
     if (evidence.publish_clicked) {
       throw new BlockedError('publish_guard_triggered_after_save');
     }
+    // 马帮拒绝保存的提示优先于证据计数：只要页面上出现了「描述图片宽度 < 700」这类
+    // 拒绝文案，这次保存就没落草稿，不该再等出 save_result_not_proven。
+    const rejection = classifySaveRejection(await readSaveRejectionTexts(frame));
+    if (rejection) throw saveRejectionError(rejection, evidence, saveResult);
     const networkResponse = (saveResult.network || []).length > 0;
     const evidenceCount = [evidence.success_message, evidence.product_id, networkResponse].filter(Boolean).length;
     if (evidenceCount >= 2) {
@@ -6467,12 +6952,22 @@ async function verifySavedDraftEvidence(page, frame, saveResult, task, stages = 
     }
     await new Promise((resolve) => setTimeout(resolve, 500));
   }
+  // 收尾再扫一遍（含父页面等其它 frame）：提示通常 3 秒就自动消失，轮询没撞上时
+  // 这一次扫描仍可能读到还没散的那条。
+  const lateTexts = await readSaveRejectionTextsAcrossFrames(page, frame);
+  const lateRejection = classifySaveRejection(lateTexts);
+  if (lateRejection) throw saveRejectionError(lateRejection, evidence, saveResult);
   throw new BlockedError('save_result_not_proven', {
     save_clicked: true,
     publish_clicked: false,
     success_message: Boolean(evidence.success_message),
     product_id: Boolean(evidence.product_id),
     save_response: (saveResult.network || []).length > 0,
+    // 认不出来的页面提示也留在详情里：下次马帮换了文案，操作员不用再靠截图猜。
+    page_messages: (Array.isArray(lateTexts) ? lateTexts : [])
+      .map((text) => cleanText(text).slice(0, 200))
+      .filter(Boolean)
+      .slice(0, 5),
   });
 }
 
@@ -6500,6 +6995,10 @@ const PRE_SAVE_STAGES = [
   ['fill_logistics_info', async (d, task) => fillLogisticsInfo(d.frame, task)],
   ['select_discount_activity', async (d, task) => task.store?.listing_mode === 'cnsc_global' ? { skipped: true } : selectDiscountActivity(d.frame, task)],
   ['upload_variant_thumbnails', async (d, task) => uploadVariantThumbnails(d.frame, task)],
+  // 马帮保存闸：描述图片宽度 < 700 会被拒。描述里的图都在 append_description_media
+  // 之后才齐，所以这一步放在保存前、校验前，用马帮自己的「编辑图片」把宽度修成 1000，
+  // 免得点了一次保存被拒（save 按设计只点一次，不会重试）。
+  ['fix_description_image_widths', async (d) => ensureDescriptionImageWidths(d.frame)],
   ['validate_before_save', async (d, task, stages) => validateBeforeSave(d.frame, task, stages)],
 ];
 
@@ -6712,7 +7211,9 @@ async function run() {
         took_ms: Date.now() - startedAt,
       };
       attempts.push(entry);
-      emit('attempt_failed', entry);
+      // 进度面板只认 stage / code 两个字段：不补进去，界面上这次失败就只有一行
+      // 「步骤」、看不到失败在哪一步、也看不到原因（现场 2026-10-27 任务 9da6b384）。
+      emit('attempt_failed', { ...entry, stage: entry.failed_stage, code: entry.error });
       lastError = error;
 
       const retryable = RETRYABLE_ERRORS.has(reason);
@@ -6851,6 +7352,11 @@ module.exports = {
   uploadDescriptionSizeChartFile,
   undoDescriptionInserts,
       insertDescriptionProductImages,
+  readDescriptionImageSizes,
+  waitForDescriptionImageSizes,
+  openDescriptionImageEditor,
+  closeDescriptionImageEditor,
+  ensureDescriptionImageWidths,
   collectProductImageUrls,
   collectSizeChartPreviewUrl,
   skuGridHasWeightColumn,
@@ -6867,10 +7373,14 @@ module.exports = {
   runOptionalMediaStages,
   uploadProductVideo,
   uploadProductImages,
+  countProductImageCards,
   cleanFilePath,
   closeSavedDetailPage,
   matchCNSCDraftRows,
   verifySavedDraft,
+  classifySaveRejection,
+  readSaveRejectionTexts,
+  readSaveRejectionTextsAcrossFrames,
   watchSaveResponses,
   waitForSavedDetailPageToClose,
   handleFailedPreSaveAttempt,

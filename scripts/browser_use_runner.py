@@ -19,6 +19,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 PLAYWRIGHT_EXECUTOR_PATH = PROJECT_ROOT / "scripts" / "mabang_playwright_executor.cjs"
 MABANG_WATERMARK_COLLECT_PATH = PROJECT_ROOT / "scripts" / "mabang_watermark_collect.cjs"
 MABANG_PAGE_IMPORT_COLLECT_PATH = PROJECT_ROOT / "scripts" / "mabang_page_import_collect.cjs"
+MABANG_PROMOTION_COLLECT_PATH = PROJECT_ROOT / "scripts" / "mabang_promotion_collect.cjs"
 MABANG_PAGE_IMPORT_EXECUTOR_PATH = PROJECT_ROOT / "scripts" / "mabang_page_import_executor.cjs"
 MABANG_PAGE_IMPORT_CAPTURE_PATH = PROJECT_ROOT / "scripts" / "mabang_page_import_capture.js"
 if str(PROJECT_ROOT) not in sys.path:
@@ -2499,6 +2500,84 @@ def collect_store_watermarks_via_playwright(
         return {"ok": False, "status": "failed", "error": "水印采集结果不是合法 JSON"}
     if not isinstance(payload, dict):
         return {"ok": False, "status": "failed", "error": "水印采集结果格式不对"}
+    return payload
+
+
+def collect_store_promotions_via_playwright(
+    store_id: str,
+    *,
+    node_executable: str = "node",
+    cdp_url: str = "http://127.0.0.1:9223",
+    timeout_seconds: int = 180,
+) -> dict[str, Any]:
+    """定向重采一个本土店铺的促销活动目录（走 Playwright/CDP，只读）。
+
+    页面导入没读到活动列表时，模板里的活动只剩名称、没有有效期，后端随之判成
+    unresolved（模板下拉看不到它）。这里单独展开一次「选择折扣活动」弹窗，把活动行
+    （start_time / end_time / flag）读出来，供调用方写回店铺活动目录。
+
+    返回 ``scripts/mabang_promotion_collect.cjs`` 的 payload：
+    ``{ok, status, store, items, catalog_loaded, diagnostics, error}``。
+    """
+
+    if not MABANG_PROMOTION_COLLECT_PATH.is_file():
+        return {"ok": False, "status": "failed", "error": "活动采集脚本缺失"}
+
+    node_env = os.environ.copy()
+    node_modules = (PROJECT_ROOT / "node_modules").resolve()
+    module_paths = [node_modules / ".pnpm" / "node_modules", node_modules]
+    inherited_node_path = str(node_env.get("NODE_PATH") or "").strip()
+    discovered = [str(path) for path in module_paths if path.is_dir()]
+    if inherited_node_path:
+        discovered.append(inherited_node_path)
+    if discovered:
+        node_env["NODE_PATH"] = os.pathsep.join(dict.fromkeys(discovered))
+
+    node_cmd, node_version = _resolve_node_executable(node_executable, node_env)
+    if node_executable == "node" and node_version is None:
+        return {
+            "ok": False,
+            "status": "failed",
+            "error": f"Node 无法启动（{node_cmd} --version 执行失败），无法采集店铺活动",
+        }
+
+    command = [
+        node_cmd,
+        str(MABANG_PROMOTION_COLLECT_PATH),
+        "--cdp-url",
+        cdp_url,
+        "--store-id",
+        str(store_id or "").strip(),
+    ]
+    try:
+        completed = subprocess.run(
+            command,
+            cwd=str(PROJECT_ROOT),
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            env=node_env,
+            timeout=timeout_seconds,
+            check=False,
+            **no_console_window_kwargs(),
+        )
+    except subprocess.TimeoutExpired:
+        return {"ok": False, "status": "timeout", "error": "重采店铺活动超时（页面没响应）"}
+    except OSError as exc:
+        return {"ok": False, "status": "failed", "error": f"无法启动 Node：{exc}"}
+
+    output = (completed.stdout or "") + (completed.stderr or "")
+    marker = "MABANG_PAGE_IMPORT_RESULT "
+    line = next((item[len(marker):] for item in reversed(output.splitlines()) if item.startswith(marker)), "")
+    if not line:
+        return {"ok": False, "status": "failed", "error": _compact_mabang_page_import_error(output)}
+    try:
+        payload = json.loads(line)
+    except json.JSONDecodeError:
+        return {"ok": False, "status": "failed", "error": "店铺活动采集结果不是合法 JSON"}
+    if not isinstance(payload, dict):
+        return {"ok": False, "status": "failed", "error": "店铺活动采集结果格式不对"}
     return payload
 
 

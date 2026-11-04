@@ -30,6 +30,15 @@ def main() -> None:
         raise SystemExit("DATABASE_URL is required. Pass --database-url or set the env var.")
 
     data = json.loads(store_file.read_text(encoding="utf-8"))
+    # 拆分集合（automation_jobs / listing_skus / base_products 等）不在主库里，
+    # 按当前 _SPLIT_STORE_KEYS 把同目录的 <key>.json 合并回来，缺文件按空集合算。
+    from services.api.storage import _SPLIT_STORE_KEYS  # noqa: PLC0415 - 避免循环导入顶层化
+
+    for key in _SPLIT_STORE_KEYS:
+        split_path = store_file.parent / f"{key}.json"
+        if key in data or not split_path.exists():
+            continue
+        data[key] = json.loads(split_path.read_text(encoding="utf-8"))
     summary = {collection: len(data.get(collection) or []) for collection in COLLECTIONS}
     print(json.dumps({"store_file": str(store_file), "summary": summary, "dry_run": args.dry_run}, ensure_ascii=False, indent=2))
     if args.dry_run:

@@ -1643,6 +1643,49 @@ test('insufficient save evidence never closes the detail page', async () => {
   assert.equal(closeCalled, false);
 });
 
+test('马帮拒绝保存的提示被捕获成具体错误码，而不是只报「无法确认草稿已保存」', async () => {
+  const originalNow = Date.now;
+  const originalSetTimeout = global.setTimeout;
+  let now = 0;
+  Date.now = () => { now += 6000; return now; };
+  global.setTimeout = (callback) => { callback(); return 0; };
+  const rejectionText = '商品描述中的图片宽度不能小于700，请点击上方编辑图片按钮进行修改';
+  const page = { close: async () => {}, frames: () => [] };
+  const frame = {
+    evaluate: async (fn, arg) => (
+      Array.isArray(arg)
+        ? [rejectionText]
+        : { success_message: false, product_id: false, publish_clicked: false }
+    ),
+  };
+
+  try {
+    await assert.rejects(
+      executor.verifySavedDraft(page, frame, { network: [] }, { basic_info: {} }),
+      (error) => error
+        && error.reason === 'description_image_width_too_small'
+        && error.details.save_clicked === true
+        && error.details.publish_clicked === false
+        && error.details.page_message === rejectionText,
+    );
+  } finally {
+    Date.now = originalNow;
+    global.setTimeout = originalSetTimeout;
+  }
+});
+
+test('classifySaveRejection 只认已知提示，别的内容不误判', () => {
+  assert.deepEqual(
+    executor.classifySaveRejection([' 商品描述中的图片宽度不能小于700，请点击上方编辑图片按钮进行修改 ']),
+    {
+      code: 'description_image_width_too_small',
+      message: '商品描述中的图片宽度不能小于700，请点击上方编辑图片按钮进行修改',
+    },
+  );
+  assert.equal(executor.classifySaveRejection(['保存成功']), null);
+  assert.equal(executor.classifySaveRejection(undefined), null);
+});
+
 test('retryable pre-save failure closes detail pages before waiting for retry', async () => {
   const events = [];
   const error = new Error('retry');
@@ -2011,6 +2054,62 @@ test('产品图收集：�?src 的占位图与静态图标不进插图�?�?'
     { attr: 'https://cf.shopee.co.id/file/pic02' },
   ]);
   assert.deepEqual(urls, ['https://cf.shopee.co.id/file/pic01', 'https://cf.shopee.co.id/file/pic02']);
+});
+
+test('产品图收集：满 9 张后上传 input 被移除，仍按 .picture-group 卡片收集', async () => {
+  // 现场 2026-10-27（任务 6f4ff5af / 78fce435）：产品图区满 9 张时马帮把
+  // input[type=file][multiple] 整个删掉，只认 input 的收集恒返回 []，描述插图计划里
+  // 只剩尺码表 → 产品图一张都不插。这里按卡片（.picture-group > .images-item）兜底。
+  const img = (attr) => ({ getAttribute: () => attr });
+  const card = (src) => ({ querySelectorAll: () => [img(src), img('/publish-ui/static/img/icon-ai.abc.svg')] });
+  const productCards = [
+    card('https://cos.example/upload/p1.png'),
+    card('https://cos.example/upload/p2.png'),
+    card('https://cos.example/upload/p3.png'),
+  ];
+  const group = (cards) => ({
+    querySelectorAll: (selector) => (
+      selector === '.images-item' ? cards : cards.flatMap((entry) => entry.querySelectorAll('img'))
+    ),
+  });
+  const groups = [
+    group([]), // 主图区那块 .picture-group 没有 .images-item 卡片
+    group(productCards),
+  ];
+  const original = global.document;
+  global.document = {
+    // 满 9 张：input 已经不在页面上了
+    querySelector: () => null,
+    querySelectorAll: (selector) => (selector === '.picture-group' ? groups : []),
+  };
+  try {
+    const urls = await executor.collectProductImageUrls({ evaluate: async (fn, arg) => fn(arg) });
+    assert.deepEqual(urls, [
+      'https://cos.example/upload/p1.png',
+      'https://cos.example/upload/p2.png',
+      'https://cos.example/upload/p3.png',
+    ]);
+  } finally {
+    global.document = original;
+  }
+});
+
+test('描述插图：上传进去的尺码图要验位置，不在末尾就撤回交给按地址重插', () => {
+  const source = fs.readFileSync(path.join(__dirname, '../scripts/mabang_playwright_executor.cjs'), 'utf8');
+  const body = source.slice(
+    source.indexOf('async function appendDescriptionMediaOnce'),
+    source.indexOf('// 插一批图：尺码表先、产品图后'),
+  );
+  // 上传尺码图之后必须读回正文验位置（原先直接当 existing，落在最前面也照样成功）
+  assert.match(body, /const uploadedHtml = await readDescriptionHtml\(frame, editorId\);/);
+  assert.match(body, /if \(descriptionMediaAppendedAtTail\(uploadedHtml, \[sizeChartUrl\], existing\)\)/);
+  // 位置不对：先撤回这张，再由批量插图按地址插到末尾
+  assert.match(body, /const undone = await undoDescriptionInserts\(frame, editor, editorId, existing\.length, 1\);/);
+  assert.match(body, /size_chart:upload-reinsert/);
+  // 撤不回来：不插第二张，位置问题作为警告交运营
+  assert.match(body, /description_size_chart_position_not_at_tail/);
+  // 产品图一张地址都没收集到时要报出来，不能 already:true 假装成功
+  assert.match(body, /description_product_images_not_collected/);
 });
 
 test('描述用哪张尺码表图：模板模式用店铺模板里�?并上传的�?���?', () => {
@@ -2545,13 +2644,14 @@ test('产品图路径保留连续空格：真实目录名带着两个空格也�
   const image = path.join(folder, 'SKU-10-黑色A.jpg');
   fs.writeFileSync(image, 'image-bytes');
   const uploaded = [];
+  let cards = 0;
   const input = {
     getAttribute: async () => 'multiple',
-    setInputFiles: async (filePath) => { uploaded.push(filePath); },
+    // 页面上每传完一张，卡片数 +1（真实页面就是这么涨的）。
+    setInputFiles: async (filePath) => { uploaded.push(filePath); cards += 1; },
   };
-  let cards = 0;
   const frame = {
-    evaluate: async () => { cards += 1; return cards; },
+    evaluate: async () => cards,
     locator: () => ({ count: async () => 1, first: () => input }),
   };
 
@@ -2566,6 +2666,90 @@ test('产品图路径保留连续空格：真实目录名带着两个空格也�
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }
+});
+
+test('产品图落地判定数 .picture-group 里的 .images-item（回归 2026-10-26 四单误报 did_not_land）', async () => {
+  const state = { cards: 0 };
+  const group = {
+    querySelectorAll: (selector) => (selector === '.images-item'
+      ? Array.from({ length: state.cards }, (_, index) => ({ index }))
+      : []),
+  };
+  const input = { closest: (selector) => (selector === '.picture-group' ? group : null) };
+  const previous = global.document;
+
+  const withDocument = async (doc, run) => {
+    global.document = doc;
+    try {
+      return await run();
+    } finally {
+      if (previous === undefined) delete global.document;
+      else global.document = previous;
+    }
+  };
+
+  // 马帮真实结构：卡片是同组内的 .images-item；页面上没有任何 Element UI 上传列表节点，
+  // 旧实现（数 .el-upload-list__item / upload-list）会恒为 0，于是每张图等满 90s。
+  await withDocument({
+    querySelector: (selector) => (selector === 'input[type="file"][multiple]' ? input : null),
+    querySelectorAll: () => [],
+  }, async () => {
+    const frame = { evaluate: async (fn) => fn() };
+    assert.equal(await executor.countProductImageCards(frame), 0);
+    state.cards = 3;
+    assert.equal(await executor.countProductImageCards(frame), 3);
+  });
+
+  // 没有 multiple 文件输入 = 页面结构不对，返回 -1（0 会被误当成"还没落地"）。
+  await withDocument({ querySelector: () => null, querySelectorAll: () => [] }, async () => {
+    assert.equal(await executor.countProductImageCards({ evaluate: async (fn) => fn() }), -1);
+  });
+
+  // 图片满 9 张后马帮会把 input 整个移除：此时必须还能从唯一的 .picture-group 数到卡片，
+  // 否则最后一张永远"没落地"（2026-10-27 任务 9da6b384 的 index 8 / expected_after 9）。
+  state.cards = 9;
+  await withDocument({
+    querySelector: () => null,
+    querySelectorAll: (selector) => (selector === '.picture-group' ? [group] : []),
+  }, async () => {
+    assert.equal(await executor.countProductImageCards({ evaluate: async (fn) => fn() }), 9);
+  });
+});
+
+test('表单里已经有产品图时拒绝重复上传（可重试错误，重开干净表单）', async () => {
+  const uploaded = [];
+  const frame = {
+    evaluate: async () => 3,
+    locator: () => ({
+      count: async () => 1,
+      first: () => ({
+        getAttribute: async () => 'multiple',
+        setInputFiles: async (file) => { uploaded.push(file); },
+      }),
+    }),
+  };
+  await assert.rejects(
+    executor.uploadProductImages(frame, {
+      images: { product_image_paths: ['C:\\tmp\\A红色.png'] },
+      store: { listing_mode: 'site' },
+    }),
+    (error) => error.reason === 'product_image_slots_already_filled' && error.details.count === 3,
+  );
+  assert.deepEqual(uploaded, [], '已经在页面上的图不能再传一遍');
+
+  const source = fs.readFileSync(path.join(__dirname, '../scripts/mabang_playwright_executor.cjs'), 'utf8');
+  assert.match(source, /'product_image_slots_already_filled',/);
+});
+
+test('失败的那次尝试上报 stage/code，界面才能显示失败原因而不是一行「步骤」', () => {
+  const source = fs.readFileSync(path.join(__dirname, '../scripts/mabang_playwright_executor.cjs'), 'utf8');
+  const app = fs.readFileSync(path.join(__dirname, '../apps/web/app.js'), 'utf8');
+
+  // 进度接口只存 stage / code 两个字段（storage.record_automation_job_progress）。
+  assert.match(source, /emit\('attempt_failed', \{ \.\.\.entry, stage: entry\.failed_stage, code: entry\.error \}\)/);
+  // 步骤列表要给失败行补上中文原因。
+  assert.match(app, /const reason = step\.ok === false \? automationErrorLabel\(step\.code \|\| ""\) : ""/);
+  assert.match(app, /class="automation-step-reason"/);
 });
 
 test('详情插图跳过产品图区�?��那张尺码�?', () => {
@@ -2817,4 +3001,29 @@ test('applyCustomValueThroughUi：拿不到表单项时如实报错、不抛异�
   const result = await executor.applyCustomValueThroughUi(frame, ['型号', '101639'], ['T-shirt'], {}, null);
   assert.equal(result.failed, true);
   assert.ok(result.error);
+});
+
+test('描述图片宽度：没有图或都够宽时直接跳过，不打开「编辑图片」弹窗', async () => {
+  const noImages = { evaluate: async () => [] };
+  assert.deepEqual(
+    await executor.ensureDescriptionImageWidths(noImages),
+    { status: 'skipped', reason: 'no_description_images' },
+  );
+
+  const wide = { evaluate: async () => [{ src: 'a', width: 1000, height: 1000, loaded: true }] };
+  const result = await executor.ensureDescriptionImageWidths(wide);
+  assert.equal(result.status, 'skipped');
+  assert.equal(result.reason, 'widths_ok');
+});
+
+test('描述图片宽度修复接在保存前校验之前（append 之后），阈值 700 / 目标 1000', () => {
+  const source = fs.readFileSync(path.join(__dirname, '../scripts/mabang_playwright_executor.cjs'), 'utf8');
+  assert.match(source, /const DESCRIPTION_IMAGE_MIN_WIDTH = 700/);
+  assert.match(source, /const DESCRIPTION_IMAGE_TARGET_WIDTH = 1000/);
+  assert.match(source, /\['fix_description_image_widths', async \(d\) => ensureDescriptionImageWidths\(d\.frame\)\]/);
+  const stage = source.indexOf("['fix_description_image_widths'");
+  const append = source.indexOf("['append_description_media'");
+  const validate = source.indexOf("['validate_before_save'");
+  assert.ok(stage > append, '描述图片都在 append_description_media 之后才齐');
+  assert.ok(stage < validate, '修复必须发生在保存前校验/保存之前');
 });

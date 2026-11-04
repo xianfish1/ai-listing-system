@@ -3,9 +3,12 @@ from __future__ import annotations
 import json
 import ntpath
 import os
+import posixpath
 import re
 import shutil
+import signal
 import subprocess
+import sys
 import time
 from pathlib import Path
 from typing import Any, Callable
@@ -152,7 +155,19 @@ def launch_mabang_browser(
             MABANG_NEW_PRODUCT_URL,
         ]
         launched_at = time.time()
-        process = popen_fn(command, cwd=str(profile_dir.parent))
+        try:
+            process = popen_fn(command, cwd=str(profile_dir.parent))
+        except OSError as exc:
+            # Windows：保持历史行为，直接抛出去（这里只可能发生在极少数启动失败场景）。
+            if os.name == "nt":
+                raise
+            # macOS / Linux：候选清单里可能混着不可执行的条目（例如误留的 Windows
+            # chrome.exe），报“Exec format error”时必须继续试下一个候选。
+            last_error = MabangBrowserError(
+                f"采集浏览器的 Chrome 无法执行：{chrome}（{exc}）。"
+                "请检查 CHROME_EXECUTABLE 是否指向可执行的 Chrome。"
+            )
+            continue
         exited_early = False
         for _ in range(max(1, attempts)):
             exit_code = _process_exit_code(process)
@@ -222,10 +237,18 @@ def find_bundled_chrome() -> Path | None:
         return None
     # Playwright layout keeps the binary at chrome-win64/chrome.exe (build folders vary),
     # so glob rather than hardcode a build number.
-    for pattern in ("chrome.exe", "*/chrome.exe", "*/*/chrome.exe"):
-        match = next((candidate for candidate in sorted(BUNDLED_CHROME_DIR.glob(pattern)) if candidate.is_file()), None)
-        if match:
-            return match
+    if os.name == "nt":
+        for pattern in ("chrome.exe", "*/chrome.exe", "*/*/chrome.exe"):
+            match = next((candidate for candidate in sorted(BUNDLED_CHROME_DIR.glob(pattern)) if candidate.is_file()), None)
+            if match:
+                return match
+        return None
+    # macOS / Linux Playwright layouts: chrome-linux/chrome and
+    # chrome-mac/Chromium.app/Contents/MacOS/Chromium (directory depth varies by build),
+    # so walk the tree instead of hardcoding patterns.
+    for candidate in sorted(BUNDLED_CHROME_DIR.rglob("*")):
+        if candidate.is_file() and candidate.name in {"chrome", "Chromium"}:
+            return candidate
     return None
 
 
@@ -246,12 +269,32 @@ def chrome_executable_candidates() -> list[Path]:
     bundled = find_bundled_chrome()
     if bundled:
         candidates.append(bundled)
-    for raw in (
-        os.environ.get("CHROME_EXECUTABLE", ""),
-        r"C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe",
-        r"C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe",
-        str(Path.home() / "AppData/Local/Google/Chrome/Application/chrome.exe"),
-    ):
+    # Windows 的候选顺序与路径逐字保持原样（含历史遗留的双反斜杠写法），
+    # 其它平台各用自己的安装路径。
+    if os.name == "nt":
+        system_paths = (
+            os.environ.get("CHROME_EXECUTABLE", ""),
+            r"C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe",
+            r"C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe",
+            str(Path.home() / "AppData/Local/Google/Chrome/Application/chrome.exe"),
+        )
+    elif sys.platform == "darwin":
+        system_paths = (
+            os.environ.get("CHROME_EXECUTABLE", ""),
+            "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+            str(Path.home() / "Applications/Google Chrome.app/Contents/MacOS/Google Chrome"),
+            "/Applications/Chromium.app/Contents/MacOS/Chromium",
+        )
+    else:
+        system_paths = (
+            os.environ.get("CHROME_EXECUTABLE", ""),
+            "/usr/bin/google-chrome",
+            "/usr/bin/google-chrome-stable",
+            "/usr/bin/chromium",
+            "/usr/bin/chromium-browser",
+            "/snap/bin/chromium",
+        )
+    for raw in system_paths:
         if not raw:
             continue
         path = Path(raw)
@@ -299,7 +342,9 @@ def _run_windows_process_query() -> subprocess.CompletedProcess[str]:
 def _is_collection_chrome_command(command_line: str, *, profile_dir: Path, port: int) -> bool:
     """Match only a Chrome command using this profile or this CDP port."""
 
-    command = str(command_line or "").replace("/", "\\").casefold()
+    raw = str(command_line or "")
+    # Windows 命令行的路径分隔符两种都可能出现；POSIX 上 "/" 才是分隔符，不能替换。
+    command = raw.replace("/", "\\").casefold() if os.name == "nt" else raw.casefold()
     if not command:
         return False
     if _command_uses_profile(command_line, profile_dir):
@@ -311,7 +356,8 @@ def _is_collection_chrome_command(command_line: str, *, profile_dir: Path, port:
 def _command_uses_profile(command_line: str, profile_dir: Path) -> bool:
     """Return whether a Chrome command uses the exact dedicated profile."""
 
-    command = str(command_line or "").replace("/", "\\").casefold()
+    raw = str(command_line or "")
+    command = raw.replace("/", "\\").casefold() if os.name == "nt" else raw.casefold()
     if not command:
         return False
     profile_match = re.search(
@@ -321,12 +367,56 @@ def _command_uses_profile(command_line: str, profile_dir: Path) -> bool:
     profile_value = next((value for value in profile_match.groups() if value), None) if profile_match else None
     if not profile_value:
         return False
-    profile = _normalise_windows_path(str(profile_dir.expanduser().resolve()))
-    return _normalise_windows_path(profile_value) == profile
+    profile = _normalise_command_path(str(profile_dir.expanduser().resolve()))
+    return _normalise_command_path(profile_value) == profile
 
 
 def _normalise_windows_path(value: str) -> str:
     return ntpath.normcase(ntpath.normpath(str(value or "").strip().strip('"').replace("/", "\\")))
+
+
+def _normalise_command_path(value: str) -> str:
+    """Normalize a command-line path for comparison on the current platform."""
+
+    text = str(value or "").strip().strip('"')
+    if os.name == "nt":
+        return _normalise_windows_path(text)
+    return posixpath.normcase(posixpath.normpath(text))
+
+
+def _run_posix_process_query() -> subprocess.CompletedProcess[str]:
+    """Return every process command line from ps (macOS / Linux)."""
+
+    ps = shutil.which("ps") or "ps"
+    return subprocess.run(
+        [ps, "-Ao", "pid=,command="],
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=5,
+        **no_console_window_kwargs(),
+    )
+
+
+def _posix_process_entries(result: Any) -> list[dict[str, Any]]:
+    """Parse ``ps -Ao pid=,command=`` output into ProcessId/CommandLine rows."""
+
+    if getattr(result, "returncode", 1) not in (0, None):
+        return []
+    raw = getattr(result, "stdout", "") or ""
+    entries: list[dict[str, Any]] = []
+    for line in str(raw).splitlines():
+        text = line.strip()
+        if not text:
+            continue
+        pid_text, _, command = text.partition(" ")
+        try:
+            pid = int(pid_text)
+        except (TypeError, ValueError):
+            continue
+        if pid > 0:
+            entries.append({"ProcessId": pid, "CommandLine": command.strip()})
+    return entries
 
 
 def _collection_chrome_entries(
@@ -334,11 +424,18 @@ def _collection_chrome_entries(
 ) -> list[dict[str, Any]]:
     """Return the Chrome process rows (ProcessId/CommandLine) or an empty list."""
 
-    query = process_query_fn or _run_windows_process_query
+    if process_query_fn is not None:
+        query = process_query_fn
+    elif os.name == "nt":
+        query = _run_windows_process_query
+    else:
+        query = _run_posix_process_query
     try:
         result = query()
         if getattr(result, "returncode", 1) not in (0, None):
             return []
+        if os.name != "nt":
+            return _posix_process_entries(result)
         raw = getattr(result, "stdout", "") or ""
         payload = json.loads(raw) if isinstance(raw, str) and raw.strip() else []
     except (OSError, subprocess.SubprocessError, TypeError, ValueError, json.JSONDecodeError):
@@ -398,8 +495,6 @@ def _collection_browser_identity(
 ) -> tuple[str | None, bool]:
     """Return the collection browser mode and whether its profile is exact."""
 
-    if os.name != "nt":
-        return None, False
     for entry in _collection_chrome_entries(process_query_fn):
         command = str(entry.get("CommandLine") or "")
         if "--type=" in command:
@@ -448,8 +543,6 @@ def _cleanup_stale_collection_chrome(
 ) -> list[int]:
     """Close stale collection Chrome processes without touching normal Chrome."""
 
-    if os.name != "nt":
-        return []
     process_ids = _collection_chrome_process_ids(
         profile_dir, port, process_query_fn=process_query_fn
     )
@@ -459,6 +552,10 @@ def _cleanup_stale_collection_chrome(
 
 
 def _kill_process_tree(pid: int) -> None:
+    # Windows 走 taskkill（行为与历史版本逐字一致）；macOS / Linux 走 POSIX 信号。
+    if os.name != "nt":
+        _kill_process_tree_posix(pid)
+        return
     try:
         subprocess.run(
             ["taskkill", "/PID", str(pid), "/T"],
@@ -477,6 +574,76 @@ def _kill_process_tree(pid: int) -> None:
         )
     except (OSError, subprocess.SubprocessError):
         return
+
+
+def _posix_process_tree_pids(pid: int) -> list[int]:
+    """Return ``pid`` plus its descendants according to ps."""
+
+    ps = shutil.which("ps") or "ps"
+    try:
+        result = subprocess.run(
+            [ps, "-Ao", "pid=,ppid="],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=5,
+            **no_console_window_kwargs(),
+        )
+    except (OSError, subprocess.SubprocessError):
+        return [pid]
+    children: dict[int, list[int]] = {}
+    for line in str(getattr(result, "stdout", "") or "").splitlines():
+        parts = line.split()
+        if len(parts) < 2:
+            continue
+        try:
+            child, parent = int(parts[0]), int(parts[1])
+        except ValueError:
+            continue
+        children.setdefault(parent, []).append(child)
+    tree = [pid]
+    queue = [pid]
+    while queue:
+        current = queue.pop(0)
+        for child in children.get(current, ()):
+            if child not in tree:
+                tree.append(child)
+                queue.append(child)
+    return tree
+
+
+def _kill_process_tree_posix(
+    pid: int,
+    *,
+    kill_fn: Callable[[int, int], None] | None = None,
+    sleep_fn: Callable[[float], None] = time.sleep,
+    tree_pids_fn: Callable[[int], list[int]] | None = None,
+) -> None:
+    """Best-effort terminate a process tree on macOS / Linux.
+
+    Chrome ignores SIGTERM in some states, so this mirrors the Windows flow:
+    polite signal first, then SIGKILL the same pid set.
+    """
+
+    if pid <= 1:
+        return
+    kill = kill_fn or os.kill
+    # SIGKILL 只在 POSIX 存在；Windows 上保持同值只是为了让单元测试可跑（该分支不会在 Windows 执行）。
+    force_signal = getattr(signal, "SIGKILL", signal.SIGTERM)
+    pids = tree_pids_fn(pid) if tree_pids_fn is not None else _posix_process_tree_pids(pid)
+    if pid not in pids:
+        pids.append(pid)
+    for target in pids:
+        try:
+            kill(target, signal.SIGTERM)
+        except (OSError, ValueError):
+            continue
+    sleep_fn(0.2)
+    for target in pids:
+        try:
+            kill(target, force_signal)
+        except (OSError, ValueError):
+            continue
 
 
 def _reset_dawn_graphite_cache(profile_dir: Path) -> None:

@@ -107,6 +107,12 @@ def test_automation_tables_localize_timestamps_and_error_codes() -> None:
     assert "AUTOMATION_ERROR_LABELS" in script
     for code, label in [
         ("save_result_not_proven", "无法确认草稿已保存"),
+        # 马帮拒绝保存的提示（描述图片宽度 < 700）必须有自己的中文说明，
+        # 不能只剩「无法确认草稿已保存」这种看不出原因的兜底文案。
+        ("description_image_width_too_small", "商品描述里的图片宽度小于"),
+        # 保存前的自动修复（编辑图片 → 全选 → 1000px → 更改）也要有中文说明与步骤名。
+        ("description_image_width_fix_failed", "描述图片自动修复没成功"),
+        ("description_image_editor_not_found", "没找到「编辑图片」入口"),
         ("pre_save_validation_failed", "保存前校验未通过"),
         ("cnsc_payload_invalid", "CNSC 刊登内容校验未通过"),
         ("watermark_unconfigured", "水印未配置"),
@@ -150,7 +156,10 @@ def test_listing_copies_panel_has_select_all_button_below_batch_button() -> None
     select_idx = html.index('id="select-all-listing-copies-btn"')
     assert select_idx > batch_idx
     # 提示文字说明范围：只勾新建；已完成按时间分组可折叠
-    assert "只勾选还没跑过的副本" in html
+    assert "只勾选还没跑过、也没在执行/排队的副本" in html
+    # 全选旁边还有批量删除副本（勾选后可一次删掉，正在执行的由后端跳过）。
+    assert 'id="delete-selected-listing-copies-btn"' in html
+    assert "批量删除副本" in html
     assert "已完成区按完成时间分组" in html
     # toggle 逻辑与文案更新函数存在
     assert "toggleSelectAllListingCopies" in script

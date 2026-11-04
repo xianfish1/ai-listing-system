@@ -32,12 +32,29 @@ def test_app_js_maps_actions_to_aspects_and_calls_the_endpoint() -> None:
     assert '"retry-colors": { aspect: "colors", label: "颜色图" }' in script
     assert "function retryCheckedBaseProducts(aspect, label)" in script
     assert "regenerate-listing" in script
-    assert "body: JSON.stringify({ aspect })" in script
+    assert "body: JSON.stringify(body)" in script
     # 勾选（含全选）是唯一来源；串行执行并显示进度/失败明细。
     assert "state.selectedBaseProducts" in script
     assert "products.length" in script
     assert "index + 1" in script
     assert "setBaseProductRetryBusy(true)" in script
+
+
+def test_retry_title_exposes_a_skill_selector() -> None:
+    html = INDEX.read_text(encoding="utf-8")
+    script = APP.read_text(encoding="utf-8")
+    styles = STYLES.read_text(encoding="utf-8")
+
+    assert 'id="base-retry-skill"' in html
+    assert "标题规则：自动匹配（默认）" in html
+    assert "baseRetrySkills" in script
+    assert 'api("/api/title-skills")' in script
+    assert "selectedBaseRetrySkillId()" in script
+    # 选了规则就强制指定，不再被商品范围推断挡掉。
+    assert "skill_id: skillId" in script
+    assert "force_skill: true" in script
+    assert ".base-retry-skill" in styles
+    assert html.count("feature=retry-title-skill-v1") == 2
 
 
 def test_retry_buttons_are_disabled_while_running() -> None:
