@@ -82,3 +82,31 @@ def test_dialog_layout_timeline_collapsed_at_bottom_and_sticky_confirm_bar() -> 
     sticky = styles[styles.index(".automation-job-detail-dialog .automation-manual-finish {"):]
     sticky = sticky[: sticky.index("}")]
     assert "position: sticky" in sticky and "bottom: 0" in sticky
+
+
+def test_media_stages_render_from_status_not_only_ok() -> None:
+    """现场：模板默认视频其实附加成功了（status=attached），执行步骤却显示成未完成。
+
+    执行器媒体阶段回的是 status（attached/skipped/warning），runner 现在连 code 一起
+    透传；界面要按 status 三态渲染，不能只看 ok。"""
+
+    script = (ROOT / "apps" / "web" / "app.js").read_text(encoding="utf-8")
+
+    assert 'MEDIA_DONE_STATUSES = new Set(["attached", "uploaded", "already_attached"' in script
+    assert 'const skipped = stepStatus === "skipped";' in script
+    assert 'step.ok === true || MEDIA_DONE_STATUSES.has(stepStatus)' in script
+    # 媒体子步骤的那几种状态词必须有中文呈现，否则会显示灰色的英文原词。
+    for status, label in [
+        ("attached", "已附加"),
+        ("uploaded", "已上传"),
+        ("already_attached", "已存在"),
+    ]:
+        assert f'{status}: {{ tone: "done", label: "{label}" }}' in script
+
+
+def test_runner_forwards_media_status_and_code_into_steps() -> None:
+    """只透传 ok 会让界面拿不到 attached/skipped，也拿不到失败原因码。"""
+    runner = (ROOT / "scripts" / "browser_use_runner.py").read_text(encoding="utf-8")
+
+    assert '"status": str(event.get("status") or ""),' in runner
+    assert '"code": str(event.get("code") or ""),' in runner

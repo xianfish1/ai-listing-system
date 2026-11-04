@@ -7,6 +7,10 @@ const path = require('node:path');
 
 const executor = require('../scripts/mabang_playwright_executor.cjs');
 
+// 执行器的事件流默认会写 stdout（给 runner 解析），跑 node --test 时这些非 TAP 行会把
+// 报告打断（计数只显示一部分），所以测试里默认关掉；需要截事件的用例自己临时打开。
+process.env.MABANG_EXECUTOR_SILENT = '1';
+
 test('CNSC listing copy editor presents the frozen price data and editable warehouse overrides', () => {
   const app = fs.readFileSync(path.join(__dirname, '../apps/web/app.js'), 'utf8');
   const html = fs.readFileSync(path.join(__dirname, '../apps/web/index.html'), 'utf8');
@@ -1278,6 +1282,31 @@ test('media stage failures become independent warnings', async () => {
   assert.equal(result.warnings.length, 2);
 });
 
+test('media stage results carry ok so the step list stops painting the video as pending', async () => {
+  // 现场：模板默认视频其实附加成功了（status=attached），但执行步骤只认 ok，
+  // 于是「商品视频」永远显示成未完成。这里钉住 status→ok 的折算。
+  const attached = await executor.runOptionalMediaStages({}, { video: { default_video_id: 'v1', select_by_id: true } }, {
+    applyWatermark: async () => ({ status: 'skipped', code: 'watermark_unconfigured' }),
+    uploadVideo: async () => ({ status: 'attached', video_id: 'v1', source: 'template_default' }),
+  });
+  assert.equal(attached.video_upload.ok, true);
+  // 跳过（没配视频/水印）不是失败，保持 null，由界面按「已跳过」渲染。
+  assert.equal(attached.apply_main_image_watermark.ok, null);
+
+  const skipped = await executor.runOptionalMediaStages({}, { video: {} }, {
+    applyWatermark: async () => ({ status: 'applied' }),
+    uploadVideo: async () => ({ status: 'skipped', code: 'video_missing' }),
+  });
+  assert.equal(skipped.video_upload.ok, null);
+  assert.equal(skipped.video_upload.status, 'skipped');
+
+  const warned = await executor.runOptionalMediaStages({}, { video: {} }, {
+    applyWatermark: async () => ({ status: 'applied' }),
+    uploadVideo: async () => ({ status: 'warning', code: 'video_store_not_found' }),
+  });
+  assert.equal(warned.video_upload.ok, false);
+});
+
 // ---------------------------------------------------------------------------
 // Watermark interaction mock �?mirrors the REAL Mabang markup (read from publish-ui
 // main.js on 2026-10-01): an el-dropdown (trigger=click) whose rows are
@@ -2102,7 +2131,7 @@ test('描述插图：上传进去的尺码图要验位置，不在末尾就撤�
   );
   // 上传尺码图之后必须读回正文验位置（原先直接当 existing，落在最前面也照样成功）
   assert.match(body, /const uploadedHtml = await readDescriptionHtml\(frame, editorId\);/);
-  assert.match(body, /if \(descriptionMediaAppendedAtTail\(uploadedHtml, \[sizeChartUrl\], existing\)\)/);
+  assert.match(body, /if \(descriptionMediaAppendedAtTail\(uploadedHtml, \[sizeChartUrl\], existing, \{ minTextBefore: beforeTextLength \}\)\)/);
   // 位置不对：先撤回这张，再由批量插图按地址插到末尾
   assert.match(body, /const undone = await undoDescriptionInserts\(frame, editor, editorId, existing\.length, 1\);/);
   assert.match(body, /size_chart:upload-reinsert/);
@@ -2333,12 +2362,18 @@ test('描述编辑器缺失时�?��警告，不抛错（草稿照样保存�
   };
   const events = [];
   const originalWrite = process.stdout.write.bind(process.stdout);
+  // emit 的事件流默认可以用 MABANG_EXECUTOR_SILENT=1 关掉（跑测试时 TAP 不被污染）；
+  // 这个用例正是要截事件，所以临时把它打开。
+  const originalSilent = process.env.MABANG_EXECUTOR_SILENT;
+  process.env.MABANG_EXECUTOR_SILENT = '0';
   process.stdout.write = (chunk) => { events.push(String(chunk)); return true; };
   let result;
   try {
     result = await executor.appendDescriptionMedia(frame, { store: { listing_mode: 'site' } });
   } finally {
     process.stdout.write = originalWrite;
+    if (originalSilent === undefined) delete process.env.MABANG_EXECUTOR_SILENT;
+    else process.env.MABANG_EXECUTOR_SILENT = originalSilent;
   }
   assert.equal(result.status, 'warning');
   assert.equal(result.code, 'description_editor_id_missing');
@@ -2748,7 +2783,9 @@ test('失败的那次尝试上报 stage/code，界面才能显示失败原因而
   // 进度接口只存 stage / code 两个字段（storage.record_automation_job_progress）。
   assert.match(source, /emit\('attempt_failed', \{ \.\.\.entry, stage: entry\.failed_stage, code: entry\.error \}\)/);
   // 步骤列表要给失败行补上中文原因。
-  assert.match(app, /const reason = step\.ok === false \? automationErrorLabel\(step\.code \|\| ""\) : ""/);
+  // 媒体阶段（视频/漏插图）也要给「跳过」补原因，所以判定从 ok === false 扩成 failed||skipped。
+  assert.match(app, /const stepCode = step\.code \|\| stageInfo\.code \|\| "";/);
+  assert.match(app, /const reason = \(failed \|\| skipped\) && stepCode \? automationErrorLabel\(stepCode\) : ""/);
   assert.match(app, /class="automation-step-reason"/);
 });
 
@@ -3026,4 +3063,55 @@ test('描述图片宽度修复接在保存前校验之前（append 之后），�
   const validate = source.indexOf("['validate_before_save'");
   assert.ok(stage > append, '描述图片都在 append_description_media 之后才齐');
   assert.ok(stage < validate, '修复必须发生在保存前校验/保存之前');
+});
+
+test('描述插图：正文后到把图挤到前面时位置校验必须失败', () => {
+  // 现场症状：图有时跑到描述最前面。空正文时落光标＝落在位置 0，正文随后才填上，
+  // 旧校验只看「最后一张图之后没有正文」，这种情形会误判成功。
+  const pic = 'https://cf.shopee.co.id/file/pic01';
+  const textBefore = '<p>这件T恤是纯棉面料，适合夏天日常穿着。</p>';
+  const minTextBefore = executor.descriptionTextLength(textBefore);
+
+  const ok = `${textBefore}<p><img src="${pic}"></p>`;
+  assert.equal(executor.descriptionMediaAppendedAtTail(ok, [pic], [], { minTextBefore }), true);
+
+  // 图插在最前面、正文后到：图后面虽然没正文，但图前面的正文变少了 → 不算插在末尾。
+  const imagesFirst = `<p><img src="${pic}"></p>${textBefore}`;
+  assert.equal(executor.descriptionMediaAppendedAtTail(imagesFirst, [pic], [], { minTextBefore }), false);
+});
+
+test('描述插图：正文没填上之前不许插（避免插在位置 0）', () => {
+  const expected = '这件T恤是纯棉面料，适合夏天日常穿着。\n\n机洗冷水。';
+  assert.equal(executor.descriptionTextLoaded('', expected), false);
+  assert.equal(executor.descriptionTextLoaded('其它商品的正文', expected), false);
+  assert.equal(executor.descriptionTextLoaded(`这件T恤是纯棉面料，适合夏天日常穿着。 机洗冷水。`, expected), true);
+  // 任务里本来就没有详情：空正文是正常的，不算「没准备好」。
+  assert.equal(executor.descriptionTextLoaded('', ''), true);
+});
+
+test('描述插图：引用产品图弹窗在点确定前要重新钉光标', () => {
+  const source = fs.readFileSync(path.join(__dirname, '../scripts/mabang_playwright_executor.cjs'), 'utf8');
+  const body = source.slice(
+    source.indexOf('async function insertDescriptionProductImages'),
+    source.indexOf('// 插图落到正文中间时撤掉这批'),
+  );
+  // 勾选期间焦点在弹窗里，range 可能已经退回开头：确定前必须再钉一次。
+  assert.match(body, /if \(typeof ensureCaret === 'function'\) await ensureCaret\(\);/);
+  const batch = source.slice(
+    source.indexOf('async function insertDescriptionMediaBatch'),
+    source.indexOf('// 描述插图失败不阻断草稿'),
+  );
+  assert.match(batch, /insertDescriptionProductImages\(frame, editorId, pendingProducts\.map\(\(entry\) => entry\.url\), ensureCaret\)/);
+});
+
+test('描述插图：插完要静置再复验一次位置，抓正文异步回填', () => {
+  const source = fs.readFileSync(path.join(__dirname, '../scripts/mabang_playwright_executor.cjs'), 'utf8');
+  const body = source.slice(
+    source.indexOf('async function appendDescriptionMediaOnce'),
+    source.indexOf('// 插一批图：尺码表先、产品图后'),
+  );
+  assert.match(body, /await sleep\(DESCRIPTION_TAIL_SETTLE_MS\);/);
+  assert.match(body, /descriptionMediaAppendedAtTail\(settledHtml, expectedOrder, sizeChartExisting, \{ minTextBefore: beforeTextLength \}\)/);
+  // 正文没填上就不插，交给警告（description_content_not_ready）
+  assert.match(body, /description_content_not_ready/);
 });

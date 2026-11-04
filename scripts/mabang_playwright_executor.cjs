@@ -157,7 +157,11 @@ function reportProgress(event, payload) {
 }
 
 function emit(event, data = {}) {
-  process.stdout.write(EVENT_MARKER + JSON.stringify({ event, ...data, at: new Date().toISOString() }) + '\n');
+  // 单测里把事件流关掉：这些 JSON 行写在 stdout 上会把 node --test 的 TAP 输出打乱，
+  // 整份测试报起来像「跑了一半就断」（实际结果没问题，但计数看不见）。
+  if (process.env.MABANG_EXECUTOR_SILENT !== '1') {
+    process.stdout.write(EVENT_MARKER + JSON.stringify({ event, ...data, at: new Date().toISOString() }) + '\n');
+  }
   reportProgress(event, data);
 }
 
@@ -3438,6 +3442,11 @@ const DESCRIPTION_MEDIA_MAX_IMAGES = 30;
 const DESCRIPTION_MEDIA_TIMEOUT = 20000;
 const DESCRIPTION_CONTENT_TIMEOUT = 10000;
 const DESCRIPTION_MEDIA_ATTEMPTS = 3;
+// 正文读稳之后再多等一段：任务里有详情文字、编辑器却还是空的，就等它填上再插图
+// （空正文时落光标＝落在位置 0，图会跑到描述最前面）。
+const DESCRIPTION_CONTENT_GRACE = 6000;
+// 插完先静置再复验一次位置：马帮详情页会异步回填正文，回填把图挤到前面时这里能抓到。
+const DESCRIPTION_TAIL_SETTLE_MS = 800;
 // 「上传图片」要把本地文件发给马帮、等它回地址再落到正文，比按地址引用慢一截。
 const DESCRIPTION_SIZE_CHART_UPLOAD_TIMEOUT = 60000;
 
@@ -3639,9 +3648,22 @@ function descriptionImageIndexOf(text, url, from = 0) {
   return match ? match.index : -1;
 }
 
+// 描述 HTML 里的正文文字长度（去掉图片标签与空白）。用来判断「正文是不是还在这批图
+// 前面」——正文异步回填会把已有图片挤到最前面，这条能抓到。
+function descriptionTextLength(html) {
+  return String(html || '')
+    .replace(/<img\b[^>]*>/gi, '')
+    .replace(/&nbsp;/gi, ' ')
+    .replace(/<[^>]*>/g, '')
+    .replace(/\s+/g, '')
+    .length;
+}
+
 // 新插的图必须压在描述正文最下面：本批地址按顺序出现，图与图之间及最后一张之后
 // 不能再有正文，描述里原有的图也必须仍在本批之前。
-function descriptionMediaAppendedAtTail(html, inserted, existing = []) {
+// ``minTextBefore``：插图前正文的文字长度。正文后加载／回填会把图挤到最前面，
+// 只有「图面的文字没变少」才算真的插在末尾。
+function descriptionMediaAppendedAtTail(html, inserted, existing = [], options = {}) {
   const text = String(html || '');
   const batch = (inserted || []).filter(Boolean);
   if (!batch.length) return true;
@@ -3659,6 +3681,8 @@ function descriptionMediaAppendedAtTail(html, inserted, existing = []) {
     lastEnd = tagEnd < 0 ? index + match.length : tagEnd + 1;
     cursor = index + match.length;
   }
+  const minTextBefore = Math.max(0, Number(options.minTextBefore) || 0);
+  if (minTextBefore > 2 && descriptionTextLength(text.slice(0, firstIndex)) + 2 < minTextBefore) return false;
   for (const url of existing || []) {
     const index = descriptionImageIndexOf(text, url);
     if (index >= 0 && index > firstIndex) return false;
@@ -3680,6 +3704,8 @@ function descriptionMediaPlacementEvidence(html, inserted, existing = []) {
   return {
     html_length: text.length,
     first_marker_index: firstIndex,
+    // 第一张新图前面还剩多少正文字符：比插图前少 = 正文跑到图后面去了。
+    text_before_first: firstIndex < 0 ? 0 : descriptionTextLength(text.slice(0, firstIndex)),
     tail_after_last: lastEnd < 0 ? text.slice(-120) : text.slice(lastEnd, lastEnd + 160),
     existing_after_first: (existing || []).some((url) => descriptionImageIndexOf(text, url) > firstIndex && firstIndex >= 0),
   };
@@ -3892,6 +3918,28 @@ async function readDescriptionHtml(frame, editorId) {
   }, editorId);
 }
 
+async function readDescriptionText(frame, editorId) {
+  return frame.evaluate((id) => {
+    const editor = document.getElementById(id);
+    return editor ? String(editor.innerText || '') : '';
+  }, editorId).catch(() => '');
+}
+
+// 任务里的详情文字（空 = 这个商品本来就没有详情）。
+function descriptionExpectedText(task) {
+  return cleanText((task.basic_info || {}).description || '');
+}
+
+// 编辑器里的正文是不是已经填上了任务要求的详情（取开头一段比，避免整段比对被
+// 换行/空格差异影响）。
+function descriptionTextLoaded(editorText, expected) {
+  const want = String(expected || '').replace(/\s+/g, '');
+  if (!want) return true;
+  const have = String(editorText || '').replace(/\s+/g, '');
+  if (!have) return false;
+  return have.includes(want.slice(0, Math.min(40, want.length)));
+}
+
 async function waitForDescriptionImages(frame, editorId, expectedCount, timeoutMs = DESCRIPTION_MEDIA_TIMEOUT) {
   const deadline = Date.now() + timeoutMs;
   let urls = await readDescriptionImageUrls(frame, editorId);
@@ -3980,7 +4028,9 @@ async function closeReferenceProductImageDialog(dialog) {
 // 「产品图片」→「引用产品图」弹窗：勾选待插的那些再确定。
 // 按地址匹配而不是按前 N 项——重跑（重试、--resume-from-stage）时描述里已经有的图
 // 不在待插集合里，按位置勾会把它们再插一遍并漏掉后面的图。
-async function insertDescriptionProductImages(frame, editorId, wantedUrls) {
+// ensureCaret 在点「确定」之前再钉一次光标：打开弹窗、勾选都会把焦点从编辑器带走，
+// wangEditor 内部保存的 range 可能已经退回开头，图就插到描述最前面去了。
+async function insertDescriptionProductImages(frame, editorId, wantedUrls, ensureCaret) {
   const wanted = new Set((wantedUrls || []).filter(Boolean));
   if (!wanted.size) return 0;
   const entry = frame.locator(`#${editorId}_product_img`);
@@ -4021,6 +4071,9 @@ async function insertDescriptionProductImages(frame, editorId, wantedUrls) {
     picked += 1;
   }
   const confirm = dialog.locator('button').filter({ hasText: spacedTextPattern(TEXT.confirm) }).first();
+  // 勾选期间焦点一直在弹窗里：点确定之前把光标重新钉回正文末尾，否则 wangEditor
+  // 会按它此刻保存的 range 插图（弹窗一开可能已经退回开头 → 图插到描述最前面）。
+  if (typeof ensureCaret === 'function') await ensureCaret();
   await confirm.click();
   return picked;
 }
@@ -4040,8 +4093,26 @@ async function undoDescriptionInserts(frame, editor, editorId, expectedCount, in
 
 async function appendDescriptionMediaOnce(frame, task) {
   const { item, editor, editorId } = await descriptionEditorContext(frame);
-  await waitForDescriptionContentReady(frame, editorId);
+  const contentReady = await waitForDescriptionContentReady(frame, editorId);
+  const expectedDescription = descriptionExpectedText(task);
+  if (!contentReady && expectedDescription) {
+    // 任务里有详情文字、编辑器却还没内容：这时候落光标等于落在位置 0，插完图正文才
+    // 到，图就跑到描述最前面（现场症状）。再给一段时间等正文，等不到就不插，
+    // 交给警告让运营人工补图——总比把描述切两半好。
+    const graceDeadline = Date.now() + DESCRIPTION_CONTENT_GRACE;
+    let loaded = false;
+    while (Date.now() < graceDeadline) {
+      if (descriptionTextLoaded(await readDescriptionText(frame, editorId), expectedDescription)) {
+        loaded = true;
+        break;
+      }
+      await sleep(300);
+    }
+    if (!loaded) throw new BlockedError('description_content_not_ready');
+  }
   const existing = await readDescriptionImageUrls(frame, editorId);
+  // 插图前正文的文字长度：插图后必须仍在这批图前面（正文异步回填会把图挤到最前面）。
+  const beforeTextLength = descriptionTextLength(await readDescriptionHtml(frame, editorId));
   const wantsSizeChart = sizeChartRequestedByTask(task);
   const sizeChartSource = descriptionSizeChartSource(task);
   const productImageUrlCandidates = await collectProductImageUrls(frame).catch(() => []);
@@ -4072,7 +4143,7 @@ async function appendDescriptionMediaOnce(frame, task) {
         // 最前面。这里必须验位置——不在末尾就撤掉这张，交给下面按地址的批量插图重插
         // （那条路有 ensureCaret 与末尾校验，能插回正文底部）。
         const uploadedHtml = await readDescriptionHtml(frame, editorId);
-        if (descriptionMediaAppendedAtTail(uploadedHtml, [sizeChartUrl], existing)) {
+        if (descriptionMediaAppendedAtTail(uploadedHtml, [sizeChartUrl], existing, { minTextBefore: beforeTextLength })) {
           sizeChartExisting = [...existing, sizeChartUrl].filter(Boolean);
           sizeChartMethod = 'size_chart:upload';
         } else {
@@ -4167,11 +4238,20 @@ async function appendDescriptionMediaOnce(frame, task) {
       continue;
     }
     const html = await readDescriptionHtml(frame, editorId);
-    if (descriptionMediaAppendedAtTail(html, expectedOrder, sizeChartExisting)) {
-      attempt = { ...outcome, round: round + 1 };
-      break;
+    const atTail = descriptionMediaAppendedAtTail(html, expectedOrder, sizeChartExisting, { minTextBefore: beforeTextLength });
+    if (atTail) {
+      // 马帮详情页会异步回填正文：验完再静置一下复验，正文后到把图挤到前面时，
+      // 这里能抓到并按失败处理（撤销重插），而不是悄悄留下一堆跑到描述最前面的图。
+      await sleep(DESCRIPTION_TAIL_SETTLE_MS);
+      const settledHtml = await readDescriptionHtml(frame, editorId);
+      if (descriptionMediaAppendedAtTail(settledHtml, expectedOrder, sizeChartExisting, { minTextBefore: beforeTextLength })) {
+        attempt = { ...outcome, round: round + 1 };
+        break;
+      }
+      evidence = { ...descriptionMediaPlacementEvidence(settledHtml, expectedOrder, sizeChartExisting), settled: true };
+    } else {
+      evidence = descriptionMediaPlacementEvidence(html, expectedOrder, sizeChartExisting);
     }
-    evidence = descriptionMediaPlacementEvidence(html, expectedOrder, sizeChartExisting);
     const undone = await undoDescriptionInserts(frame, editor, editorId, sizeChartExisting.length, pending.length);
     evidence.rolled_back = undone;
     if (!undone) break;
@@ -4227,7 +4307,7 @@ async function insertDescriptionMediaBatch(frame, context, pending, sizeChartUrl
   if (pendingProducts.length) {
     let added = 0;
     try {
-      added = await insertDescriptionProductImages(frame, editorId, pendingProducts.map((entry) => entry.url));
+      added = await insertDescriptionProductImages(frame, editorId, pendingProducts.map((entry) => entry.url), ensureCaret);
       methods.push('product_images:reference');
     } catch (error) {
       // 引用弹窗不可用（页面结构变动）时退化为按已上传图片的 URL 逐张插入。
@@ -5413,6 +5493,19 @@ async function runOptionalMediaStages(frame, task, operations = {}) {
     // Attach context (e.g. the video file name) so the operator knows what to act on.
     for (const [key, value] of Object.entries(context)) {
       if (value && stages[stage][key] === undefined) stages[stage][key] = value;
+    }
+    // 媒体阶段只返回 status（attached/skipped/warning…），没有 ok；而执行步骤列表
+    // 只认 ok —— 于是「视频其实已按模板默认视频附加成功」在执行步骤里被画成未完成。
+    // 这里把 status 折算成 ok 一并发出（skipped 保持 null，让界面按「已跳过」渲染）。
+    const mediaStatus = cleanText(stages[stage] && stages[stage].status);
+    if (stages[stage] && stages[stage].ok === undefined) {
+      if (['attached', 'uploaded', 'already_attached', 'already', 'fixed', 'ok', 'done'].includes(mediaStatus)) {
+        stages[stage].ok = true;
+      } else if (mediaStatus === 'skipped') {
+        stages[stage].ok = null;
+      } else if (mediaStatus) {
+        stages[stage].ok = false;
+      }
     }
     if (['warning', 'skipped'].includes(stages[stage].status)) {
       warnings.push({ stage, ...stages[stage] });
@@ -7340,6 +7433,8 @@ module.exports = {
   descriptionProductImageUrls,
   missingDescriptionMedia,
   descriptionMediaAppendedAtTail,
+  descriptionTextLength,
+  descriptionTextLoaded,
   descriptionImageKey,
   descriptionImageIndexOf,
   descriptionScrolledToBottom,

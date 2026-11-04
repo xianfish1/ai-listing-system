@@ -7584,6 +7584,11 @@ const STAGE_STATUS_PRESENTATION = {
   saved_with_warnings: { tone: "done", label: "已保存（有提醒）" },
   warning: { tone: "watch", label: "有提醒" },
   warn: { tone: "watch", label: "有提醒" },
+  // 媒体子步骤（视频/水印）用自己的一套状态词；不认这几种就会显示灰色的英文原词。
+  attached: { tone: "done", label: "已附加" },
+  uploaded: { tone: "done", label: "已上传" },
+  already_attached: { tone: "done", label: "已存在" },
+  fixed: { tone: "done", label: "已处理" },
   skipped: { tone: "idle", label: "已跳过" },
   running: { tone: "watch", label: "执行中" },
   claimed: { tone: "watch", label: "已领取" },
@@ -7597,6 +7602,9 @@ const STAGE_STATUS_PRESENTATION = {
   blocked: { tone: "alert", label: "已阻止" },
   canceled: { tone: "idle", label: "已取消" },
 };
+
+// 媒体阶段判「这一步做成了」的状态词（执行器 runRecoverable 回的就是这些）。
+const MEDIA_DONE_STATUSES = new Set(["attached", "uploaded", "already_attached", "already", "fixed", "ok", "done"]);
 
 function stageStatusPresentation(status) {
   const key = String(status || "").trim().toLowerCase();
@@ -7687,11 +7695,19 @@ function renderAutomationJobDetails(jobId) {
     stepsSection.hidden = false;
     const stepRows = steps.map((step, index) => {
           const label = automationLiveStepLabel(step);
-          const ok = step.ok === true;
-          const glyph = ok ? "done" : (step.ok === false ? "alert" : "running");
+          // 媒体阶段（商品视频/水印）用 status 表达结果：只看 ok 会把「视频已按模板
+          // 默认视频附加」画成灰点未完成，操作员以为没选上。
+          // 老任务的 steps 里没有 status，回退到同名的媒体子步骤状态（照样显示正确）。
+          const stageInfo = (result.stages || {})[step.stage] || {};
+          const stepStatus = String(step.status || stageInfo.status || "").trim().toLowerCase();
+          const skipped = stepStatus === "skipped";
+          const ok = step.ok === true || MEDIA_DONE_STATUSES.has(stepStatus);
+          const failed = step.ok === false || ["warning", "warn", "failed", "error", "blocked"].includes(stepStatus);
+          const glyph = ok ? "done" : (failed ? "alert" : (skipped ? "idle" : "running"));
           const stepTime = formatLocalTime(step.at);
-          // 失败的那一步要直接写出原因，否则界面上只有「步骤」+ 红点，运营看不出为什么。
-          const reason = step.ok === false ? automationErrorLabel(step.code || "") : "";
+          // 失败/跳过的步骤要直接写出原因，否则界面上只有「步骤」+ 点，运营看不出为什么。
+          const stepCode = step.code || stageInfo.code || "";
+          const reason = (failed || skipped) && stepCode ? automationErrorLabel(stepCode) : "";
           return `<li class="automation-step-item"><span class="automation-step-index">${index + 1}</span><span class="row-glyph row-glyph--${glyph}" aria-hidden="true"></span><strong>${escapeHtml(label)}</strong>${reason ? `<span class="automation-step-reason">${escapeHtml(reason)}</span>` : ""}${stepTime !== "-" ? `<time title="${escapeHtml(step.at || "")}">${escapeHtml(stepTime)}</time>` : ""}</li>`;
         }).join("");
     stepsEl.innerHTML = `${stepRows}<li class="automation-step-item automation-step-item--evidence"><span class="automation-step-index">${steps.length + 1}</span><span class="row-glyph row-glyph--${evidenceGlyph}" aria-hidden="true"></span><strong>保存证据</strong><span>${escapeHtml(evidenceText)}</span></li>`;

@@ -71,6 +71,11 @@ def parse_playwright_step_trail(output: str) -> list[dict[str, Any]]:
             "kind": "stage",
             "stage": stage,
             "ok": event.get("ok"),
+            # 媒体阶段（视频/水印）用 status 表达结果（attached / skipped / warning…），
+            # 只透传 ok 会让「视频已按模板默认视频附加」在执行步骤里显示成未完成；
+            # code 供失败/跳过时的原因文案使用。
+            "status": str(event.get("status") or ""),
+            "code": str(event.get("code") or ""),
             "at": event.get("at") or "",
         })
     return trail
