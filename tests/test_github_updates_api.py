@@ -132,7 +132,17 @@ def test_update_status_hides_token_and_reports_configuration(api_port) -> None:
     assert storage.get_github_update_token() == "ghp_test_secret"
 
 
-def test_status_repo_is_empty_when_not_configured(api_port) -> None:
+def test_status_falls_back_to_the_default_repository(api_port) -> None:
+    """没填仓库时开箱即用官方仓库：面板不再提示「还没有配置 GitHub 仓库」。"""
+    status, payload = _request(api_port, "GET", "/api/updates/status")
+
+    assert status == 200
+    assert payload["configured"] is True
+    assert payload["repo"] == github_updates.DEFAULT_REPO
+
+
+def test_status_repo_is_empty_when_default_is_blank(api_port, monkeypatch) -> None:
+    monkeypatch.setattr(github_updates, "DEFAULT_REPO", "")
     status, payload = _request(api_port, "GET", "/api/updates/status")
 
     assert status == 200
@@ -224,7 +234,9 @@ def test_check_update_reports_error_without_500(api_port, monkeypatch) -> None:
     assert payload["update_available"] is False
 
 
-def test_apply_requires_configured_repository(api_port) -> None:
+def test_apply_requires_configured_repository(api_port, monkeypatch) -> None:
+    # 默认仓库会兜底，所以这里显式把默认清空来覆盖「没配置」这条守卫。
+    monkeypatch.setattr(github_updates, "DEFAULT_REPO", "")
     status, payload = _request(api_port, "POST", "/api/updates/apply", {})
 
     assert status == 422

@@ -68,6 +68,9 @@ RELEASE_FILES = (
 )
 
 DEFAULT_API_URL = "https://api.github.com"
+# 开箱即用的版本通道：没填仓库时默认用官方仓库，操作员不用先配置也能检查更新/发布。
+# 想指向别的仓库照旧在 设置 → 版本更新 里改（或 GITHUB_UPDATE_REPO 环境变量）。
+DEFAULT_REPO = "xianfish1/ai-listing-system"
 GITHUB_API_VERSION = "2022-11-28"
 USER_AGENT = "ai-listing-system-updater"
 
@@ -317,7 +320,11 @@ class GitHubConfig:
         nested = data.get("updates")
         updates: Mapping[str, Any] = nested if isinstance(nested, Mapping) else data
 
-        repo_raw = _text(env.get("GITHUB_UPDATE_REPO")) or _text(updates.get("repo"))
+        repo_raw = (
+            _text(env.get("GITHUB_UPDATE_REPO"))
+            or _text(updates.get("repo"))
+            or DEFAULT_REPO
+        )
         token_raw = _text(env.get("GITHUB_UPDATE_TOKEN")) or _text(updates.get("token"))
         api_raw = (
             _text(env.get("GITHUB_API_URL"))
@@ -463,6 +470,13 @@ def _github_proxy_settings() -> tuple[str, tuple[str, ...]]:
     """
 
     proxy_url = (os.getenv("GITHUB_UPDATE_PROXY") or "").strip()
+    if not proxy_url:
+        # 没显式配代理时沿用系统/环境代理（Windows 的 Clash 之类会写进 IE 设置），
+        # 但 direct_hosts 仍然直连：api.github.com 走代理会被按出口 IP 拒（403），
+        # 代理做 TLS 中间解密时 Python 又不认它的证书（现场报
+        # SSL CERTIFICATE_VERIFY_FAILED，而 curl 用 Windows 证书库能通）。
+        proxies = urllib.request.getproxies()
+        proxy_url = (proxies.get("https") or proxies.get("http") or "").strip()
     raw_hosts = (os.getenv("GITHUB_UPDATE_DIRECT_HOSTS") or "api.github.com").strip()
     direct_hosts = tuple(host.strip().lower() for host in raw_hosts.split(",") if host.strip())
     return proxy_url, direct_hosts
@@ -535,12 +549,21 @@ def _map_http_error(exc: urllib.error.HTTPError) -> UpdateError:
 
 def _map_network_error(exc: BaseException) -> UpdateError:
     reason = getattr(exc, "reason", None)
+    # 报错里带上主机名：分不清是 api.github.com 直连挂了、还是走代理的那台挂了，
+    # 现场只能靠猜（SSL/403 两种故障的处理方式完全相反）。
+    host = ""
+    try:
+        raw_url = str(getattr(exc, "filename", "") or getattr(exc, "url", "") or "")
+        host = urllib.parse.urlsplit(raw_url).hostname or ""
+    except ValueError:
+        host = ""
+    where = f"（{host}）" if host else ""
     if isinstance(exc, (TimeoutError, socket.timeout)) or isinstance(
         reason, (TimeoutError, socket.timeout)
     ):
-        return UpdateError("连接 GitHub 超时，请检查网络或代理设置", code="network_timeout")
+        return UpdateError(f"连接 GitHub 超时{where}，请检查网络或代理设置", code="network_timeout")
     detail = _text(reason) or _text(exc) or exc.__class__.__name__
-    return UpdateError(f"连接 GitHub 失败：{detail}，请检查网络或代理设置", code="network_error")
+    return UpdateError(f"连接 GitHub 失败{where}：{detail}，请检查网络或代理设置", code="network_error")
 
 
 class GitHubClient:

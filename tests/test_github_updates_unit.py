@@ -1796,9 +1796,29 @@ def test_publish_script_wires_config_and_run_release(tmp_path: Path, monkeypatch
 def test_proxy_settings_default_direct_hosts(monkeypatch) -> None:
     monkeypatch.delenv("GITHUB_UPDATE_PROXY", raising=False)
     monkeypatch.delenv("GITHUB_UPDATE_DIRECT_HOSTS", raising=False)
+    # 没配代理、系统也没有代理：完全不代理，但 direct_hosts 默认仍要带上 api.github.com。
+    monkeypatch.setattr(gu.urllib.request, "getproxies", lambda: {}, raising=False)
     proxy, direct = gu._github_proxy_settings()
     assert proxy == ""
     assert direct == ("api.github.com",)
+
+
+def test_proxy_settings_falls_back_to_system_proxy_but_keeps_api_direct(monkeypatch) -> None:
+    """系统装了代理（Clash 之类）也不让 api.github.com 走它：走代理会被按出口 IP 拒，
+    代理做 TLS 中间解密时 Python 还不认它的证书（现场 SSL CERTIFICATE_VERIFY_FAILED）。"""
+    import urllib.request
+
+    monkeypatch.delenv("GITHUB_UPDATE_PROXY", raising=False)
+    monkeypatch.delenv("GITHUB_UPDATE_DIRECT_HOSTS", raising=False)
+    monkeypatch.setattr(
+        urllib.request,
+        "getproxies",
+        lambda: {"https": "http://127.0.0.1:7890", "http": "http://127.0.0.1:7890"},
+        raising=False,
+    )
+    proxy, direct = gu._github_proxy_settings()
+    assert proxy == "http://127.0.0.1:7890"
+    assert "api.github.com" in direct
 
 
 def test_proxy_settings_custom(monkeypatch) -> None:
@@ -1838,10 +1858,27 @@ def test_http_opener_uses_split_proxy_when_configured(monkeypatch) -> None:
 
 
 def test_http_opener_default_without_proxy_env(monkeypatch) -> None:
+    import urllib.request
+
     monkeypatch.delenv("GITHUB_UPDATE_PROXY", raising=False)
+    monkeypatch.setattr(urllib.request, "getproxies", lambda: {}, raising=False)
     monkeypatch.setattr(gu, "_HTTP_OPENER", None)
     opener = gu._http_opener()
     assert not any(isinstance(handler, gu._SplitProxyHandler) for handler in opener.handlers)
+    monkeypatch.setattr(gu, "_HTTP_OPENER", None)
+
+
+def test_http_opener_uses_system_proxy_with_api_direct(monkeypatch) -> None:
+    import urllib.request
+
+    monkeypatch.delenv("GITHUB_UPDATE_PROXY", raising=False)
+    monkeypatch.setattr(
+        urllib.request, "getproxies", lambda: {"https": "http://127.0.0.1:7890"}, raising=False
+    )
+    monkeypatch.setattr(gu, "_HTTP_OPENER", None)
+    opener = gu._http_opener()
+    split = [handler for handler in opener.handlers if isinstance(handler, gu._SplitProxyHandler)]
+    assert split and "api.github.com" in split[0]._direct_hosts
     monkeypatch.setattr(gu, "_HTTP_OPENER", None)
 
 
