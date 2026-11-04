@@ -1843,3 +1843,9 @@ def test_http_opener_default_without_proxy_env(monkeypatch) -> None:
     opener = gu._http_opener()
     assert not any(isinstance(handler, gu._SplitProxyHandler) for handler in opener.handlers)
     monkeypatch.setattr(gu, "_HTTP_OPENER", None)
+
+
+def test_release_file_whitelist_includes_macos_launcher() -> None:
+    # macOS / Linux 靠 start-api.sh 启动；不在白名单里，在线更新就不会把它带到 mac 上。
+    assert "start-api.sh" in gu.RELEASE_FILES
+    assert gu._allowed_release_path("start-api.sh") is True

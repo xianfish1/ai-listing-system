@@ -62,6 +62,7 @@ RELEASE_FILES = (
     "README.md",
     "AGENTS.md",
     "start-api.bat",
+    "start-api.sh",
     "start-api-silent.vbs",
     "run_api_silent.pyw",
     "preview_launch.py",
