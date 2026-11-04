@@ -1845,7 +1845,11 @@ def test_http_opener_default_without_proxy_env(monkeypatch) -> None:
     monkeypatch.setattr(gu, "_HTTP_OPENER", None)
 
 
-def test_release_file_whitelist_includes_macos_launcher() -> None:
-    # macOS / Linux 靠 start-api.sh 启动；不在白名单里，在线更新就不会把它带到 mac 上。
-    assert "start-api.sh" in gu.RELEASE_FILES
-    assert gu._allowed_release_path("start-api.sh") is True
+def test_release_archive_avoids_files_older_clients_reject() -> None:
+    # 更新包由「正在运行的那个版本」自己的白名单校验：v1.0.1 的 RELEASE_FILES 里没有
+    # start-api.sh，包里多带这个顶层文件会让整包被拒（安装包包含不允许的路径）。
+    # 因此它只能进「新机部署包」，不能进更新安装包。
+    assert "start-api.sh" not in gu.RELEASE_FILES
+    assert gu._allowed_release_path("start-api.sh") is False
+    deploy = _load_script("build_deploy_package")
+    assert "start-api.sh" in deploy.DEPLOY_EXTRA_FILES

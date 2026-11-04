@@ -32,9 +32,12 @@ if str(PROJECT_ROOT) not in sys.path:
 from services.api import github_updates  # noqa: E402
 
 # 额外打进部署包的顶层文件（更新通道白名单之外、但新机开箱即用所必需）。
+# 注意：start-api.sh 只能放这里 —— 放进 RELEASE_FILES 会让安装包带上它，
+# 而 v1.0.1 这类老版本的校验白名单没有它，会直接拒绝整个更新包。
 DEPLOY_EXTRA_FILES = (
     ".env.example",
     "package.json",
+    "start-api.sh",
 )
 # 额外打包的目录（整目录收集，沿用发布器同一套 skip 规则）。
 DEPLOY_EXTRA_ROOTS = (
