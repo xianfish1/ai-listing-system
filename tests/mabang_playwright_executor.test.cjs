@@ -1971,16 +1971,18 @@ test('尺码表图先插、引用产品图后插，且失败降级为�?�?', 
   // �?URL 插图前再钉一次光标：�?���?会�? wangEditor 保存�?range 漂回正文�?���?
   // 钉不住就整批不插（宁�?��插也不把描述切两半）�?
   assert.match(body, /const ensureCaret = async \(\) => \{[\s\S]{0,160}?throw new BlockedError\('description_caret_not_at_end'\);[\s\S]{0,20}?\};/);
-  assert.match(source, /await editor\.press\('Control\+End'\)\.catch\(\(\) => \{\}\);/);
+  // 文末快捷键按平台：Mac 是 Cmd+↓，其它是 Control+End（2026-11 兼容修复）。
+  assert.match(source, /const endShortcut = descriptionEndShortcut\(await descriptionPlatform\(frame\)\);/);
+  assert.match(source, /await editor\.press\(endShortcut\)\.catch\(\(\) => \{\}\);/);
   assert.match(source, /range\.collapse\(false\);/);
   // 位置不�?就把这批撤掉重来，最�?3 �??�撤�?次数按这批插入的图数封顶（撤多了会撤到�?文）�?
   assert.match(source, /const DESCRIPTION_MEDIA_ATTEMPTS = 3;/);
   assert.match(source, /description_media_position_not_at_tail/);
   // 回滚基线带上已经插进去的�?��尺码图（sizeChartExisting），�?��它一起撤掉�??
-  assert.match(source, /const undone = await undoDescriptionInserts\(frame, editor, editorId, sizeChartExisting\.length, pending\.length\);/);
+  assert.match(source, /const undone = await undoDescriptionInserts\(frame, editor, editorId, sizeChartExisting\.length, pending\.length, baseline\);/);
   assert.match(source, /const attempts = Math\.max\(3, Math\.min\(20, Number\(insertedCount\) \+ 2\)\);/);
   // �?批插到一半失败也要撤干净：否则尺码表留在正文里把描述切成两半�?
-  assert.match(source, /catch \(error\) \{[\s\S]{0,400}?const rolled = await undoDescriptionInserts\(frame, editor, editorId, sizeChartExisting\.length, pending\.length\);[\s\S]{0,120}?if \(!rolled\) break;[\s\S]{0,40}?continue;/);
+  assert.match(source, /catch \(error\) \{[\s\S]{0,400}?const rolled = await undoDescriptionInserts\(frame, editor, editorId, sizeChartExisting\.length, pending\.length, baseline\);[\s\S]{0,120}?if \(!rolled\) \{[\s\S]{0,40}?rollbackFailed = true;[\s\S]{0,40}?break;/);
   // 失败不阻�?��稿：appendDescriptionMedia 捕获�?emit warning�?
   assert.match(source, /const warning = \{\s*status: 'warning',/);
   assert.match(source, /emit\('stage', \{ stage: 'append_description_media', \.\.\.warning \}\)/);
@@ -2133,7 +2135,7 @@ test('描述插图：上传进去的尺码图要验位置，不在末尾就撤�
   assert.match(body, /const uploadedHtml = await readDescriptionHtml\(frame, editorId\);/);
   assert.match(body, /if \(descriptionMediaAppendedAtTail\(uploadedHtml, \[sizeChartUrl\], existing, \{ minTextBefore: beforeTextLength \}\)\)/);
   // 位置不对：先撤回这张，再由批量插图按地址插到末尾
-  assert.match(body, /const undone = await undoDescriptionInserts\(frame, editor, editorId, existing\.length, 1\);/);
+  assert.match(body, /const undone = await undoDescriptionInserts\(frame, editor, editorId, existing\.length, 1, baseline\);/);
   assert.match(body, /size_chart:upload-reinsert/);
   // 撤不回来：不插第二张，位置问题作为警告交运营
   assert.match(body, /description_size_chart_position_not_at_tail/);
@@ -2180,7 +2182,9 @@ test('描述�?��插本地尺码图：走「上传图片�?�页签，插
   assert.match(uploadBody, /await ensureCaret\(\);/);
   assert.match(uploadBody, /const urls = await waitForDescriptionImages\(/);
   assert.match(uploadBody, /DESCRIPTION_SIZE_CHART_UPLOAD_TIMEOUT/);
-  assert.match(uploadBody, /return String\(urls\[urls\.length - 1\] \|\| ''\);/);
+  // 新图的地址按「上传前后差集」认：落在正文前面时末位那张是旧图，不能取 urls 末位。
+  assert.match(uploadBody, /const added = before \? newDescriptionImages\(before, urls\) : urls\.slice\(beforeCount\);/);
+  assert.match(uploadBody, /return String\(added\[added\.length - 1\] \|\| ''\);/);
   // 插进去之后并�?existing：去重�?�顺序�?�位�?��验与「网络图片�?�那条路完全�?致�??
   assert.match(source, /sizeChartExisting = \[\.\.\.existing, sizeChartUrl\]\.filter\(Boolean\);/);
   assert.match(source, /const plan = buildDescriptionMediaPlan\(\{ sizeChartUrl, productImageUrls \}\);/);
@@ -3114,4 +3118,178 @@ test('描述插图：插完要静置再复验一次位置，抓正文异步回�
   assert.match(body, /descriptionMediaAppendedAtTail\(settledHtml, expectedOrder, sizeChartExisting, \{ minTextBefore: beforeTextLength \}\)/);
   // 正文没填上就不插，交给警告（description_content_not_ready）
   assert.match(body, /description_content_not_ready/);
+});
+
+// ---------------------------------------------------------------------------
+// Mac 兼容：撤销 / 文末快捷键按受控浏览器平台切换（2026-11-05）
+// ---------------------------------------------------------------------------
+test('描述插图：撤销与文末快捷键按受控浏览器平台切换', async () => {
+  const macFrame = {
+    page: () => ({}),
+    evaluate: async () => ({ platform: 'MacIntel', userAgent: 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)' }),
+  };
+  const mac = await executor.descriptionPlatform(macFrame);
+  assert.equal(mac.is_mac, true);
+  assert.equal(mac.source, 'browser');
+  assert.equal(executor.descriptionUndoShortcut(mac), 'Meta+z');
+  assert.equal(executor.descriptionEndShortcut(mac), 'Meta+ArrowDown');
+
+  const winFrame = {
+    page: () => ({}),
+    evaluate: async () => ({ platform: 'Win32', userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)' }),
+  };
+  const win = await executor.descriptionPlatform(winFrame);
+  assert.equal(win.is_mac, false);
+  assert.equal(executor.descriptionUndoShortcut(win), 'Control+z');
+  assert.equal(executor.descriptionEndShortcut(win), 'Control+End');
+
+  // 浏览器读不到时回退执行器所在系统，且不许把「读失败」当 Mac。
+  const brokenFrame = { page: () => ({}), evaluate: async () => { throw new Error('detached'); } };
+  const broken = await executor.descriptionPlatform(brokenFrame);
+  assert.equal(broken.source, 'node');
+  assert.equal(broken.is_mac, process.platform === 'darwin');
+  assert.equal(executor.descriptionEndShortcut(broken), process.platform === 'darwin' ? 'Meta+ArrowDown' : 'Control+End');
+
+  // 同一页面只读一次（WeakMap 按 page 缓存），两条插图路径不会反复读 navigator。
+  let reads = 0;
+  const page = {};
+  const cachedFrame = {
+    page: () => page,
+    evaluate: async () => { reads += 1; return { platform: 'MacIntel', userAgent: 'Macintosh' }; },
+  };
+  await executor.descriptionPlatform(cachedFrame);
+  await executor.descriptionPlatform(cachedFrame);
+  assert.equal(reads, 1);
+});
+
+test('描述插图：撤销按平台键，并核对原有图片与正文没被一起撤掉', async () => {
+  const snapshotOf = (state) => ({
+    html: `<p>${state.text}</p>${state.urls.map((url) => `<p><img src="${url}"></p>`).join('')}`,
+    urls: [...state.urls],
+    text: state.text,
+  });
+  const makeFrame = (platform, state) => ({
+    page: () => ({}),
+    // 不带第二个参数的 evaluate 是读平台；带 editorId 的是读描述快照。
+    evaluate: async (fn, arg) => (arg === undefined ? platform : snapshotOf(state)),
+  });
+
+  // Mac：按一次 Cmd+Z 就撤回本批，「正文 + 原有图」仍在 → 恢复成功。
+  const macState = { urls: ['https://cos/a.png', 'https://cos/p1.png', 'https://cos/p2.png'], text: '正文' };
+  const macPresses = [];
+  const macEditor = {
+    press: async (key) => {
+      macPresses.push(key);
+      macState.urls = ['https://cos/a.png'];
+    },
+  };
+  const macFrame = makeFrame({ platform: 'MacIntel', userAgent: 'Macintosh' }, macState);
+  const macOk = await executor.undoDescriptionInserts(
+    macFrame, macEditor, 'editorA', 1, 2, { urls: ['https://cos/a.png'], textLength: 2 },
+  );
+  assert.equal(macOk, true);
+  assert.deepEqual(macPresses, ['Meta+z']);
+
+  // Windows：换成 Control+Z。
+  const winState = { urls: ['https://cos/a.png', 'https://cos/p1.png', 'https://cos/p2.png'], text: '正文' };
+  const winPresses = [];
+  const winEditor = {
+    press: async (key) => {
+      winPresses.push(key);
+      winState.urls = ['https://cos/a.png'];
+    },
+  };
+  const winFrame = makeFrame({ platform: 'Win32', userAgent: 'Windows NT 10.0' }, winState);
+  const winOk = await executor.undoDescriptionInserts(
+    winFrame, winEditor, 'editorA', 1, 2, { urls: ['https://cos/a.png'], textLength: 2 },
+  );
+  assert.equal(winOk, true);
+  assert.deepEqual(winPresses, ['Control+z']);
+
+  // 张数回到基线但原有图被撤掉了（撤过头）：不算恢复成功，必须继续尝试并最终报失败。
+  const lossyState = { urls: ['https://cos/a.png', 'https://cos/p1.png'], text: '正文' };
+  let lossyPresses = 0;
+  const lossyEditor = {
+    press: async () => {
+      lossyPresses += 1;
+      lossyState.urls = [];
+    },
+  };
+  const lossyFrame = makeFrame({ platform: 'Win32', userAgent: 'Windows NT 10.0' }, lossyState);
+  const lossyOk = await executor.undoDescriptionInserts(
+    lossyFrame, lossyEditor, 'editorA', 0, 1, { urls: ['https://cos/a.png'], textLength: 2 },
+  );
+  assert.equal(lossyOk, false);
+  assert.ok(lossyPresses > 0);
+});
+
+test('描述插图：撤销基线核对正文长度与原有图片', () => {
+  const baseline = { urls: ['https://cos/a.png'], textLength: 4 };
+  const ok = { html: '<p>正文加长</p><p><img src="https://cos/a.png"></p>', urls: ['https://cos/a.png'], text: '正文加长' };
+  assert.equal(executor.descriptionMediaBaselineRestored(ok, baseline), true);
+  // 正文被撤短（撤过头）→ 不算恢复
+  const shortened = { html: '<p>正</p><p><img src="https://cos/a.png"></p>', urls: ['https://cos/a.png'], text: '正' };
+  assert.equal(executor.descriptionMediaBaselineRestored(shortened, baseline), false);
+  // 原有图片被一起撤掉 → 不算恢复
+  const lostExisting = { html: '<p>正文</p>', urls: [], text: '正文' };
+  assert.equal(executor.descriptionMediaBaselineRestored(lostExisting, baseline), false);
+  // 没有基线时保持旧语义（只看张数）
+  assert.equal(executor.descriptionMediaBaselineRestored(lostExisting, null), true);
+});
+
+test('描述插图：按前后差集认这次新上传的图（新图落在最前面也认得出）', () => {
+  const before = ['https://cos.example/a.png', 'https://cf.example/file/b.png'];
+  // 新图落在最前面：末位是旧图，取末位会认错
+  const afterFront = ['https://new.example/file/size-upload.png', ...before];
+  assert.deepEqual(executor.newDescriptionImages(before, afterFront), ['https://new.example/file/size-upload.png']);
+  // CDN 换了主机名/参数但文件名相同 → 还是同一张旧图，不算新图
+  assert.deepEqual(executor.newDescriptionImages(before, ['https://other.example/a.png?x=1']), []);
+  assert.deepEqual(executor.newDescriptionImages([], ['https://new.example/x.png']), ['https://new.example/x.png']);
+});
+
+test('描述插图：自动恢复失败要停下并报「位置未修复」，复用页面已错位也要报', () => {
+  const source = fs.readFileSync(path.join(__dirname, '../scripts/mabang_playwright_executor.cjs'), 'utf8');
+  // 恢复失败 → 本轮不再重插，专用错误码交给运营人工调整
+  assert.match(source, /rollbackFailed = true;/);
+  assert.match(source, /rollbackFailed \? 'description_media_position_unrepaired' : \(failure \|\| 'description_media_position_not_at_tail'\)/);
+  // 每轮恢复结果与平台/快捷键写进错误详情与步骤结果
+  assert.match(source, /rollbacks\.push\(\{ round: round \+ 1, ok: rolled, reason: failure \}\);/);
+  assert.match(source, /undo_shortcut: descriptionUndoShortcut\(platform\),/);
+  assert.match(source, /end_shortcut: descriptionEndShortcut\(platform\),/);
+  // 复用页面时计划里的图都在但位置不对 → 不许 already:true 假装完成
+  assert.match(source, /warnings\.unshift\('description_media_existing_position_not_at_tail'\);/);
+  // 界面要能看懂这两条警告
+  const app = fs.readFileSync(path.join(__dirname, '../apps/web/app.js'), 'utf8');
+  assert.match(app, /description_media_position_unrepaired: "描述图片位置没修好/);
+  assert.match(app, /description_media_existing_position_not_at_tail: "描述里已有的图片不在末尾/);
+});
+
+test('描述插图：光标停在正文开头时不算落到底', async () => {
+  const editor = { contains: () => true, childNodes: [{}, {}] };
+  const lastText = { nodeValue: '正文最后一行' };
+  const walker = {
+    currentNode: null,
+    nextNode() {
+      if (this.currentNode === lastText) return false;
+      this.currentNode = lastText;
+      return true;
+    },
+  };
+  const originalDocument = global.document;
+  const originalWindow = global.window;
+  const originalFilter = global.NodeFilter;
+  try {
+    global.document = { getElementById: () => editor, createTreeWalker: () => ({ ...walker }) };
+    global.NodeFilter = { SHOW_TEXT: 4 };
+    const atStart = { anchorNode: editor, anchorOffset: 0 };
+    global.window = { getSelection: () => atStart };
+    assert.equal(await executor.descriptionCaretAtEnd({ evaluate: async (fn, arg) => fn(arg) }, 'editorA'), false);
+    const atEnd = { anchorNode: lastText, anchorOffset: String(lastText.nodeValue).length };
+    global.window = { getSelection: () => atEnd };
+    assert.equal(await executor.descriptionCaretAtEnd({ evaluate: async (fn, arg) => fn(arg) }, 'editorA'), true);
+  } finally {
+    global.document = originalDocument;
+    global.window = originalWindow;
+    global.NodeFilter = originalFilter;
+  }
 });

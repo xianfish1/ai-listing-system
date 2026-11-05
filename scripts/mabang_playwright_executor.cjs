@@ -3450,6 +3450,100 @@ const DESCRIPTION_TAIL_SETTLE_MS = 800;
 // 「上传图片」要把本地文件发给马帮、等它回地址再落到正文，比按地址引用慢一截。
 const DESCRIPTION_SIZE_CHART_UPLOAD_TIMEOUT = 60000;
 
+// ---------------------------------------------------------------------------
+// 平台差异：撤销、「跳到文末」的快捷键。
+//
+// 执行器是 node 子进程，但它操作的浏览器可能不在同一台机器上（CDP 连过去），所以
+// 平台以受控浏览器的 navigator 为准，读不到时才回退 node 所在系统。同一页面只读一次，
+// 上传本地尺码图与按地址插图两条路共用这里，不再各写一份快捷键。
+// ---------------------------------------------------------------------------
+const DESCRIPTION_PLATFORM_CACHE = new WeakMap();
+
+function platformIsMac(text) {
+  return /Mac|iPhone|iPad|iPod/i.test(String(text || ''));
+}
+
+async function descriptionPlatform(frame) {
+  const page = frame && typeof frame.page === 'function' ? frame.page() : null;
+  const key = page || frame;
+  if (key && DESCRIPTION_PLATFORM_CACHE.has(key)) return DESCRIPTION_PLATFORM_CACHE.get(key);
+  const hostIsMac = process.platform === 'darwin';
+  let info = { platform: '', userAgent: '', is_mac: hostIsMac, source: 'node' };
+  try {
+    const read = await frame.evaluate(() => ({
+      platform: String((typeof navigator !== 'undefined' && navigator.platform) || ''),
+      userAgent: String((typeof navigator !== 'undefined' && navigator.userAgent) || ''),
+    }));
+    const text = `${read.platform} ${read.userAgent}`.trim();
+    info = {
+      platform: read.platform,
+      userAgent: read.userAgent,
+      // navigator 读得到就信浏览器（MacIntel / Macintosh…），读成空才退回本机系统。
+      is_mac: text ? platformIsMac(text) : hostIsMac,
+      source: text ? 'browser' : 'node',
+    };
+  } catch (error) {
+    info = { ...info, error: cleanText(error && error.message) };
+  }
+  if (key) DESCRIPTION_PLATFORM_CACHE.set(key, info);
+  return info;
+}
+
+// macOS 的撤销是 Cmd+Z；「跳到文末」是 Cmd+↓（Control+End 在 Mac 的 Chrome 里不生效）。
+function descriptionUndoShortcut(info) {
+  return info && info.is_mac ? 'Meta+z' : 'Control+z';
+}
+
+function descriptionEndShortcut(info) {
+  return info && info.is_mac ? 'Meta+ArrowDown' : 'Control+End';
+}
+
+// 这次操作新增了哪些图：按插图前的地址集合做差。
+// 不能假设「最后一张就是新传的」——「上传图片」的落点不受我们控制，插到正文前面时
+// 新图根本不在末尾，取末位会认错图，后面的位置校验就对着旧图做。
+function newDescriptionImages(before, after) {
+  const seen = new Set();
+  for (const url of before || []) {
+    const text = String(url || '');
+    if (!text) continue;
+    seen.add(text);
+    const key = descriptionImageKey(text);
+    if (key) seen.add(key);
+  }
+  return (after || []).filter((url) => {
+    const text = String(url || '');
+    if (!text || seen.has(text)) return false;
+    const key = descriptionImageKey(text);
+    return !key || !seen.has(key);
+  });
+}
+
+// 描述正文的完整快照（HTML + 图片地址 + 正文文字）一次读回：撤销核对要同时看正文和
+// 原有的图，分几次读会被正文异步回填插进来改掉。
+async function readDescriptionSnapshot(frame, editorId) {
+  return frame.evaluate((id) => {
+    const editor = document.getElementById(id);
+    if (!editor) return { html: '', urls: [], text: '' };
+    return {
+      html: editor.innerHTML,
+      urls: [...editor.querySelectorAll('img')].map((image) => image.src).filter(Boolean),
+      text: String(editor.innerText || ''),
+    };
+  }, editorId).catch(() => ({ html: '', urls: [], text: '' }));
+}
+
+// 撤销是不是真的回到了插图前：只看张数变少不够——多按一次撤销会把正文或原有的图
+// 一起撤掉。这里逐项核对：原有图片都还在、正文没变短（正文异步补上只会更长）。
+function descriptionMediaBaselineRestored(snapshot, baseline) {
+  if (!baseline) return true;
+  const html = String((snapshot && snapshot.html) || '');
+  if (Number.isFinite(baseline.textLength) && descriptionTextLength(html) + 2 < baseline.textLength) return false;
+  for (const url of baseline.urls || []) {
+    if (descriptionImageIndexOf(html, url) < 0) return false;
+  }
+  return true;
+}
+
 function sizeChartRequestedByTask(task) {
   const images = task.images || {};
   const sizeChart = images.size_chart || {};
@@ -3837,10 +3931,13 @@ async function focusDescriptionEnd(frame, editor, editorId) {
     if (await caretReady()) return 'range';
     await sleep(150);
   }
+  // 键盘备用方案按平台换键：macOS 是 Cmd+↓（Control+End 在 Mac 的 Chrome 里不生效）。
+  // 按完照样验光标位置，验不过就当这次没落上。
+  const endShortcut = descriptionEndShortcut(await descriptionPlatform(frame));
   for (let attempt = 0; attempt < 3; attempt += 1) {
     await scrollDescriptionToBottom(frame, editorId);
     await editor.click({ timeout: 5000 }).catch(() => {});
-    await editor.press('Control+End').catch(() => {});
+    await editor.press(endShortcut).catch(() => {});
     await scrollDescriptionEditorBoxToBottom(frame, editorId);
     if (await caretReady()) return 'keyboard';
     await sleep(150);
@@ -3999,8 +4096,10 @@ async function insertDescriptionImageByFile(item, filePath, ensureCaret) {
 
 // 把店铺模板里操作员上传的本地尺码图传进描述，返回马帮给的地址（正文里最新那张图）。
 // 上传+落图比引用地址慢，单独给更长的等待；没落到正文就当失败，调用方按警告处理。
-async function uploadDescriptionSizeChartFile(frame, context, filePath, existingCount) {
+async function uploadDescriptionSizeChartFile(frame, context, filePath, existing) {
   const { item, editor, editorId } = context;
+  const before = Array.isArray(existing) ? existing.filter(Boolean).map(String) : null;
+  const beforeCount = before ? before.length : Math.max(0, Number(existing) || 0);
   const ensureCaret = async () => {
     if (!(await focusDescriptionEnd(frame, editor, editorId))) {
       throw new BlockedError('description_caret_not_at_end');
@@ -4009,10 +4108,16 @@ async function uploadDescriptionSizeChartFile(frame, context, filePath, existing
   await ensureCaret();
   await insertDescriptionImageByFile(item, filePath, ensureCaret);
   const urls = await waitForDescriptionImages(
-    frame, editorId, existingCount + 1, DESCRIPTION_SIZE_CHART_UPLOAD_TIMEOUT,
+    frame, editorId, beforeCount + 1, DESCRIPTION_SIZE_CHART_UPLOAD_TIMEOUT,
   );
-  if (urls.length < existingCount + 1) throw new BlockedError('description_size_chart_not_inserted');
-  return String(urls[urls.length - 1] || '');
+  // 拿「这次新增的图」而不是末位那张：上传落点不受我们控制，插到正文前面时新图
+  // 不在末尾，取末位会拿旧图当尺码图，后面所有位置校验都对着错的图做。
+  const added = before ? newDescriptionImages(before, urls) : urls.slice(beforeCount);
+  if (!added.length) throw new BlockedError('description_size_chart_not_inserted', {
+    before: beforeCount,
+    after: urls.length,
+  });
+  return String(added[added.length - 1] || '');
 }
 
 // 一张都没勾上时先把弹窗关掉再抛错：调用方会退回「按 URL 逐张插入」，
@@ -4080,15 +4185,21 @@ async function insertDescriptionProductImages(frame, editorId, wantedUrls, ensur
 
 // 插图落到正文中间时撤掉这批（wangEditor 的撤销栈按每次插图一步）。
 // 撤销次数按这批最多插进去的图数封顶：多按会把正文的文字一起撤掉。
-async function undoDescriptionInserts(frame, editor, editorId, expectedCount, insertedCount = 0) {
+// baseline（插图前的快照 { urls, textLength }）在的时候，除了张数回到 expectedCount，
+// 还要核对原有的图仍在、正文没变短，才算真的恢复——张数变少也可能是撤过头了。
+async function undoDescriptionInserts(frame, editor, editorId, expectedCount, insertedCount = 0, baseline = null) {
   const attempts = Math.max(3, Math.min(20, Number(insertedCount) + 2));
+  const undoShortcut = descriptionUndoShortcut(await descriptionPlatform(frame));
+  const restored = async () => {
+    const snapshot = await readDescriptionSnapshot(frame, editorId);
+    return (snapshot.urls || []).length <= expectedCount && descriptionMediaBaselineRestored(snapshot, baseline);
+  };
   for (let attempt = 0; attempt < attempts; attempt += 1) {
-    const urls = await readDescriptionImageUrls(frame, editorId);
-    if (urls.length <= expectedCount) return true;
-    await editor.press('Control+z').catch(() => {});
+    if (await restored()) return true;
+    await editor.press(undoShortcut).catch(() => {});
     await sleep(200);
   }
-  return (await readDescriptionImageUrls(frame, editorId)).length <= expectedCount;
+  return restored();
 }
 
 async function appendDescriptionMediaOnce(frame, task) {
@@ -4110,9 +4221,15 @@ async function appendDescriptionMediaOnce(frame, task) {
     }
     if (!loaded) throw new BlockedError('description_content_not_ready');
   }
-  const existing = await readDescriptionImageUrls(frame, editorId);
+  // 插图前的快照：图片地址与正文文字长度。插图后位置不对要撤回时，拿它核对
+  // 「原有图和正文都还在」，不能只看张数。同一次读回，避免读图与读正文之间被回填。
+  const snapshot = await readDescriptionSnapshot(frame, editorId);
+  const existing = snapshot.urls;
+  const baseline = { urls: existing, textLength: descriptionTextLength(snapshot.html) };
   // 插图前正文的文字长度：插图后必须仍在这批图前面（正文异步回填会把图挤到最前面）。
-  const beforeTextLength = descriptionTextLength(await readDescriptionHtml(frame, editorId));
+  const beforeTextLength = baseline.textLength;
+  // 平台（浏览器）决定撤销与文末快捷键：写进结果，Mac 现场出问题时一眼能看出用了哪个键。
+  const platform = await descriptionPlatform(frame);
   const wantsSizeChart = sizeChartRequestedByTask(task);
   const sizeChartSource = descriptionSizeChartSource(task);
   const productImageUrlCandidates = await collectProductImageUrls(frame).catch(() => []);
@@ -4137,7 +4254,7 @@ async function appendDescriptionMediaOnce(frame, task) {
           warnings.push('description_size_chart_position_not_at_tail');
         }
       } else {
-        sizeChartUrl = await uploadDescriptionSizeChartFile(frame, { item, editor, editorId }, sizeChartSource.path, existing.length);
+        sizeChartUrl = await uploadDescriptionSizeChartFile(frame, { item, editor, editorId }, sizeChartSource.path, existing);
         // 「上传图片」这条路由 wangEditor 自己按内部保存的 range 落图，落点不受我们的
         // Range 控制：现场 2026-10-27（任务 6f4ff5af / 78fce435）它把尺码表插到了正文
         // 最前面。这里必须验位置——不在末尾就撤掉这张，交给下面按地址的批量插图重插
@@ -4147,7 +4264,7 @@ async function appendDescriptionMediaOnce(frame, task) {
           sizeChartExisting = [...existing, sizeChartUrl].filter(Boolean);
           sizeChartMethod = 'size_chart:upload';
         } else {
-          const undone = await undoDescriptionInserts(frame, editor, editorId, existing.length, 1);
+          const undone = await undoDescriptionInserts(frame, editor, editorId, existing.length, 1, baseline);
           if (undone) {
             sizeChartMethod = 'size_chart:upload-reinsert';
           } else {
@@ -4194,6 +4311,21 @@ async function appendDescriptionMediaOnce(frame, task) {
   }
   // 描述里已经有这张尺码图（上一次运行插过的）时补个标记，下次复用页面才认得出。
   await markDescriptionSizeChart(frame, editorId, sizeChartUrl, descriptionFileStem(sizeChartSource.path));
+  // 复用页面（--resume-from-stage / 重跑）时描述里可能已经插过这些图：位置不对（图在
+  // 正文中间、正文被挤到图后面）必须报错位，不能 already:true 假装完成——否则运营
+  // 看到的「已完成」其实是一段切坏的描述。
+  if (!pending.length && plan.length) {
+    const html = await readDescriptionHtml(frame, editorId);
+    const planUrls = plan.map((entry) => entry.url);
+    if (!descriptionMediaAppendedAtTail(html, planUrls, [], { minTextBefore: beforeTextLength })) {
+      // 放在最前：这是这一轮唯一需要运营动手的问题，不能被别的警告盖住。
+      warnings.unshift('description_media_existing_position_not_at_tail');
+      attrPickDebug({
+        phase: 'description_media_existing',
+        ...descriptionMediaPlacementEvidence(html, planUrls),
+      });
+    }
+  }
   if (!pending.length && !warnings.length) {
     return {
       already: true,
@@ -4223,6 +4355,10 @@ async function appendDescriptionMediaOnce(frame, task) {
   let attempt = null;
   let evidence = null;
   let failure = '';
+  // 自动恢复失败＝这一轮必须停下：图已经留在正文里，再插一轮只会多出一批，
+  // 描述越修越乱。停下后按专用警告交给运营人工调整，草稿照常保存。
+  let rollbackFailed = false;
+  const rollbacks = [];
   for (let round = 0; round < DESCRIPTION_MEDIA_ATTEMPTS; round += 1) {
     let outcome = null;
     try {
@@ -4232,9 +4368,13 @@ async function appendDescriptionMediaOnce(frame, task) {
       // 没人管会把描述切成两半，所以先撤干净再决定重试还是报错。
       failure = cleanText(error && error.message) || 'description_media_failed';
       evidence = { ...((error && error.details) || {}), failed_round: round + 1 };
-      const rolled = await undoDescriptionInserts(frame, editor, editorId, sizeChartExisting.length, pending.length);
+      const rolled = await undoDescriptionInserts(frame, editor, editorId, sizeChartExisting.length, pending.length, baseline);
+      rollbacks.push({ round: round + 1, ok: rolled, reason: failure });
       evidence.rolled_back = rolled;
-      if (!rolled) break;
+      if (!rolled) {
+        rollbackFailed = true;
+        break;
+      }
       continue;
     }
     const html = await readDescriptionHtml(frame, editorId);
@@ -4252,14 +4392,22 @@ async function appendDescriptionMediaOnce(frame, task) {
     } else {
       evidence = descriptionMediaPlacementEvidence(html, expectedOrder, sizeChartExisting);
     }
-    const undone = await undoDescriptionInserts(frame, editor, editorId, sizeChartExisting.length, pending.length);
+    const undone = await undoDescriptionInserts(frame, editor, editorId, sizeChartExisting.length, pending.length, baseline);
+    rollbacks.push({ round: round + 1, ok: undone, reason: atTail ? 'tail_check_settled_failed' : 'tail_check_failed' });
     evidence.rolled_back = undone;
-    if (!undone) break;
+    if (!undone) {
+      rollbackFailed = true;
+      break;
+    }
   }
   if (!attempt) {
-    throw new BlockedError(failure || 'description_media_position_not_at_tail', {
+    throw new BlockedError(rollbackFailed ? 'description_media_position_unrepaired' : (failure || 'description_media_position_not_at_tail'), {
       expected: expectedOrder.length,
+      platform: platform.platform,
+      is_mac: platform.is_mac,
+      undo_shortcut: descriptionUndoShortcut(platform),
       evidence,
+      rollbacks,
     });
   }
   const { caret, methods, round } = attempt;
@@ -4274,6 +4422,12 @@ async function appendDescriptionMediaOnce(frame, task) {
     inserted: pending.length,
     caret,
     round,
+    // 平台/快捷键/每轮恢复结果：Mac 现场出问题时不用再猜是撤错了还是键没生效。
+    platform: platform.platform,
+    is_mac: platform.is_mac,
+    undo_shortcut: descriptionUndoShortcut(platform),
+    end_shortcut: descriptionEndShortcut(platform),
+    rollbacks,
     // 本地尺码图是批次之前单独传进去的，它的方式也要报出来（尺码表插哪儿了一条日志能看出来）。
     method: [sizeChartMethod, methods.join('+')].filter(Boolean).join('+'),
     ...(warnings.length ? { status: 'warning', code: warnings[0] } : {}),
@@ -4334,7 +4488,9 @@ async function insertDescriptionMediaBatch(frame, context, pending, sizeChartUrl
       present_urls: after.slice(-8),
     });
   }
-  const appended = after.slice(existing.length);
+  // 新图按「插之前没有的地址」认，不能只看末尾切片：插到正文前面时末尾切片里全是
+  // 旧图，顺序校验会误报，也可能把旧图当成这次新插的。
+  const appended = newDescriptionImages(existing, after);
   const expected = pending.map((entry) => entry.url);
   const ordered = appended.length === expected.length
     && appended.every((url, index) => url === expected[index] || descriptionImageKey(url) === descriptionImageKey(expected[index]));
@@ -6461,16 +6617,39 @@ async function validateBeforeSave(frame, task, stages) {
         if (selectFilled || textFilled || tagCount > 0) return null;
         // chip/自定义控件（变种属性等）不走 input/select，标成 custom 避免误报；
         // 只有 form 类（真下拉/文本框为空）才算硬缺失。
-        const customControl = Boolean(item.querySelector('.vxe-table, [class*="chip"], [class*="natureBlock"], [class*="upload"]'))
+        // `.attr-name-input` 是「变种属性」的隐形命名框（标签 + 添加自定义按钮），
+        // 真机验证：正常页面（颜色齐全、能保存）它也是空的，绝不能当硬缺失。
+        const customControl = Boolean(item.querySelector('.vxe-table, [class*="chip"], [class*="natureBlock"], [class*="upload"], .attr-name-input'))
           || ![...item.querySelectorAll('input, textarea, select')].length;
-        return { label: raw.replace(/^[*\uFF0A]\s*/, ''), kind: customControl ? 'custom' : 'form' };
+        const label = raw.replace(/^[*\uFF0A]\s*/, '');
+        // 诊断：把这一项的 DOM 形态一并带回。真下拉空着和 chip 类控件被误判都会
+        // 落到这里，只有看到只读/禁用的控件、控件类名才好判断（变种属性: 就是
+        // 这种页面自动派生项）。html 截前 240 字，避免把 details 撑爆。
+        const fields = [...item.querySelectorAll('input, textarea, select')];
+        const card = item.closest('.el-card');
+        return {
+          label,
+          kind: customControl ? 'custom' : 'form',
+          input_count: fields.length,
+          read_only_inputs: fields.filter((input) => input.readOnly || input.disabled).length,
+          input_values: fields.map((input) => String(input.value || '').slice(0, 40)).slice(0, 6),
+          classes: [...item.classList].slice(0, 6).join(' '),
+          card_title: card ? String(card.querySelector('.el-card__header')?.innerText || '').replace(/\s+/g, ' ').slice(0, 60) : '',
+          text: String(item.innerText || '').replace(/\s+/g, ' ').slice(0, 200),
+          html: String(item.innerHTML || '').replace(/\s+/g, ' ').slice(0, 900),
+        };
       })
       .filter(Boolean).slice(0, 20);
+    const variantBlocks = [...document.querySelectorAll('.natureBlock')]
+      .filter(visible)
+      .map((block) => String(block.innerText || '').replace(/\s+/g, ' ').slice(0, 120));
     const guard = window.__AI_LISTING_PUBLISH_GUARD__ || {};
     return {
       nav_missing: [...new Set(navMissing)].slice(0, 20),
       missing_required_labels: missingRequiredLabels.map((item) => item.label),
       missing_required_form_labels: missingRequiredLabels.filter((item) => item.kind === 'form').map((item) => item.label),
+      missing_required_details: missingRequiredLabels.slice(0, 6),
+      variant_blocks: variantBlocks.slice(0, 6),
       form_errors: [...new Set(errors)].slice(0, 20),
       rows: rows.length,
       expected_rows: expectedRows,
@@ -7437,6 +7616,12 @@ module.exports = {
   descriptionTextLoaded,
   descriptionImageKey,
   descriptionImageIndexOf,
+  descriptionPlatform,
+  descriptionUndoShortcut,
+  descriptionEndShortcut,
+  newDescriptionImages,
+  readDescriptionSnapshot,
+  descriptionMediaBaselineRestored,
   descriptionScrolledToBottom,
   scrollDescriptionToBottom,
   scrollDescriptionEditorBoxToBottom,

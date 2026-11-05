@@ -211,3 +211,27 @@ def test_rebuild_skus_flag_realigns_existing_copy_to_current_template_sizes(tmp_
     assert white_sizes() == new_sizes
     prices = storage.list_listing_prices(copy["id"])
     assert len(prices) == len(storage.list_listing_skus(copy["id"]))
+
+
+def test_site_browser_inputs_fill_variant_thumbnail_for_color_without_image(tmp_path: Path) -> None:
+    """颜色轴上每个颜色都要有变种图：马帮「自定义缩略图」按颜色逐个必填，缺一张
+    页面就报「1 必填项未填」→ pre_save_validation_failed（现场 2026-11-04 的
+    5 个单色商品：占位色 default 没有图，只有默认 SKU 的 PureWhite 有）。没有专用
+    颜色图的颜色沿用主图，绝不空着。"""
+    _template, copy, _base = _make_site_copy(
+        tmp_path, template_sizes=["M"], selected_sizes=["M"]
+    )
+    skus = storage.list_listing_skus(copy["id"])
+    prices = storage.list_listing_prices(copy["id"])
+    assert skus and skus[0].get("color_code")
+    extra = dict(skus[0])
+    extra.update({"id": "sku-purple", "color_code": "Purple", "color_cn": "Purple", "sku_code": "AL0801-Purple-M"})
+    skus = [*skus, extra]
+    assets = storage.assets_for_group(copy.get("group_id") or "")
+
+    browser_inputs = storage._build_browser_inputs(copy, skus, prices, assets)
+
+    main_path = browser_inputs["main_image_path"]
+    assert main_path, "商品必须有主图"
+    assert "Purple" in browser_inputs["variation"]["colors"]
+    assert browser_inputs["variant_image_paths"]["Purple"] == main_path

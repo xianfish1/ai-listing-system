@@ -2380,3 +2380,38 @@ def test_watermark_collector_reports_node_unavailable(monkeypatch: pytest.Monkey
 
     assert result["ok"] is False
     assert "Node" in result["error"]
+
+
+def test_variant_thumbnail_upload_downscales_oversized_images(tmp_path: Path) -> None:
+    """马帮变种图区对超大原图不显示缩略图（实测 4752×5120 PNG 一直空预览 →
+    variant_thumbnail_not_verified）。上传副本超过 2048px 时先缩到 2048，原图不动。"""
+    Image = pytest.importorskip("PIL.Image")
+    source = tmp_path / "A红色.png"
+    with Image.new("RGB", (3000, 2600), (200, 30, 40)) as image:
+        image.save(source)
+
+    uploads = browser_use_runner.prepare_variant_thumbnail_uploads(
+        {"red": str(source)},
+        tmp_path / "uploads",
+    )
+    upload_path = Path(uploads["red"]["upload_path"])
+
+    with Image.open(source) as original:
+        assert original.size == (3000, 2600), "原图不能被改"
+    with Image.open(upload_path) as resized:
+        assert max(resized.size) <= browser_use_runner.VARIANT_THUMBNAIL_MAX_SIDE
+
+
+def test_variant_thumbnail_upload_keeps_small_images_byte_identical(tmp_path: Path) -> None:
+    Image = pytest.importorskip("PIL.Image")
+    source = tmp_path / "A白色.png"
+    with Image.new("RGB", (512, 512), (255, 255, 255)) as image:
+        image.save(source)
+    raw = source.read_bytes()
+
+    uploads = browser_use_runner.prepare_variant_thumbnail_uploads(
+        {"white": str(source)},
+        tmp_path / "uploads",
+    )
+
+    assert Path(uploads["white"]["upload_path"]).read_bytes() == raw

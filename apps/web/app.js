@@ -38,7 +38,11 @@ const state = {
   baseProductRetryRunning: false, // 批量 AI 重识别进行中：防重复点击，按钮置灰
   baseRetrySkills: [],            // 「重新识别标题」下拉里可选的标题规则
   baseRetrySkillsLoaded: false,   // 规则列表只拉一次；失败后可重试
+  // 分类行三个轴各自独立、同时生效（AND）：阶段（首次导入/未复制/…）、人群（男童/女童）、
+  // 商品类目（未分类/女装…）。选了男童不会把「首次导入」甩掉，可以叠着筛。
   baseProductCategoryFilter: "",
+  baseProductStageFilter: "",
+  baseProductAudienceFilter: "",
   baseProductTimeFilter: "today", // 默认只看今天更新的商品；点 chip 切到昨天/最近一周/全部
   selectedStoreTemplates: new Set(),
   selectedListingCopies: new Set(),
@@ -4189,7 +4193,8 @@ function renderBaseProducts() {
   if (!visible.length) {
     // 「全部」不限时间窗，空态就不再说「今天/最近一周没有更新的」。
     const presetLabel = baseProductTimeFilterLabel(state.baseProductTimeFilter);
-    const filterLabel = baseProductFilterLabel(state.baseProductCategoryFilter);
+    // 阶段 / 人群 / 类目可能叠着生效，空态要把当前生效的条件全报出来。
+    const filterLabel = activeBaseProductFilterLabel();
     const scoped = presetLabel && presetLabel !== "全部" ? presetLabel : "";
     const categoryText = filterLabel ? `「${escapeHtml(filterLabel)}」` : "";
     target.innerHTML = `<div class="empty-state">${scoped}${categoryText}没有${scoped ? "更新的" : "符合条件的"}基础商品。</div>`;
@@ -4218,6 +4223,12 @@ function renderBaseProducts() {
     const statusLabel = BASE_PRODUCT_STATUS_LABELS[product.status] || product.status || "";
     const stageKey = baseProductStage(product);
     const stageLabel = baseProductStageLabel(stageKey);
+    // 人群标记只看标题关键词（见 baseProductAudienceKey），挂在主 SKU 那一行的最右侧。
+    const audienceKey = baseProductAudienceKey(product);
+    const audienceLabel = baseProductAudienceLabel(audienceKey);
+    const audienceBadge = audienceKey
+      ? `<span class="audience-badge audience-badge--${audienceKey}" title="${escapeHtml(`标题里出现 ${audienceKey}，按标题判断为${audienceLabel}`)}">${escapeHtml(audienceLabel)}</span>`
+      : "";
     const productCategoryPath = (product.product_category && (product.product_category.path_zh || product.product_category.path)) || product.category || "";
     card.innerHTML = `
       <label class="product-card-check" title="${isChecked ? "取消勾选" : "勾选以批量操作"}"><input type="checkbox" data-base-product-select="${escapeHtml(product.id)}" ${isChecked ? "checked" : ""} /></label>
@@ -4225,7 +4236,7 @@ function renderBaseProducts() {
       <div class="product-card-thumb">${imageSrc ? `<img src="${imageSrc}" alt="${escapeHtml(product.product_name_cn || "")}" loading="lazy" decoding="async" />` : (assetsCleaned ? `<span class="product-card-thumb-note">素材已清理<br />需重新导入</span>` : "")}</div>
       <div class="product-card-body">
         <strong>${escapeHtml(product.product_name_cn || product.base_name || product.main_sku || product.group_id || "")}</strong>
-        <span>主 SKU：${escapeHtml(product.main_sku || product.group_id || "")}</span>
+        <span class="product-card-sku"><span>主 SKU：${escapeHtml(product.main_sku || product.group_id || "")}</span>${audienceBadge}</span>
         <span>颜色：${escapeHtml(colors)} / 图片：${escapeHtml(imageCount)}</span>
         <span class="product-card-category">类目：${escapeHtml(productCategoryPath || "未选择")}</span>
         <span>店铺副本：${escapeHtml(product.listing_copy_count || 0)}</span>
@@ -4306,7 +4317,14 @@ function matchesBaseTimeFilter(product) {
 }
 
 function matchesBaseProductFilters(product) {
-  if (state.baseProductCategoryFilter && baseProductFilterKey(product) !== state.baseProductCategoryFilter) {
+  // 三个分类轴 + 时间窗全部取交集：选了男童之后「首次导入」还留着一起筛（现场要求）。
+  if (state.baseProductStageFilter && baseProductStage(product) !== state.baseProductStageFilter) {
+    return false;
+  }
+  if (state.baseProductAudienceFilter && baseProductAudienceKey(product) !== state.baseProductAudienceFilter) {
+    return false;
+  }
+  if (state.baseProductCategoryFilter && baseProductCategoryKey(product) !== state.baseProductCategoryFilter) {
     return false;
   }
   return matchesBaseTimeFilter(product);
@@ -4356,19 +4374,77 @@ function baseProductStageLabel(stage) {
   return BASE_PRODUCT_STAGE_LABELS[stage] || "";
 }
 
-// 阶段 chip 和类目 chip 共用一行、共用单选的筛选状态，阶段 key 带前缀避免和类目名撞车。
-function baseProductFilterKey(product) {
-  if (String(state.baseProductCategoryFilter || "").startsWith("stage:")) {
-    return baseProductStageKey(baseProductStage(product));
+// 商品卡上的「人群」标记（男童 / 女童 / 男装 / 女装）：只看标题里有没有对应关键词，
+// 不读属性也不读维护弹窗的适用人群——现场要求就是「标题里包含 boy 就是男童」。
+// 标题里两个关键词都出现（"Boys Girls"、"Men's and Women's"）时取**最先出现**的那个，
+// 跟人读标题的顺序一致；一个都没有就不显示。
+const BASE_PRODUCT_AUDIENCE_LABELS = { boys: "男童", girls: "女童", men: "男装", women: "女装" };
+
+const BASE_PRODUCT_AUDIENCE_ORDER = ["boys", "girls", "men", "women"];
+
+// 分类行只放男童/女童两枚人群 chip：「男装 / 女装」已经在二级分类里由「上架期望类目」
+// 占用（同名不同数会让人分不清点哪个），卡片徽标四个人群照常显示。
+const BASE_PRODUCT_AUDIENCE_CHIP_ORDER = ["boys", "girls"];
+
+// \b 边界很关键：woman 里的 man、women 里的 men、boyfriend 里的 boy 都不能误判。
+// '?s? 是为了认 Mens / Womens / Boy's 这类电商标题里常见的写法。
+const BASE_PRODUCT_AUDIENCE_PATTERNS = [
+  ["boys", /\bboys?'?s?\b|男童/i],
+  ["girls", /\bgirls?'?s?\b|女童/i],
+  ["men", /\bm[ae]ns?'?s?\b|男装/i],
+  ["women", /\bwom[ae]ns?'?s?\b|女装/i],
+];
+
+function baseProductAudienceKey(product) {
+  const title = String(
+    product?.listing_title || product?.generated_title || product?.product_name_cn || product?.base_name || "",
+  );
+  if (!title) return "";
+  let hitKey = "";
+  let hitIndex = -1;
+  for (const [key, pattern] of BASE_PRODUCT_AUDIENCE_PATTERNS) {
+    const match = pattern.exec(title);
+    if (!match) continue;
+    if (hitIndex === -1 || match.index < hitIndex) {
+      hitKey = key;
+      hitIndex = match.index;
+    }
   }
-  return baseProductCategoryKey(product);
+  return hitKey;
 }
 
+function baseProductAudienceLabel(audience) {
+  return BASE_PRODUCT_AUDIENCE_LABELS[audience] || "";
+}
+
+// 分类行的 chip key：阶段 `stage:<阶段>`、人群 `audience:<人群>`、其余就是商品类目名。
+// 三个轴各自独立存 state，chip 只负责把 key 丢给 toggleBaseCategoryFilter 路由。
 function baseProductFilterLabel(key) {
   const value = String(key || "");
   if (!value) return "";
+  if (value.startsWith("audience:")) return baseProductAudienceLabel(value.slice("audience:".length)) || value;
   if (value.startsWith("stage:")) return baseProductStageLabel(value.slice("stage:".length)) || value;
   return value;
+}
+
+// 当前生效的分类轴（阶段 / 人群 / 类目），空态提示按它们一起说清楚是哪些条件没商品。
+function activeBaseProductFilterKeys() {
+  const keys = [];
+  if (state.baseProductStageFilter) keys.push(baseProductStageKey(state.baseProductStageFilter));
+  if (state.baseProductAudienceFilter) keys.push(`audience:${state.baseProductAudienceFilter}`);
+  if (state.baseProductCategoryFilter) keys.push(state.baseProductCategoryFilter);
+  return keys;
+}
+
+function activeBaseProductFilterLabel() {
+  return activeBaseProductFilterKeys()
+    .map((key) => baseProductFilterLabel(key))
+    .filter(Boolean)
+    .join(" · ");
+}
+
+function hasActiveBaseProductFilter() {
+  return activeBaseProductFilterKeys().length > 0;
 }
 
 function renderBaseProductFilterBar() {
@@ -4380,30 +4456,48 @@ function renderBaseProductFilterBar() {
   }
   const categoryRow = $("base-product-filter-category");
   if (!categoryRow) return;
-  // 分类 chip 的计数按当前时间窗内的商品算，保证看到的数量点下去就一致。
+  // 分类 chip 的计数按当前时间窗内的商品算，并且「其它两个轴已生效」：
+  // 选了男童之后，阶段 chip 显示的就是「男童里各阶段的张数」，点下去数量对得上。
   const inTime = state.baseProducts.filter(matchesBaseTimeFilter);
+  const stageActive = String(state.baseProductStageFilter || "");
+  const audienceActive = String(state.baseProductAudienceFilter || "");
+  const categoryActive = String(state.baseProductCategoryFilter || "");
   const stageCounts = new Map(BASE_PRODUCT_STAGE_ORDER.map((stage) => [stage, 0]));
+  const audienceCounts = new Map(BASE_PRODUCT_AUDIENCE_CHIP_ORDER.map((audience) => [audience, 0]));
   const counts = new Map();
   for (const product of inTime) {
     const stage = baseProductStage(product);
-    stageCounts.set(stage, (stageCounts.get(stage) || 0) + 1);
-    const key = baseProductCategoryKey(product);
-    counts.set(key, (counts.get(key) || 0) + 1);
+    const audience = baseProductAudienceKey(product);
+    const category = baseProductCategoryKey(product);
+    const audienceOk = !audienceActive || audience === audienceActive;
+    const categoryOk = !categoryActive || category === categoryActive;
+    const stageOk = !stageActive || stage === stageActive;
+    if (audienceOk && categoryOk) stageCounts.set(stage, (stageCounts.get(stage) || 0) + 1);
+    if (stageOk && categoryOk && audience) audienceCounts.set(audience, (audienceCounts.get(audience) || 0) + 1);
+    if (stageOk && audienceOk) counts.set(category, (counts.get(category) || 0) + 1);
   }
   const entries = [...counts.entries()]
     .sort((a, b) => (b[1] - a[1]) || a[0].localeCompare(b[0], "zh-Hans-CN"))
     .map(([key]) => key);
-  const active = String(state.baseProductCategoryFilter || "");
-  const chips = [`<button type="button" class="chip${active === "" ? " chip--active" : ""}" data-base-category-filter="">全部<span class="chip-count">${inTime.length}</span></button>`];
-  // 四段阶段 chip 紧跟「全部」：它们是操作员每天要清的活儿（未复制 → 待执行 → 已完成），
-  // 排在「商品类目」第一级分类前面；两组共用同一个单选筛选状态。
+  const noFilter = !hasActiveBaseProductFilter();
+  const chips = [`<button type="button" class="chip${noFilter ? " chip--active" : ""}" data-base-category-filter="" title="清掉阶段 / 人群 / 类目三个筛选">全部<span class="chip-count">${inTime.length}</span></button>`];
+  // 一级分类 = 四段阶段 chip，紧跟「全部」：它们是操作员每天要清的活儿
+  // （未复制 → 待执行 → 已完成），排在二级分类前面。
+  // 三个轴独立生效：选了男童不会把「首次导入 / 未复制」甩掉，可以叠着筛。
   for (const stage of BASE_PRODUCT_STAGE_ORDER) {
     const key = baseProductStageKey(stage);
-    chips.push(`<button type="button" class="chip chip--stage chip--stage-${stage}${active === key ? " chip--active" : ""}" data-base-category-filter="${escapeHtml(key)}" title="${escapeHtml(BASE_PRODUCT_STAGE_HINTS[stage] || "")}">${escapeHtml(baseProductStageLabel(stage))}<span class="chip-count">${stageCounts.get(stage) || 0}</span></button>`);
+    chips.push(`<button type="button" class="chip chip--stage chip--stage-${stage}${stageActive === stage ? " chip--active" : ""}" data-base-category-filter="${escapeHtml(key)}" title="${escapeHtml(BASE_PRODUCT_STAGE_HINTS[stage] || "")}">${escapeHtml(baseProductStageLabel(stage))}<span class="chip-count">${stageCounts.get(stage) || 0}</span></button>`);
   }
   chips.push(`<span class="chip-divider" aria-hidden="true"></span>`);
+  // 二级分类第一组 = 人群快速选择（男童 / 女童，按标题关键词判断），
+  // 放在「未分类」等商品类目 chip 前面一起选。
+  for (const audience of BASE_PRODUCT_AUDIENCE_CHIP_ORDER) {
+    const key = `audience:${audience}`;
+    const label = baseProductAudienceLabel(audience);
+    chips.push(`<button type="button" class="chip chip--audience chip--audience-${audience}${audienceActive === audience ? " chip--active" : ""}" data-base-category-filter="${escapeHtml(key)}" title="${escapeHtml(`按标题关键词判断：标题里出现 ${audience} 就算${label}`)}">${escapeHtml(label)}<span class="chip-count">${audienceCounts.get(audience) || 0}</span></button>`);
+  }
   for (const key of entries) {
-    chips.push(`<button type="button" class="chip${active === key ? " chip--active" : ""}" data-base-category-filter="${escapeHtml(key)}">${escapeHtml(key)}<span class="chip-count">${counts.get(key)}</span></button>`);
+    chips.push(`<button type="button" class="chip${categoryActive === key ? " chip--active" : ""}" data-base-category-filter="${escapeHtml(key)}">${escapeHtml(key)}<span class="chip-count">${counts.get(key)}</span></button>`);
   }
   categoryRow.innerHTML = chips.join("");
 }
@@ -4434,6 +4528,17 @@ function clearBaseProductSelection() {
     input.checked = false;
     input.closest(".product-card")?.classList.remove("checked", "selected");
   });
+  renderBaseProductBatchBar();
+}
+
+// 换分类 / 换时间窗 = 换一批可见商品，勾选一律重来（2026-11-05 现场反馈）。
+// 以前勾选留着：切到别的分类后，看不见的卡片还挂在「已选 N 个」里，
+// 点「批量删除 / 重新识别」会作用到当前列表里根本没有显示的商品。
+// 这里紧接着都会 renderBaseProducts() 整表重画，所以不用像切页那样逐个改 DOM。
+function clearBaseProductSelectionForFilter() {
+  if (!state.selectedBaseProducts.size && !state.selectedBaseProductId) return;
+  state.selectedBaseProducts.clear();
+  state.selectedBaseProductId = "";
   renderBaseProductBatchBar();
 }
 
@@ -4750,16 +4855,29 @@ function setBaseTimeFilter(preset) {
   // 只认白名单里的取值；未知值（含空）退回默认的「今天」。
   const value = String(preset || "");
   state.baseProductTimeFilter = BASE_PRODUCT_TIME_FILTER_LABELS[value] ? value : "today";
+  // 换时间窗同样会把商品藏起来，勾选不能跟着藏（见 clearBaseProductSelectionForFilter）。
+  clearBaseProductSelectionForFilter();
   renderBaseProducts();
 }
 
 function toggleBaseCategoryFilter(key) {
-  // 「全部」chip 固定清除分类；其余 chip 再次点击同一分类 = 取消选中回到「全部」。
-  if (key === "") {
+  // 三个轴各自 toggle：点「全部」清掉全部条件；点同一枚 chip 再点一次 = 取消这一轴。
+  // 轴之间互不影响——选男童不会甩掉「首次导入 / 未复制」，可以叠着筛。
+  const value = String(key || "");
+  if (!value) {
+    state.baseProductStageFilter = "";
+    state.baseProductAudienceFilter = "";
     state.baseProductCategoryFilter = "";
+  } else if (value.startsWith("stage:")) {
+    const stage = value.slice("stage:".length);
+    state.baseProductStageFilter = state.baseProductStageFilter === stage ? "" : stage;
+  } else if (value.startsWith("audience:")) {
+    const audience = value.slice("audience:".length);
+    state.baseProductAudienceFilter = state.baseProductAudienceFilter === audience ? "" : audience;
   } else {
-    state.baseProductCategoryFilter = state.baseProductCategoryFilter === key ? "" : key;
+    state.baseProductCategoryFilter = state.baseProductCategoryFilter === value ? "" : value;
   }
+  clearBaseProductSelectionForFilter();
   renderBaseProducts();
 }
 
@@ -11633,6 +11751,9 @@ async function copySelectedBaseProductToTemplates() {
     method: "POST",
     body: JSON.stringify(body),
   });
+  // 复制成功就清掉勾选：这批商品已经变成店铺副本了，留着「已选 N 个」会让下一次
+  // 批量删除 / 重新识别误带上它们（接着会跳去刊登副本页，勾选也不该跟着走）。
+  clearBaseProductSelection();
   const createdCount = Number(data.created_count || 0);
   const withIssues = Array.isArray(data.created_with_issues) ? data.created_with_issues : [];
   const skippedCount = Number(data.skipped_count || 0);
@@ -12457,6 +12578,8 @@ const AUTOMATION_ERROR_LABELS = {
   description_media_failed: "描述插图失败，请检查描述末尾并人工补图",
   description_media_not_verified: "描述插图没插全，已尝试撤回本次插入，请检查描述末尾",
   description_media_position_not_at_tail: "描述插图没落在末尾，已尝试撤回本次插入，请检查描述末尾",
+  description_media_position_unrepaired: "描述图片位置没修好（撤销没把图撤回去），本次插图已停止，请人工调整描述末尾",
+  description_media_existing_position_not_at_tail: "描述里已有的图片不在末尾（可能在正文中间），请人工调整描述末尾",
   description_media_order_unexpected: "描述插图顺序不对，已尝试撤回本次插入，请检查描述末尾",
   description_size_chart_not_inserted: "尺码图没插进描述，已尝试撤回本次插入",
   description_product_images_not_inserted: "产品图没插进描述，已尝试撤回本次插入",

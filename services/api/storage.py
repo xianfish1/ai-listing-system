@@ -10197,6 +10197,18 @@ def _build_browser_inputs(
             variant_image_map[default_sku_color] = default_image_name
         if default_image_path:
             variant_image_paths[default_sku_color] = default_image_path
+    # 马帮「变种信息 → 自定义缩略图」按颜色逐个必填：颜色轴上任何一个颜色没有图，
+    # 页面右上角就报「1 必填项未填」，保存被 pre_save_validation_failed 拦下
+    # （实测单色商品：颜色轴是占位色 default + 默认 SKU 的 PureWhite，只有后者有图）。
+    # 没有专用颜色图的颜色沿用主图，绝不空着。
+    fallback_image_path = str((main_asset or {}).get("file_path") or "")
+    if fallback_image_path:
+        for color in colors:
+            key = str(color or "").strip()
+            if key and not str(variant_image_paths.get(key) or "").strip():
+                variant_image_paths[key] = fallback_image_path
+                if main_image:
+                    variant_image_map.setdefault(key, str(main_image))
     category_attributes = deepcopy(listing_copy.get("attribute_values") or listing_copy.get("category_attributes") or {})
     variation_defaults = _normalize_variation(listing_copy.get("variation") or {})
     return {

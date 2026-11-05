@@ -4656,6 +4656,45 @@ dialog:not([open]) { display: none; }
 .product-card-body .stage-badge--pending { color: var(--text-soft); background: #eef1f5; }
 .product-card-body .stage-badge--completed { color: var(--green); background: var(--green-soft); }
 
+/* 商品维护「分类」行二级：人群快速选择（现在只放男童 / 女童，男装/女装的 chip 样式
+   和徽标共用一套色板，留着以后放开时直接用）。颜色比阶段 chip 淡一档，免得抢眼。 */
+.chip--audience-boys { color: #1d4ed8; border-color: #c7d7fb; }
+.chip--audience-girls { color: #be185d; border-color: #f6cbdd; }
+.chip--audience-men { color: #334155; border-color: #d8dee7; }
+.chip--audience-women { color: #a21caf; border-color: #eccbf0; }
+
+/* 选中态跟阶段 chip 一样统一成深色实心（多一级类名，能压过上面的人群色）。 */
+.chip--audience.chip--active,
+.chip--audience.chip--active:hover {
+  background: var(--text);
+  color: var(--panel);
+  border-color: var(--text);
+}
+
+/* 主 SKU 那一行：左边是 SKU，右边贴人群徽标。 */
+.product-card-body .product-card-sku {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.product-card-body .audience-badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 1px 7px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 500;
+  line-height: 1.6;
+  white-space: nowrap;
+}
+
+.product-card-body .audience-badge--boys { color: #1d4ed8; background: #eaf0fe; }
+.product-card-body .audience-badge--girls { color: #be185d; background: #fdecf3; }
+.product-card-body .audience-badge--men { color: #334155; background: #eef1f5; }
+.product-card-body .audience-badge--women { color: #a21caf; background: #fbeafc; }
+
 
 /* ============================================================
    Store template editor — size chips (draggable), size-chart picker,

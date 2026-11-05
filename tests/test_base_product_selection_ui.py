@@ -25,6 +25,32 @@ def test_switching_view_clears_base_product_selection() -> None:
     assert "renderBaseProductBatchBar();" in script
 
 
+def test_switching_filter_clears_base_product_selection() -> None:
+    script = APP.read_text(encoding="utf-8")
+
+    # 换分类 / 换时间窗 = 换一批可见商品，勾选一律重来：
+    # 否则「已选 N 个」里会挂着当前列表根本看不到的商品，批量删除/重新识别会误伤。
+    assert "function clearBaseProductSelectionForFilter()" in script
+    assert script.count("clearBaseProductSelectionForFilter();") >= 2  # 时间 + 分类两个入口
+    time_fn = script[script.index("function setBaseTimeFilter("):]
+    time_fn = time_fn[:time_fn.index("\n}")]
+    assert "clearBaseProductSelectionForFilter();" in time_fn
+    category_fn = script[script.index("function toggleBaseCategoryFilter("):]
+    category_fn = category_fn[:category_fn.index("\n}")]
+    assert "clearBaseProductSelectionForFilter();" in category_fn
+
+
+def test_copying_to_templates_clears_the_selection() -> None:
+    script = APP.read_text(encoding="utf-8")
+
+    copy_fn = script[script.index("async function copySelectedBaseProductToTemplates("):]
+    copy_fn = copy_fn[:copy_fn.index("\n  await Promise.all(")]
+    assert '"/api/store-listing-copies/from-base"' in copy_fn
+    # 复制成功就清勾选（不再依赖「跳去刊登副本页」顺手清）。
+    assert "clearBaseProductSelection();" in copy_fn
+
+
 def test_index_ships_the_selection_clear_asset() -> None:
     html = INDEX.read_text(encoding="utf-8")
     assert "base-selection-clear-on-nav-v1" in html
+    assert html.count("base-selection-clear-on-filter-v1") == 1  # 本轮只改 app.js

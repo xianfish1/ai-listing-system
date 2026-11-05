@@ -158,6 +158,7 @@ def prepare_variant_thumbnail_uploads(
         exists = source_path.is_file()
         if exists:
             _copy_with_retry(source_path, upload_path)
+            _downscale_variant_thumbnail(upload_path)
         uploads[str(color)] = {
             "source_path": str(source_path),
             "upload_path": str(upload_path),
@@ -167,6 +168,32 @@ def prepare_variant_thumbnail_uploads(
         }
 
     return uploads
+
+
+# 马帮变种图区对超大原图不显示缩略图：实测 4752×5120 的 PNG（16MB）传到
+# 「自定义缩略图」后预览一直是空的，执行器等满 30s × 3 轮也等不到图片加载 →
+# variant_thumbnail_not_verified；同一张图缩到 2048px 就能正常显示（其他颜色
+# 的 2048×2048 原图一直没问题）。这里在生成上传副本时先把超限的边缩掉，
+# 原图与商品素材不动。Pillow 缺失时退回原样上传（与旧行为一致）。
+VARIANT_THUMBNAIL_MAX_SIDE = 2048
+
+
+def _downscale_variant_thumbnail(path: Path) -> None:
+    try:
+        from PIL import Image
+    except Exception:  # noqa: BLE001 - 没有 Pillow 不能阻断任务
+        return
+    try:
+        with Image.open(path) as image:
+            if max(image.size) <= VARIANT_THUMBNAIL_MAX_SIDE:
+                return
+            image.thumbnail((VARIANT_THUMBNAIL_MAX_SIDE, VARIANT_THUMBNAIL_MAX_SIDE))
+            if path.suffix.lower() in {".jpg", ".jpeg"}:
+                image.convert("RGB").save(path, quality=90)
+            else:
+                image.save(path)
+    except Exception:  # noqa: BLE001 - 坏图/编码器缺失都保持原文件
+        return
 
 
 def prepare_video_upload(video: dict[str, Any], upload_dir: Path) -> dict[str, Any]:

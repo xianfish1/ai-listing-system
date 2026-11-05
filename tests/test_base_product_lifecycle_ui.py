@@ -40,17 +40,16 @@ def test_app_js_renders_stage_chips_in_the_category_row() -> None:
     script = APP.read_text(encoding="utf-8")
 
     assert "function baseProductStageKey(stage)" in script
-    assert "function baseProductFilterKey(product)" in script
     assert "function baseProductFilterLabel(key)" in script
-    # 阶段 chip 带 stage: 前缀，和商品类目 chip 共用同一个单选筛选状态。
+    # 阶段 chip 带 stage: 前缀；阶段 / 人群 / 类目三个轴各自独立，共用同一个 chip 行。
     assert "`stage:${stage}`" in script
     assert "data-base-category-filter=\"${escapeHtml(key)}\"" in script
     assert "chip chip--stage chip--stage-${stage}" in script
     # 两个维度之间有分隔符，卡片上还有一枚阶段徽标。
     assert "chip-divider" in script
     assert "stage-badge stage-badge--${stageKey}" in script
-    # 空列表提示要说清是哪个分类（含阶段）没有商品。
-    assert "baseProductFilterLabel(state.baseProductCategoryFilter)" in script
+    # 空列表提示要说清是哪些分类（阶段 / 人群 / 类目叠加）没有商品。
+    assert "activeBaseProductFilterLabel()" in script
 
 
 def test_filter_row_and_asset_versions_are_wired_in_html() -> None:
