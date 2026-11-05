@@ -109,6 +109,18 @@ SOURCE_IMAGE_MARKERS = ("source", "源图", "源文件")
 # 文件名里的颜色词指的是印花色而不是衣服颜色（``后印花 (黑色衣服).png`` 的
 # "黑色"），所以这类文件的 sku_option 也清空，不参与颜色识别。
 PRINT_ARTWORK_MARKERS = ("印花", "透明图", "print")
+# 商品照例外：AI 生图工具把整批商品照命名为「T恤印花改图任务」及编号版本
+# （``T恤印花改图任务 (1).png``…）。名字里带「印花」但它们是衣服商品照，
+# 不是前/后印花或透明图那样的生产素材，不能因为关键词被排除出商品图和颜色识别。
+# 例外只认这一种已确认的命名，不放开「印花」关键词。
+PRODUCT_PHOTO_PRINT_NAME_PATTERN = re.compile(
+    r"^T恤印花改图任务(?:\s*[(（]\d+[)）]|\s+\d+)?$"
+)
+
+
+def _is_product_photo_with_print_in_name(stem: str) -> bool:
+    """True when the file name is the confirmed product-photo naming that contains 印花."""
+    return bool(PRODUCT_PHOTO_PRINT_NAME_PATTERN.match(str(stem or "").strip()))
 
 
 def scan_asset_root(root: str | Path, category_override: str = "", max_files: int = 3000, mode: str = "auto") -> dict[str, Any]:
@@ -470,6 +482,8 @@ def _matches_filename_marker(stem: str, markers: tuple[str, ...]) -> bool:
 
 def _is_print_artwork(stem: str) -> bool:
     """文件名是不是生产用印刷图（前/后印花、透明印花层）。"""
+    if _is_product_photo_with_print_in_name(stem):
+        return False
     return _matches_filename_marker(stem, PRINT_ARTWORK_MARKERS)
 
 

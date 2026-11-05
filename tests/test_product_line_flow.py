@@ -682,6 +682,80 @@ def test_explicit_main_image_wins_over_print_artwork_marker(tmp_path: Path) -> N
     assert product["product_images"] == ["主图-印花细节.jpg", "A白色.jpg"]
 
 
+def test_print_named_product_photos_are_not_production_artwork(tmp_path: Path) -> None:
+    """「T恤印花改图任务」及编号版本是商品照，不是生产用印刷图。
+
+    这类文件夹只有这批照片时，旧规则会把它们全部当成 print：不报缺主图/颜色图
+    （print 不算），商品却一张图、一个颜色都没有。修正后它们进入商品照分类和
+    未命名颜色图识别流程。"""
+    folder = tmp_path / "JB0357"
+    folder.mkdir()
+    for name in [
+        "T恤印花改图任务.png",
+        "T恤印花改图任务 (1).png",
+        "T恤印花改图任务（2）.png",
+        "T恤印花改图任务 3.png",
+        # 真正的生产印刷图仍然排除
+        "前胸印花图.png",
+        "后印花 (黑色衣服).png",
+        "前胸透明图.png",
+        "袖口透明图.png",
+        "T恤印花改图任务书.png",
+    ]:
+        (folder / name).write_bytes(b"image")
+
+    scan = scan_asset_root(folder, mode="recursive")
+    types = {asset["file_name"]: asset["asset_type"] for asset in scan["assets"]}
+
+    # 四张确认的商品照命名都不是 print；整组无其他线索时按未命名颜色图处理。
+    for name in ["T恤印花改图任务.png", "T恤印花改图任务 (1).png", "T恤印花改图任务（2）.png", "T恤印花改图任务 3.png"]:
+        assert types[name] == "variant"
+    # 真正的印刷图/透明图仍然排除；名字接近但不是已确认命名的也保持 print。
+    for name in ["前胸印花图.png", "后印花 (黑色衣服).png", "前胸透明图.png", "袖口透明图.png", "T恤印花改图任务书.png"]:
+        assert types[name] == "print"
+
+    product = storage.create_base_product_from_folder({"root_path": str(folder), "category": "POD Mens T-Shirt"})
+
+    assert product["main_image"] == "T恤印花改图任务.png"
+    assert product["product_images"][0] == "T恤印花改图任务.png"
+    assert set(product["product_images"]) == {
+        "T恤印花改图任务.png",
+        "T恤印花改图任务 (1).png",
+        "T恤印花改图任务（2）.png",
+        "T恤印花改图任务 3.png",
+    }
+    assert product["variant_count"] == 4
+    assert product["recognized_colors"] == []
+
+
+def test_print_named_product_photos_join_color_recognition_next_to_color_images(tmp_path: Path) -> None:
+    """有颜色图的文件夹里，商品照仍按商品图保留；已命名的颜色图继续负责颜色映射，
+    商品照不会因为名字里的「印花」被丢掉，也不会被当成颜色。"""
+    folder = tmp_path / "JB0142"
+    folder.mkdir()
+    for name in [
+        "T恤印花改图任务.png",
+        "T恤印花改图任务 (1).png",
+        "A白色.jpg",
+        "A黑色.jpg",
+        "前胸透明图.png",
+    ]:
+        (folder / name).write_bytes(b"image")
+
+    scan = scan_asset_root(folder, mode="recursive")
+    types = {asset["file_name"]: asset["asset_type"] for asset in scan["assets"]}
+    assert types["T恤印花改图任务.png"] == "main"
+    assert types["T恤印花改图任务 (1).png"] == "main"
+    assert types["前胸透明图.png"] == "print"
+
+    product = storage.create_base_product_from_folder({"root_path": str(folder), "category": "POD Mens T-Shirt"})
+
+    assert product["main_image"] == "T恤印花改图任务.png"
+    assert product["product_images"] == ["T恤印花改图任务.png", "T恤印花改图任务 (1).png", "A白色.jpg", "A黑色.jpg"]
+    assert product["recognized_colors"] == ["Black", "White"]
+    assert product["variant_image_map"] == {"White": "A白色.jpg", "Black": "A黑色.jpg"}
+
+
 def test_unnamed_numbered_folder_becomes_an_unnamed_variant_set(tmp_path: Path) -> None:
     """AI 生图工具导出的整套图片（1 (1).png…1 (10).png）文件名不含任何素材角色线索，
     整组按「未命名颜色图」处理：交给颜色识别命名，同时颜色图本身也进默认商品图
