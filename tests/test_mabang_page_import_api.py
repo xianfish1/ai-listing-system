@@ -135,6 +135,42 @@ def test_active_page_import_session_tracks_status_age_and_account() -> None:
     assert storage.active_mabang_page_import(now="2026-10-05T05:00:00+00:00") is None
 
 
+def test_cancel_page_import_releases_the_worker_hold_immediately() -> None:
+    """关闭导入弹窗 → cancelled，Worker 立刻可以领任务（不用等 30 分钟 TTL）。"""
+
+    run = storage.create_mabang_page_import({"platform": "shopee", "country": "PH"})
+    assert storage.active_mabang_page_import(slot=0)["id"] == run["id"]
+
+    cancelled = storage.cancel_mabang_page_import(run["id"])
+
+    assert cancelled["status"] == "cancelled"
+    assert storage.active_mabang_page_import(slot=0) is None
+    # 幂等：再取消一次仍是 cancelled
+    assert storage.cancel_mabang_page_import(run["id"])["status"] == "cancelled"
+
+
+def test_new_page_import_cancels_the_previous_one_for_the_same_slot() -> None:
+    """连续打开导入弹窗（旧弹窗没关/没确认）不能让旧 run 一直挡着 Worker。"""
+
+    first = storage.create_mabang_page_import({"platform": "shopee", "country": "PH"})
+    second = storage.create_mabang_page_import({"platform": "shopee", "country": "PH"})
+
+    assert storage.active_mabang_page_import(slot=0)["id"] == second["id"]
+    assert storage.get_mabang_page_import(first["id"])["status"] == "cancelled"
+
+
+def test_startup_clears_interrupted_page_imports() -> None:
+    """API 重启后，上一进程留下的进行中导入必须清掉，否则 Worker 一直等待。"""
+
+    run = storage.create_mabang_page_import({"platform": "shopee", "country": "PH"})
+    assert storage.active_mabang_page_import(slot=0)["id"] == run["id"]
+
+    assert storage.cancel_interrupted_page_imports() >= 1
+
+    assert storage.active_mabang_page_import(slot=0) is None
+    assert storage.get_mabang_page_import(run["id"])["status"] == "cancelled"
+
+
 def _set_run(run_id: str, **changes) -> None:
     with storage.locked_store() as (data, save):
         target = next(item for item in data["mabang_page_import_runs"] if item["id"] == run_id)

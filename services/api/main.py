@@ -4682,6 +4682,17 @@ class ApiHandler(BaseHTTPRequestHandler):
             })
             return
 
+        if path.startswith("/api/mabang-page-imports/") and path.endswith("/cancel"):
+            run_id = path.strip("/").split("/")[2]
+            try:
+                result = storage.cancel_mabang_page_import(run_id)
+            except storage.MabangPageImportNotFound as exc:
+                raise ApiRequestError(str(exc), 404) from exc
+            except MabangPageImportError as exc:
+                raise ApiRequestError(str(exc), 422) from exc
+            self._json(result)
+            return
+
         if path.startswith("/api/mabang-page-imports/") and path.endswith("/complete"):
             run_id = path.strip("/").split("/")[2]
             try:
@@ -6523,6 +6534,14 @@ def _warm_store_read_cache() -> None:
 
 def main() -> None:
     storage.ensure_dirs()
+    # 上一次进程遗留的「进行中」页面导入已经失效：先清掉，否则 Worker 起来后
+    # 会以为操作员还在用采集浏览器，一直等（任务全部待领取）。
+    try:
+        cleared = storage.cancel_interrupted_page_imports()
+        if cleared:
+            print(f"Cleared {cleared} interrupted page import session(s) on startup")
+    except Exception as exc:  # noqa: BLE001 - 清理失败不能挡住 API 启动
+        print(f"Clear interrupted page imports failed: {exc}")
     runtime_config = storage.get_runtime_configuration()
     worker_config = runtime_config["worker"]
     initial_host = network_access.resolve_bind_host(runtime_config.get("network") or {})

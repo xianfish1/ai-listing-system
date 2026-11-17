@@ -81,6 +81,33 @@ def record_page_import_error(
     return deepcopy(run)
 
 
+def cancel_page_import(
+    data: dict[str, Any],
+    run_id: str,
+    *,
+    now: str,
+) -> dict[str, Any]:
+    """操作员关掉导入弹窗：把 run 置成 cancelled，别再挡住 Worker 领任务。
+
+    页面导入进行中时 Worker 会主动让路（采集浏览器就是操作员的窗口）。以前关掉
+    弹窗不会通知后端，run 会以 pending/collected 状态留 30 分钟，Worker 一直
+    「等待页面导入」→ 自动化任务一直待领取。已确认的 run 不受影响（幂等 no-op）。
+    """
+
+    staged = deepcopy(data)
+    run = _find_run(staged, run_id)
+    if run.get("status") in {"completed", "cancelled", "failed"}:
+        return deepcopy(run)
+    run.update({
+        "status": "cancelled",
+        "updated_at": now,
+        "last_error": str(run.get("last_error") or "操作员关闭了导入弹窗，已取消这次导入"),
+    })
+    data.clear()
+    data.update(staged)
+    return deepcopy(run)
+
+
 def confirm_page_import(
     data: dict[str, Any],
     run_id: str,

@@ -56,6 +56,7 @@ from services.api.marketplace_category_catalog import (
 )
 from services.api.mabang_page_import import (
     MabangPageImportError,
+    cancel_page_import,
     confirm_page_import,
     record_page_import_error,
     stage_page_import,
@@ -2667,6 +2668,22 @@ def create_mabang_page_import(payload: dict[str, Any]) -> dict[str, Any]:
         "updated_at": now,
     }
     with locked_store() as (data, save):
+        # 同一账号同一槽位只允许一个「进行中」的导入：上一次弹窗没关干净/没确认就
+        # 再打开，旧 run 会继续让 Worker 让路，新 run 反而看不到。开新的就地把旧的
+        # 置为 cancelled（同一台采集浏览器不可能同时导两个商品）。
+        for existing in data.get("mabang_page_import_runs", []) or []:
+            if not isinstance(existing, dict) or existing.get("id") == run["id"]:
+                continue
+            if str(existing.get("status") or "").strip() not in PAGE_IMPORT_ACTIVE_STATUSES:
+                continue
+            same_account = str(existing.get("account_id") or "").strip() == account_id
+            same_slot = _normalized_slot(existing.get("slot")) == run["slot"]
+            if same_account and same_slot:
+                existing.update({
+                    "status": "cancelled",
+                    "updated_at": now,
+                    "last_error": str(existing.get("last_error") or "被新的页面导入替代，已取消"),
+                })
         data.setdefault("mabang_page_import_runs", []).append(run)
         save(data)
     return deepcopy(run)
@@ -2743,6 +2760,44 @@ def stage_mabang_page_import(run_id: str, raw_capture: dict[str, Any]) -> dict[s
         result = stage_page_import(data, run_id, raw_capture, now=utc_now())
         save(data)
         return deepcopy(result)
+
+
+def cancel_mabang_page_import(run_id: str) -> dict[str, Any]:
+    """取消一次页面导入（关闭导入弹窗时调用），立即解除 Worker 让路。"""
+
+    with locked_store() as (data, save):
+        run = next((item for item in data.get("mabang_page_import_runs", []) if item.get("id") == run_id), None)
+        if not run:
+            raise MabangPageImportNotFound(f"Mabang page import not found: {run_id}")
+        result = cancel_page_import(data, run_id, now=utc_now())
+        save(data)
+        return deepcopy(result)
+
+
+def cancel_interrupted_page_imports(reason: str = "API 重启，未完成的页面导入已取消") -> int:
+    """启动时清掉上一进程遗留的「进行中」导入。
+
+    导入中途重启 API，原来的弹窗/采集已经失效；这些 run 若继续算进行中，Worker
+    会以为操作员还在用采集浏览器，一直等待（实测可挡 30 分钟），任务全部待领取。
+    """
+
+    with locked_store() as (data, save):
+        now = utc_now()
+        cleared = 0
+        for run in data.get("mabang_page_import_runs", []) or []:
+            if not isinstance(run, dict):
+                continue
+            if str(run.get("status") or "").strip() not in PAGE_IMPORT_ACTIVE_STATUSES:
+                continue
+            run.update({
+                "status": "cancelled",
+                "updated_at": now,
+                "last_error": str(run.get("last_error") or reason),
+            })
+            cleared += 1
+        if cleared:
+            save(data)
+        return cleared
 
 
 def complete_mabang_page_import(run_id: str, raw_capture: dict[str, Any]) -> dict[str, Any]:

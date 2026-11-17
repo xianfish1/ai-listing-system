@@ -331,11 +331,22 @@ def _process_exit_code(process: Any) -> int | None:
 
 
 def _run_windows_process_query() -> subprocess.CompletedProcess[str]:
-    """Return Chrome process ids and command lines from Windows WMI."""
+    """Return Chrome process ids and command lines from Windows WMI.
+
+    必须显式把 PowerShell 的输出编码钉成 UTF-8：默认按控制台代码页（简体中文机器
+    是 cp936）输出，而 subprocess 用 text=True 按 UTF-8 解码——当 Chrome 命令行里
+    带中文路径（本仓库路径/采集 profile 目录常见）时解码直接抛 UnicodeDecodeError，
+    被调用方吞掉后变成「一个 Chrome 都查不到」。接着就会把 API 自己刚启动的采集
+    Chrome 当成陌生浏览器：CDP 连得上、却匹配不到 profile/端口，taskkill 又是空
+    列表 → 抛「CDP 端口被其它浏览器占用且无法关闭」，Worker 永远卡在
+    waiting_for_login。
+    """
 
     powershell = shutil.which("powershell.exe") or shutil.which("powershell") or "powershell.exe"
     command = (
         "$ErrorActionPreference='Stop'; "
+        "[Console]::OutputEncoding = [System.Text.Encoding]::UTF8; "
+        "$OutputEncoding = [System.Text.Encoding]::UTF8; "
         "Get-CimInstance Win32_Process -Filter \"Name = 'chrome.exe'\" "
         "| Select-Object ProcessId,CommandLine | ConvertTo-Json -Compress"
     )
@@ -344,7 +355,9 @@ def _run_windows_process_query() -> subprocess.CompletedProcess[str]:
         check=False,
         capture_output=True,
         text=True,
-        timeout=5,
+        encoding="utf-8",
+        errors="replace",
+        timeout=8,
         **no_console_window_kwargs(),
     )
 

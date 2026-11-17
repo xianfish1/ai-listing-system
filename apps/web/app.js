@@ -10278,6 +10278,20 @@ function stopMabangPageImportPolling() {
   }
 }
 
+// 关闭导入弹窗 = 这次导入不做了：必须告诉后端，否则 run 会以 pending/collected
+// 留 30 分钟，Worker 一直「等待页面导入」，自动化任务一直待领取。
+function cancelMabangPageImportRunOnClose() {
+  const runId = state.mabangPageImportRunId;
+  state.mabangPageImportRunId = "";
+  state.mabangPageImportRun = null;
+  stopMabangPageImportPolling();
+  if (!runId) return;
+  api(`/api/mabang-page-imports/${encodeURIComponent(runId)}/cancel`, {
+    method: "POST",
+    body: JSON.stringify({}),
+  }).catch(() => {});
+}
+
 async function copyMabangPageImportRunId() {
   if (!state.mabangPageImportRunId) return;
   try {
@@ -14036,6 +14050,7 @@ document.addEventListener("focusin", (event) => {
 });
 
 renderSizeOptions([]);
+$("mabang-page-import-dialog")?.addEventListener("close", cancelMabangPageImportRunOnClose);
 renderCnscSiteOrderDisplays();
 initWatermarkPickers();
 

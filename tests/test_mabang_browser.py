@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import os
+import subprocess
 from pathlib import Path
 from urllib.error import URLError
 from urllib.parse import quote, unquote
@@ -822,3 +824,30 @@ def test_launch_reports_a_port_held_by_a_foreign_browser(tmp_path: Path, monkeyp
             process_query_fn=lambda: NoProcesses(),
             attempts=1,
         )
+
+
+@pytest.mark.skipif(os.name != "nt", reason="PowerShell 进程查询只在 Windows 上走")
+def test_windows_process_query_forces_utf8_output(monkeypatch: pytest.MonkeyPatch) -> None:
+    """命令行里有中文时，PowerShell 默认按 cp936 输出会让 text=True 解码崩掉。
+
+    崩掉后 `_collection_chrome_entries` 静默返回空列表 → 认不出自己启动的 Chrome →
+    误报「CDP 端口被其它浏览器占用且无法关闭」，Worker 卡在 waiting_for_login。
+    """
+
+    captured: dict[str, object] = {}
+
+    def fake_run(cmd, **kwargs):  # noqa: ANN001 - 与 subprocess.run 同形
+        captured["cmd"] = cmd
+        captured["kwargs"] = kwargs
+        return subprocess.CompletedProcess(cmd, 0, "[]", "")
+
+    monkeypatch.setattr(mabang_browser.subprocess, "run", fake_run)
+
+    mabang_browser._run_windows_process_query()
+
+    kwargs = captured["kwargs"]
+    assert kwargs.get("encoding") == "utf-8"
+    assert kwargs.get("errors") == "replace"
+    script = captured["cmd"][-1]
+    assert "OutputEncoding" in script
+    assert "Win32_Process" in script
