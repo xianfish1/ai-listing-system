@@ -100,7 +100,9 @@ test('页面采集器：CNSC 先展开店铺选择器与每站折扣活动，采
   // 店铺列表要点开 .shop-box、活动行要点开表头 .change-discount 才会渲染；
   // 不展开就采，正是「店铺促销活动 / 店铺选中的」采不到的原因。
   assert.match(SOURCE, /mabang_page_import_prepare\.page\.js/);
-  assert.match(SOURCE, /const isCnscPage = \/\[\?&#\]global=4/);
+  assert.match(SOURCE, /let isCnscPage = \/\[\?&#\]global=4/);
+  // 3PF 入口可能不带 global=4：页面里有店铺选择器也照样展开。
+  assert.match(SOURCE, /document\.querySelector\('#shops-wap, \.shops-wap'\)/);
   assert.match(SOURCE, /await prepareImportState\(target\.frame\)/);
   assert.match(SOURCE, /await clearPreparedState\(target\.frame\)/);
   assert.match(SOURCE, /cnsc_prepare: cnscPrepare/);

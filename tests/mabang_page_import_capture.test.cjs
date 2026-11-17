@@ -38,7 +38,7 @@ function makeDomTable({ headers = [], rows = [], vue = null } = {}) {
   };
 }
 
-function executeCapture({ href, columns, rows, picker = null, extraTables = [], domTables = [], importState = null, categoryInfo = {}, categoryCandidates = null, promotionDialog = null, vuexShopee = {} }) {
+function executeCapture({ href, columns, rows, picker = null, extraTables = [], domTables = [], importState = null, categoryInfo = {}, categoryCandidates = null, promotionDialog = null, vuexShopee = {}, variantCard = null }) {
   const source = fs.readFileSync(path.join(__dirname, '../scripts/mabang_page_import_capture.js'), 'utf8');
   const table = { tableData: rows, getColumns: () => columns };
   if (domTables[0]) domTables[0].__vue__ = table;
@@ -66,6 +66,7 @@ function executeCapture({ href, columns, rows, picker = null, extraTables = [], 
   const parsed = new URL(href);
   const context = {
     URL,
+    getComputedStyle: () => ({ display: 'block', visibility: 'visible', opacity: '1' }),
     window: importState ? { __AI_LISTING_CNSC_IMPORT_STATE__: importState } : {},
     location: {
       href,
@@ -83,6 +84,7 @@ function executeCapture({ href, columns, rows, picker = null, extraTables = [], 
       querySelectorAll(selector) {
         if (selector === '.vxe-table') return [...domTables, ...extraTables];
         if (selector === '.vxe-header--column') return domTables.flatMap((table) => table.querySelectorAll(selector));
+        if (selector === '.el-card') return variantCard ? [variantCard] : [];
         if (promotionDialog && selector === '.el-dialog,.el-dialog__wrapper,[role="dialog"]') return [promotionDialog];
         return [];
       },
@@ -323,7 +325,8 @@ test('CNSC target stores come from checked site groups and selected store radios
     picker: buildCnscPicker(),
   });
 
-  assert.equal(result.target_site_stores_loaded, false);
+  // 3PF 店只勾部分站点是常态：有两个勾选站点就算读取成功。
+  assert.equal(result.target_site_stores_loaded, true);
   assert.deepEqual(result.target_site_stores, [
     { site_code: 'TW', store_id: 'tw-1', store_name: '海宁TW' },
     { site_code: 'PH', store_id: 'ph-2', store_name: '海宁PH1' },
@@ -331,7 +334,7 @@ test('CNSC target stores come from checked site groups and selected store radios
   assert.equal(result.target_site_stores.some((item) => ['台湾', '菲律宾'].includes(item.store_name)), false);
 });
 
-test('CNSC target stores stay unloaded when any checked manual site lacks one selected store', () => {
+test('CNSC target stores stay loaded when a checked site has no selected store (占位站不拖累整体)', () => {
   const result = executeCapture({
     href: 'https://publish.mabangerp.com/publish-ui/#/productDetailShopee?global=4',
     columns: [
@@ -344,7 +347,7 @@ test('CNSC target stores stay unloaded when any checked manual site lacks one se
     picker: buildCnscPicker({ phSelected: false }),
   });
 
-  assert.equal(result.target_site_stores_loaded, false);
+  assert.equal(result.target_site_stores_loaded, true);
   assert.deepEqual(result.target_site_stores, [{ site_code: 'TW', store_id: 'tw-1', store_name: '海宁TW' }]);
 });
 
@@ -699,4 +702,143 @@ test('a stale page selection is not echoed when the store list was read', () => 
   assert.equal(result.promotion_catalog_loaded, true);
   assert.deepEqual(result.promotion_options.map((item) => item.activity_id), ['928232107737088']);
   assert.equal(result.promotion_options[0].selected, false);
+});
+
+test('站点表头用中文（菲律宾）也能读到对应站点的价格列', () => {
+  const result = executeCapture({
+    href: 'https://publish.mabangerp.com/publish-ui/#/productDetailShopee?global=4',
+    columns: [
+      { field: 'sku', title: 'SKU' },
+      { field: 'price', title: '全球商品价格' },
+      { title: '菲律宾', children: [
+        { field: 'phOriginal', title: '价格' },
+        { field: 'phSale', title: '折扣价' },
+      ] },
+    ],
+    rows: [{ sku: 'A||S', price: 19.2, phOriginal: 999, phSale: 599.4 }],
+  });
+
+  assert.deepEqual(result.sku_rows[0].site_prices, {
+    PH: { original_price: 999, sale_price: 599.4 },
+  });
+});
+
+test('3PF：只勾部分站点 + 每站不同活动都能原样带出', () => {
+  const importState = {
+    target_site_stores_loaded: true,
+    target_site_stores: [
+      {
+        site_code: 'TW', store_id: 'tw-1', store_name: '海宁TW',
+        discount_catalog_loaded: true,
+        discount_catalog: [{ mabang_discount_id: 'tw-30', name: 'TW 3月活动', discount_percent: 30, selected: true }],
+        mabang_discount_id: 'tw-30', discount_name: 'TW 3月活动', discount_percent: 30,
+      },
+      {
+        site_code: 'PH', store_id: 'ph-1', store_name: '海宁PH',
+        discount_catalog_loaded: true,
+        discount_catalog: [
+          { mabang_discount_id: 'ph-20', name: 'PH 20%', discount_percent: 20, selected: false },
+          { mabang_discount_id: 'ph-40', name: 'PH 40%', discount_percent: 40, selected: true },
+        ],
+        mabang_discount_id: 'ph-40', discount_name: 'PH 40%', discount_percent: 40,
+      },
+      {
+        site_code: 'TH', store_id: 'th-1', store_name: '海宁TH',
+        discount_catalog_loaded: true,
+        discount_catalog: [{ mabang_discount_id: 'th-15', name: 'TH 15%', discount_percent: 15, selected: true }],
+        mabang_discount_id: 'th-15', discount_name: 'TH 15%', discount_percent: 15,
+      },
+    ],
+  };
+  const result = executeCapture({
+    href: 'https://publish.mabangerp.com/publish-ui/#/productDetailShopee?global=4',
+    columns: [{ field: 'price', title: '全球商品价格' }],
+    rows: [{ price: 19.2 }],
+    importState,
+  });
+
+  assert.equal(result.target_site_stores_loaded, true);
+  assert.deepEqual(result.target_site_stores.map((item) => item.site_code), ['TW', 'PH', 'TH']);
+  assert.deepEqual(
+    result.target_site_stores.map((item) => item.discount_catalog.map((entry) => entry.mabang_discount_id)),
+    [['tw-30'], ['ph-20', 'ph-40'], ['th-15']],
+  );
+  assert.deepEqual(
+    result.target_site_stores.map((item) => item.mabang_discount_id),
+    ['tw-30', 'ph-40', 'th-15'],
+  );
+});
+
+test('CNSC 英文 size 表头不会被「包裹尺寸」抢走（真机 25 的坑）', () => {
+  // 真机 CNSC 网格表头是 color/size/SKU/全球商品价格/包裹尺寸(cm)，行里同时有
+  // size=100cm(2-3Y) 和 package_length=25；「尺寸」包含匹配曾把尺码读成 25。
+  const result = executeCapture({
+    href: 'https://publish.mabangerp.com/publish-ui/#/productDetailShopee?global=4',
+    columns: [
+      { field: 'color', title: 'color' },
+      { field: 'size', title: 'size' },
+      { field: 'sku', title: 'SKU' },
+      { field: 'price', title: '全球商品价格' },
+      { field: 'package_length', title: '包裹尺寸(cm)' },
+    ],
+    rows: [{
+      color: 'Blue', size: '100cm(2-3Y)', sku: 'AL1572_Blue||100cm', price: '45.12', package_length: 25,
+    }],
+  });
+
+  assert.equal(result.sku_rows[0].size, '100cm(2-3Y)');
+  assert.equal(result.sku_rows[0].package_length_cm, 25);
+});
+
+function buildVariantCard({ colors = [], sizes = [], sizesChecked = true } = {}) {
+  const option = (value, checked = true) => ({
+    getBoundingClientRect: () => ({ width: 80, height: 20 }),
+    querySelector(selector) {
+      if (selector === 'input') return { checked };
+      if (selector === '.text-display') return { textContent: value };
+      return null;
+    },
+    textContent: value,
+  });
+  const block = (title, options) => ({
+    getBoundingClientRect: () => ({ width: 300, height: 80 }),
+    querySelector(selector) {
+      if (selector === '.natureBlock-title') return { textContent: title };
+      return null;
+    },
+    querySelectorAll(selector) {
+      if (selector === '.flex-checkbox') return options;
+      return [];
+    },
+  });
+  return {
+    getBoundingClientRect: () => ({ width: 600, height: 400 }),
+    textContent: '变种信息 属性1： color 属性2： size',
+    querySelectorAll(selector) {
+      if (selector === '.natureBlock') {
+        return [
+          block('属性1： color 设置为属性1', colors.map((value) => option(value))),
+          block('属性2： size 设置为属性1', sizes.map((value) => option(value, sizesChecked))),
+        ];
+      }
+      return [];
+    },
+  };
+}
+
+test('变种信息卡片只读属性值，不把「设置为属性1 / 0/30」收进尺码', () => {
+  const result = executeCapture({
+    href: 'https://publish.mabangerp.com/publish-ui/#/productDetailShopee?global=4',
+    columns: [{ field: 'price', title: '全球商品价格' }],
+    rows: [{ price: 45.12 }],
+    variantCard: buildVariantCard({
+      colors: ['Blue', 'Red', 'Black'],
+      sizes: ['100cm(2-3Y)', '110cm(3-4Y)', '120cm(5-6Y)'],
+    }),
+  });
+
+  assert.deepEqual(result.variation_axes, {
+    colors: ['Blue', 'Red', 'Black'],
+    sizes: ['100cm(2-3Y)', '110cm(3-4Y)', '120cm(5-6Y)'],
+  });
 });

@@ -5988,6 +5988,7 @@ function verifySiteSkuReadback(assignments, pageRows) {
 async function fillSkuGrid(frame, task) {
   const grid = task.sku_grid || {};
   const siteMode = !isCnscPageMode(task.store?.listing_mode);
+  const threePf = normalizeListingMode(task.store?.listing_mode) === 'cnsc_3pf';
   const siteAssignments = siteMode ? matchSiteSkuRows(grid.skus || [], await readSiteSkuGridRows(frame)) : [];
   const result = await frame.evaluate((input) => {
     const grid = input.grid || {};
@@ -6037,6 +6038,7 @@ async function fillSkuGrid(frame, task) {
     const columnDefs = table.tableColumn || [];
     const columns = new Set(columnDefs.map((column) => column.field));
     const globalMode = input.globalMode === true;
+    const threePf = input.threePf === true;
     const strictFieldFor = (names, titleFragments) => {
       const matches = new Set(names.filter((name) => columns.has(name)));
       for (const column of columnDefs) {
@@ -6052,7 +6054,11 @@ async function fillSkuGrid(frame, task) {
       PH: strictFieldFor(['PH', 'PH_stock', 'PHStock', 'phStock'], ['菲律宾仓库存']),
     } : null;
     if (cnscFields) {
-      const missing = Object.entries(cnscFields).filter(([, field]) => !field).map(([name]) => name);
+      // 3PF 页面不一定有三仓列：只在缺「全球商品价格」时拦；三仓有列才填。
+      const optional = threePf ? ['TH', 'CN_GZ', 'PH'] : [];
+      const missing = Object.entries(cnscFields)
+        .filter(([name, field]) => !field && !optional.includes(name))
+        .map(([name]) => name);
       if (missing.length) return { ok: false, reason: 'cnsc_required_columns_missing', missing };
     }
     const siteSkuByRow = new Map(siteAssignments.map((assignment) => [Number(assignment.row_index), String(assignment.sku_code || '')]));
@@ -6082,7 +6088,10 @@ async function fillSkuGrid(frame, task) {
           }
           return 0;
         };
-        for (const code of ['TH', 'CN_GZ', 'PH']) row[cnscFields[code]] = stockFor(code);
+        for (const code of ['TH', 'CN_GZ', 'PH']) {
+          if (!cnscFields[code]) continue;
+          row[cnscFields[code]] = stockFor(code);
+        }
       }
       if (!applyTransactionInformation(row, columns, columnDefs, transaction)) {
         return { ok: false, reason: 'transaction_information_incomplete', rows: rows.length, row_index: index };
@@ -6091,7 +6100,7 @@ async function fillSkuGrid(frame, task) {
     if (typeof table.updateData === 'function') table.updateData();
     if (typeof table.recalculate === 'function') table.recalculate();
     return { ok: true, rows: rows.length };
-  }, { grid, siteAssignments, globalMode: isCnscPageMode(grid.listing_mode || task.store?.listing_mode) });
+  }, { grid, siteAssignments, globalMode: isCnscPageMode(grid.listing_mode || task.store?.listing_mode), threePf });
   if (!result.ok && isCnscPageMode(task.store?.listing_mode)) {
     return fillCNSCSkuGridFromDom(frame, task);
   }
@@ -6148,16 +6157,22 @@ function expectedCNSCDomRows(grid) {
 
 // VXE renders the editable leaf cell one numeric column after its grouped header.
 // Example from CNSC: header col_5 "全球商品价格" -> body col_6 input.
-function buildCNSCDomGridPlan(grid, headers, bodyColumnIds, rowCount) {
+function buildCNSCDomGridPlan(grid, headers, bodyColumnIds, rowCount, options = {}) {
   const expectedRows = Number.isFinite(Number(grid?.expected_rows)) ? Number(grid.expected_rows) : (grid?.skus || []).length;
   if (Number(rowCount) !== expectedRows) return { ok: false, reason: 'sku_row_count_mismatch', rows: Number(rowCount) || 0 };
 
+  const warehousesRequired = options.warehousesRequired !== false;
   const presentBodyColumns = new Set(bodyColumnIds || []);
   const columns = {};
   const missing = [];
   for (const definition of CNSC_DOM_COLUMN_DEFINITIONS) {
     const matches = (headers || []).filter((header) => definition.matches(normalizeCNSCDomText(header.text)));
     const bodyColumn = matches.length === 1 ? nextVxeColumnId(vxeColumnId(matches[0].className)) : '';
+    // 3PF 页面不一定有三仓列（采集模板来的人，有些店只有单一库存）：有就填，没有不拦。
+    if (!warehousesRequired && ['TH', 'CN_GZ', 'PH'].includes(definition.key)) {
+      if (bodyColumn && presentBodyColumns.has(bodyColumn)) columns[definition.key] = bodyColumn;
+      continue;
+    }
     if (!bodyColumn || !presentBodyColumns.has(bodyColumn)) missing.push(definition.key);
     else columns[definition.key] = bodyColumn;
   }
@@ -6165,9 +6180,9 @@ function buildCNSCDomGridPlan(grid, headers, bodyColumnIds, rowCount) {
   return { ok: true, rows: expectedRows, columns };
 }
 
-function validateCNSCDomGridReadback(snapshot, grid) {
+function validateCNSCDomGridReadback(snapshot, grid, options = {}) {
   const rows = Array.isArray(snapshot?.rows) ? snapshot.rows : [];
-  const plan = buildCNSCDomGridPlan(grid, snapshot?.headers || [], snapshot?.body_column_ids || [], rows.length);
+  const plan = buildCNSCDomGridPlan(grid, snapshot?.headers || [], snapshot?.body_column_ids || [], rows.length, options);
   if (!plan.ok) return plan;
   const expectedRows = expectedCNSCDomRows(grid);
   const mismatches = [];
@@ -6177,6 +6192,8 @@ function validateCNSCDomGridReadback(snapshot, grid) {
     const fields = [];
     if (String(actual[plan.columns.sku] || '').trim() !== expected.sku) fields.push('sku');
     for (const field of ['global_price', 'TH', 'CN_GZ', 'PH']) {
+      // 3PF 没有该列时跳过比对（不把「页面没这列」当成值不一致）。
+      if (!plan.columns[field]) continue;
       const actualValue = Number(actual[plan.columns[field]]);
       const expectedValue = Number(expected[field]);
       if (!Number.isFinite(actualValue) || actualValue !== expectedValue) fields.push(field);
@@ -6219,9 +6236,11 @@ async function readCNSCDomGridSnapshot(frame) {
 
 async function fillCNSCSkuGridFromDom(frame, task) {
   const grid = task.sku_grid || {};
+  const threePf = normalizeListingMode((task.store || {}).listing_mode) === 'cnsc_3pf';
+  const planOptions = { warehousesRequired: !threePf };
   const snapshot = await readCNSCDomGridSnapshot(frame);
   if (snapshot.table_count !== 1) throw new BlockedError('sku_table_not_found', { table_count: snapshot.table_count || 0 });
-  const plan = buildCNSCDomGridPlan(grid, snapshot.headers, snapshot.body_column_ids, snapshot.rows.length);
+  const plan = buildCNSCDomGridPlan(grid, snapshot.headers, snapshot.body_column_ids, snapshot.rows.length, planOptions);
   if (!plan.ok) throw new BlockedError(plan.reason, plan);
   const rows = expectedCNSCDomRows(grid);
   const writeResult = await frame.evaluate(({ columns, values }) => {
@@ -6243,6 +6262,8 @@ async function fillCNSCSkuGridFromDom(frame, task) {
       const row = rowNodes[index];
       const valuesByField = values[index];
       for (const field of ['sku', 'global_price', 'TH', 'CN_GZ', 'PH']) {
+        // 3PF 页面没有的三仓列直接跳过（有列才写）。
+        if (!columns[field]) continue;
         const inputs = [...row.querySelectorAll(`.vxe-body--column.${columns[field]} input.el-input__inner`)];
         if (inputs.length !== 1) return { ok: false, reason: 'cnsc_dom_input_not_unique', row_index: index, field, count: inputs.length };
         const input = inputs[0];
@@ -6255,7 +6276,7 @@ async function fillCNSCSkuGridFromDom(frame, task) {
     return { ok: true, rows: rowNodes.length };
   }, { columns: plan.columns, values: rows });
   if (!writeResult.ok) throw new BlockedError(writeResult.reason, writeResult);
-  const readback = validateCNSCDomGridReadback(await readCNSCDomGridSnapshot(frame), grid);
+  const readback = validateCNSCDomGridReadback(await readCNSCDomGridSnapshot(frame), grid, planOptions);
   if (!readback.ok) throw new BlockedError(readback.reason, readback);
   emit('stage', { stage: 'fill_sku_grid', ok: true, rows: readback.rows, method: 'cnsc_dom' });
   return { ...readback, method: 'cnsc_dom' };
@@ -6680,7 +6701,8 @@ async function validateBeforeSave(frame, task, stages) {
     if (snapshot.table_count !== 1) {
       audit.cnsc.missing_columns = ['sku_table'];
     } else {
-      const readback = validateCNSCDomGridReadback(snapshot, task.sku_grid || {});
+      const threePf = normalizeListingMode((task.store || {}).listing_mode) === 'cnsc_3pf';
+      const readback = validateCNSCDomGridReadback(snapshot, task.sku_grid || {}, { warehousesRequired: !threePf });
       audit.rows = snapshot.rows.length;
       if (readback.ok) {
         const plan = buildCNSCDomGridPlan(task.sku_grid || {}, snapshot.headers, snapshot.body_column_ids, snapshot.rows.length);
@@ -6769,6 +6791,7 @@ async function validateBeforeSave(frame, task, stages) {
 //     the SKU inherits that value.
 function validateCNSCTaskPayload(task) {
   if (!isCnscPageMode((task.store || {}).listing_mode)) return { ok: true, errors: [] };
+  const threePf = normalizeListingMode((task.store || {}).listing_mode) === 'cnsc_3pf';
   const errors = [];
   const store = task.store || {};
   const cnscStore = store.cnsc_store || {};
@@ -6786,8 +6809,10 @@ function validateCNSCTaskPayload(task) {
     if (!Number.isFinite(percent) || percent <= 0 || percent >= 100) errors.push(`cnsc_site_discount_percent_invalid:${code}`);
   }
   const tiers = Array.isArray(task.cnsc?.price_tiers) ? task.cnsc.price_tiers : [];
-  if (!tiers.length) errors.push('cnsc_price_tiers_missing');
-  for (const tier of tiers) {
+  // 3PF 没有价格档：价格由模板价推导到每个 SKU 的 site_price_matrix。
+  if (!threePf) {
+    if (!tiers.length) errors.push('cnsc_price_tiers_missing');
+    for (const tier of tiers) {
     // global_price_cny is required on EVERY tier: the real CNSC page's
     // *全球商品价格 SKU column is mandatory and the SKU inherits the tier value.
     const globalPrice = Number(tier.global_price_cny);
@@ -6805,6 +6830,7 @@ function validateCNSCTaskPayload(task) {
         errors.push(`cnsc_site_price_missing:${tier.id || ''}:${code}`);
       }
     }
+  }
   }
   const skus = Array.isArray(task.sku_grid?.skus) ? task.sku_grid.skus : [];
   if (skus.some((sku) => !Number.isFinite(Number(sku.global_price_cny)) || Number(sku.global_price_cny) <= 0)) {

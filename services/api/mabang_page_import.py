@@ -352,11 +352,18 @@ def _upsert_template(
             "mabang_discount_id", "discount_name", "discount_label", "discount_percent",
             "discount_catalog_loaded", "discount_catalog",
         )
+        selection_fields = ("mabang_discount_id", "discount_name", "discount_label", "discount_percent")
         for target in target_site_stores:
             identity = (str(target.get("site_code") or "").upper(), str(target.get("store_id") or target.get("store_name") or ""))
             previous = existing_targets.get(identity) or {}
             if target.get("discount_catalog_loaded") is not True:
                 for field in discount_fields:
+                    if field in previous:
+                        target[field] = deepcopy(previous[field])
+            elif not str(target.get("mabang_discount_id") or "").strip():
+                # 活动清单读到了、但页面上没有选中活动（3PF 常见）：保留模板里已有的
+                # 选择，只更新可选项清单，不能因为一次采集静默清空已配好的活动。
+                for field in selection_fields:
                     if field in previous:
                         target[field] = deepcopy(previous[field])
     price_tiers = deepcopy(payload.get("price_tiers") or [])
@@ -371,8 +378,12 @@ def _upsert_template(
             if not tier.get("site_prices"):
                 tier["site_prices"] = deepcopy(previous.get("site_prices") or {})
     warehouse_stock_defaults = deepcopy(payload.get("warehouse_stock_defaults") or {})
+    three_pf = normalize_listing_mode(listing_mode) == "cnsc_3pf"
     missing_configuration = []
-    if cnsc_page:
+    if three_pf:
+        # 3PF 的缺项由快照按「目标站点/每站活动/全球价」算好，不能套纯跨境的价格档规则。
+        missing_configuration = list(payload.get("missing_configuration") or [])
+    elif cnsc_page:
         missing_configuration = cnsc_missing_configuration(
             price_tiers=price_tiers,
             warehouse_stock_defaults=warehouse_stock_defaults,
@@ -403,7 +414,8 @@ def _upsert_template(
                 or existing_snapshot.get("default_site_discount_percent")
                 or 40
             ) if cnsc_page else None,
-            "price_tiers": price_tiers if cnsc_page else [],
+            "price_tiers": [] if three_pf else (price_tiers if cnsc_page else []),
+            "global_price_cny": payload.get("global_price_cny") if three_pf else "",
             "warehouse_stock_defaults": warehouse_stock_defaults if cnsc_page else {},
             "cnsc_import_sku_rows": deepcopy(payload.get("cnsc_import_sku_rows") or []) if cnsc_page else [],
             "missing_configuration": missing_configuration,

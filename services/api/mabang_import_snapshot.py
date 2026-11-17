@@ -75,6 +75,23 @@ def normalize_mabang_capture(raw: dict[str, Any]) -> dict[str, Any]:
     sku_rows = raw.get("sku_rows") if isinstance(raw.get("sku_rows"), list) else []
     normalized_rows = [row for row in sku_rows if isinstance(row, dict)]
     variation = _normalize_variation(normalized_rows)
+    # 页面「变种信息」卡片的轴值兜底：3PF 的 SKU 网格可能没有独立颜色/尺码列，
+    # 行解析拿不到时用它把模板的「规格与 SKU」填上。
+    fallback_axes = raw.get("variation_axes") if isinstance(raw.get("variation_axes"), dict) else {}
+    fallback_colors = [_text(item) for item in (fallback_axes.get("colors") or []) if _text(item)]
+    fallback_sizes = [_text(item) for item in (fallback_axes.get("sizes") or []) if _text(item)]
+    if not variation["colors"] and fallback_colors:
+        variation["colors"] = list(dict.fromkeys(fallback_colors))
+    if not variation["sizes"] and fallback_sizes:
+        variation["sizes"] = list(dict.fromkeys(fallback_sizes))
+    axes = []
+    if variation["colors"]:
+        axes.append({"name": "color", "values": variation["colors"]})
+    if variation["sizes"]:
+        axes.append({"name": "size", "values": variation["sizes"]})
+    variation["axes"] = axes
+    if not variation["sku_count"] and variation["colors"] and variation["sizes"]:
+        variation["sku_count"] = len(variation["colors"]) * len(variation["sizes"])
     cnsc_rows = _normalize_cnsc_sku_rows(normalized_rows) if is_cnsc_page(listing_mode) else []
     price_tiers = _derive_cnsc_price_tiers(cnsc_rows) if is_cnsc_page(listing_mode) else []
     warehouse_stock_defaults = _derive_cnsc_warehouse_defaults(cnsc_rows) if is_cnsc_page(listing_mode) else {}
@@ -102,12 +119,20 @@ def normalize_mabang_capture(raw: dict[str, Any]) -> dict[str, Any]:
         selected_promotion_id=selected_promotion_id,
     )
 
-    missing_configuration = cnsc_missing_configuration(
-        price_tiers=price_tiers,
-        warehouse_stock_defaults=warehouse_stock_defaults,
-        target_site_stores=target_site_stores,
-        default_site_discount_percent=40,
-    ) if is_cnsc_page(listing_mode) else []
+    if normalize_listing_mode(listing_mode) == "cnsc_3pf":
+        # 3PF 不用价格档/三仓矩阵，预览的「待补全」也只该看目标站点活动与全球价，
+        # 否则导入弹窗会一直显示「价格档/站点价格表待补充」这种用不到的字段。
+        three_pf_global, _, _ = _three_pf_price_defaults({"cnsc_sku_rows": cnsc_rows}, target_site_stores)
+        missing_configuration = _three_pf_missing_configuration(target_site_stores, three_pf_global)
+    elif is_cnsc_page(listing_mode):
+        missing_configuration = cnsc_missing_configuration(
+            price_tiers=price_tiers,
+            warehouse_stock_defaults=warehouse_stock_defaults,
+            target_site_stores=target_site_stores,
+            default_site_discount_percent=40,
+        )
+    else:
+        missing_configuration = []
 
     return {
         "schema_version": 3,
@@ -124,6 +149,8 @@ def normalize_mabang_capture(raw: dict[str, Any]) -> dict[str, Any]:
         "selected_attributes": selected_attributes,
         "missing_required_attributes": missing_required,
         "variation": variation,
+        # 采集诊断（店铺选择器/每站活动展开结果）：预览里直接把失败原因显示出来。
+        "capture_debug": deepcopy(raw.get("capture_debug") or {}),
         "cnsc_store": {"id": normalized_store["id"], "name": normalized_store["name"]} if is_cnsc_page(listing_mode) else {},
         "target_site_stores_loaded": target_site_stores_loaded,
         "target_site_stores": target_site_stores,
@@ -235,7 +262,27 @@ def snapshot_template_payload(snapshot: dict[str, Any]) -> dict[str, Any]:
     }
     result["target_site_stores_loaded"] = snapshot.get("target_site_stores_loaded") is True
     result["target_site_stores"] = deepcopy(snapshot.get("target_site_stores") or [])
-    if is_cnsc_page(listing_mode):
+    if normalize_listing_mode(listing_mode) == "cnsc_3pf":
+        # 3PF：页面仍是 CNSC 页（有全球价/站点价格表），但应用侧按本土模板价走：
+        # 不落价格档；全球价取页面上最常见的正数；原价/折扣价取第一个目标站点的站点价。
+        global_price, normal_price, sale_price = _three_pf_price_defaults(
+            snapshot, result["target_site_stores"]
+        )
+        missing = _three_pf_missing_configuration(result["target_site_stores"], global_price)
+        result.update({
+            "cnsc_store": deepcopy(snapshot.get("cnsc_store") or {}),
+            "default_site_discount_percent": snapshot.get("default_site_discount_percent") or 40,
+            "price_tiers": [],
+            "global_price_cny": global_price,
+            "normal_price": normal_price,
+            "sale_price": sale_price,
+            "warehouse_stock_defaults": deepcopy(snapshot.get("warehouse_stock_defaults") or {}),
+            "cnsc_import_sku_rows": deepcopy(snapshot.get("cnsc_sku_rows") or []),
+            "missing_configuration": missing,
+            "promotion_activity_id": "",
+            "mabang_discount_id": "",
+        })
+    elif is_cnsc_page(listing_mode):
         result.update({
             "cnsc_store": deepcopy(snapshot.get("cnsc_store") or {}),
             "default_site_discount_percent": snapshot.get("default_site_discount_percent") or 40,
@@ -249,6 +296,61 @@ def snapshot_template_payload(snapshot: dict[str, Any]) -> dict[str, Any]:
             "sale_price": "",
         })
     return result
+
+
+def _three_pf_price_defaults(
+    snapshot: dict[str, Any], target_sites: list[dict[str, Any]]
+) -> tuple[float | str, float | str, float | str]:
+    """3PF 模板价格：全球价取最常见的正数；原价/折扣价取首个目标站点的站点价。"""
+
+    rows = [row for row in (snapshot.get("cnsc_sku_rows") or []) if isinstance(row, dict)]
+    global_prices: list[float] = []
+    for row in rows:
+        raw = _text(row.get("global_price_cny"))
+        try:
+            value = float(raw)
+        except (TypeError, ValueError):
+            continue
+        if value > 0:
+            global_prices.append(value)
+    global_price: float | str = ""
+    if global_prices:
+        global_price = max(set(global_prices), key=global_prices.count)
+    for target in target_sites:
+        code = _text(target.get("site_code") or "").upper()
+        if not code:
+            continue
+        for row in rows:
+            prices = row.get("site_prices")
+            if not isinstance(prices, dict):
+                continue
+            entry = prices.get(code)
+            if not isinstance(entry, dict):
+                continue
+            original = _text(entry.get("original_price"))
+            sale = _text(entry.get("sale_price"))
+            if original:
+                normal: float | str = float(original)
+                sale_price: float | str = float(sale) if sale else ""
+                return global_price, normal, sale_price
+    return global_price, "", ""
+
+
+def _three_pf_missing_configuration(
+    target_sites: list[dict[str, Any]], global_price: float | str
+) -> list[str]:
+    """3PF 真正需要运营补的只有：目标站点、每站活动、全球价。"""
+
+    missing: list[str] = []
+    if not target_sites:
+        missing.append("target_site_stores")
+    for target in target_sites:
+        code = _text(target.get("site_code") or "").upper() or "UNKNOWN"
+        if not _text(target.get("mabang_discount_id")):
+            missing.append(f"target_site_stores.{code}.discount_activity")
+    if global_price in ("", None):
+        missing.append("global_price_cny")
+    return missing
 
 
 def _header_key(value: Any) -> str:

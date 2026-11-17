@@ -115,7 +115,27 @@
     column,
     ...flattenColumns(column?.children),
   ]);
-  const siteCodeFromText = (value) => clean(value).toUpperCase().match(/(?:^|\s)(TW|PH|SG|TH|MY|MX|VN|BR|SIP)(?:\s|$)/)?.[1] || '';
+  const SITE_ALIASES = {
+    '台湾': 'TW', '台灣': 'TW',
+    '菲律宾': 'PH', '菲律賓': 'PH',
+    '新加坡': 'SG',
+    '泰国': 'TH', '泰國': 'TH',
+    '马来西亚': 'MY', '馬來西亞': 'MY',
+    '墨西哥': 'MX',
+    '越南': 'VN',
+    '巴西': 'BR',
+    SIP: 'SIP',
+  };
+  // 站点列既可能是 TW/PH，也可能是中文名（3PF/部分 CNSC 店铺的表头用中文）。
+  const siteCodeFromText = (value) => {
+    const raw = clean(value);
+    const code = raw.toUpperCase().match(/(?:^|[^A-Z])(TW|PH|SG|TH|MY|MX|VN|BR|SIP)(?:[^A-Z]|$)/);
+    if (code) return code[1];
+    for (const [name, alias] of Object.entries(SITE_ALIASES)) {
+      if (raw.includes(name)) return alias;
+    }
+    return '';
+  };
   const siteFromColumnField = (field) => {
     const number = Number(String(field).match(/^col_(\d+)$/)?.[1]);
     if (!Number.isFinite(number) || number < 17) return '';
@@ -218,26 +238,34 @@
     }
     return fields;
   };
-  const fieldForLabel = (fields, label) => {
+  const fieldForLabel = (fields, label, exclude = null) => {
     if (own(fields, label)) return fields[label];
-    const match = Object.keys(fields).find((candidate) => headerLabelMatches(candidate, label));
+    const match = Object.keys(fields).find((candidate) => (
+      headerLabelMatches(candidate, label) && !(exclude && exclude.test(candidate))
+    ));
     return match ? fields[match] : '';
   };
-  const semanticValue = (row, fields, labels, fallbackKeys = [], rendered = {}) => {
+  const semanticValue = (row, fields, labels, fallbackKeys = [], rendered = {}, exclude = null) => {
     for (const label of labels) {
-      const field = fieldForLabel(fields, label);
+      const field = fieldForLabel(fields, label, exclude);
       if (field && own(row, field)) {
         const value = row[field];
         if (clean(value)) return value;
       }
     }
     for (const label of labels) {
-      const field = fieldForLabel(fields, label);
+      const field = fieldForLabel(fields, label, exclude);
       const value = renderedValue(rendered, field);
       if (clean(value)) return value;
     }
     return pick(row, fallbackKeys);
   };
+  // 尺码表头在真机 CNSC 页面是英文 `size`；同时还有 `包裹尺寸(cm)` 列（值是包裹长度，
+  // 例如 25）。「尺寸」的包含匹配会先撞上包裹尺寸，把 SKU 尺码读成数字 → 模板尺码全错。
+  const SIZE_LABEL_EXCLUDE = /包裹|包装|箱|重量|体积/;
+  const readSizeValue = (row, fields, rendered) => semanticValue(
+    row, fields, ['尺码', 'size', '尺寸'], ['size', 'Size', '尺码'], rendered, SIZE_LABEL_EXCLUDE,
+  );
   const findTransactionTable = (detailVm) => {
     const transactionRef = detailVm?.$refs?.transactionInformationModuleRef;
     const transactionTable = transactionRef?.$refs?.tradeInfoTableRef;
@@ -281,7 +309,7 @@
         result.push({
           seller_sku: clean(semanticValue(row, fields, ['Seller SKU', '商品SKU', 'SKU'], ['seller_sku', 'sellerSku', 'sku_code', 'sku'], rendered)),
           color: clean(semanticValue(row, fields, ['颜色', '颜色属性'], ['color', 'colour', 'Color', '颜色'], rendered)),
-          size: clean(semanticValue(row, fields, ['尺码', '尺寸'], ['size', 'Size', '尺码'], rendered)),
+          size: clean(readSizeValue(row, fields, rendered)),
           site_prices: sitePrices,
         });
       }
@@ -305,7 +333,7 @@
       const rendered = renderedRowValues(table, rowIndex);
       const base = {
         color: clean(semanticValue(row, fields, ['颜色', '颜色属性'], ['color', 'colour', 'Color', '颜色'], rendered)),
-        size: clean(semanticValue(row, fields, ['尺码', '尺寸'], ['size', 'Size', '尺码'], rendered)),
+        size: clean(readSizeValue(row, fields, rendered)),
         stock: pick(row, ['stock', 'quantity', 'inventory', '库存']),
         weight_kg: pick(row, ['package_weight', 'weight_kg', 'weightKg', 'weight', '重量']),
         package_length_cm: pick(row, ['package_length', 'packageLength', 'length', '包裹长度']),
@@ -390,6 +418,56 @@
       },
     };
   };
+  const readVariationAxes = () => {
+    const isVisible = (node) => {
+      if (!node) return false;
+      const style = getComputedStyle(node);
+      const rect = node.getBoundingClientRect();
+      return style.display !== 'none' && style.visibility !== 'hidden'
+        && Number(style.opacity) !== 0 && rect.width > 0 && rect.height > 0;
+    };
+    const card = [...document.querySelectorAll('.el-card')].find((node) => (
+      isVisible(node) && clean(node.textContent).includes('\u53d8\u79cd\u4fe1\u606f')
+    ));
+    if (!card) return { colors: [], sizes: [] };
+    const blocks = [...card.querySelectorAll('.natureBlock')];
+    const axisOf = (block) => {
+      const title = clean(block.querySelector('.natureBlock-title')?.textContent).toLowerCase();
+      if (/color|颜色/.test(title)) return 'colors';
+      if (/size|尺码|尺寸/.test(title)) return 'sizes';
+      return '';
+    };
+    const readBlock = (block) => {
+      const values = [];
+      // 真机结构：`.natureBlock-center > .el-checkbox-group > .flex-checkbox`，值在
+      // `.text-display` 里；同层的「设置为属性1 / 添加自定义 / 0/30」都是控件文字，
+      // 不能当变种值收进来。
+      const options = [...block.querySelectorAll('.flex-checkbox')];
+      const nodes = options.length
+        ? options
+        : [...block.querySelectorAll('.el-tag,.el-tag__content,.el-checkbox__label,.el-radio__label,.text-display,span')];
+      for (const node of nodes) {
+        const input = node.querySelector?.('input') || null;
+        const textNode = node.querySelector?.('.text-display') || node;
+        const text = clean(textNode.textContent);
+        if (!text || text.length > 40) continue;
+        // 取消勾选的属性值不参与变种（真机全部勾选时才等于轴枚举）。
+        if (input && input.checked === false) continue;
+        if (['color', 'size', '颜色', '尺码', '尺寸', '添加自定义', '设置为属性1'].includes(text)) continue;
+        if (/^\d+\/\d+$/.test(text)) continue;
+        if (text.includes('请输入')) continue;
+        if (values.includes(text)) continue;
+        values.push(text);
+      }
+      return values;
+    };
+    const result = { colors: [], sizes: [] };
+    for (const block of blocks) {
+      const axis = axisOf(block);
+      if (axis && !result[axis].length) result[axis] = readBlock(block);
+    }
+    return result;
+  };
   const readTargetSiteStores = () => {
     const prepared = typeof window !== 'undefined' && window.__AI_LISTING_CNSC_IMPORT_STATE__;
     if (prepared && own(prepared, 'target_site_stores_loaded') && Array.isArray(prepared.target_site_stores)) {
@@ -398,41 +476,57 @@
         items: prepared.target_site_stores.filter((item) => clean(item?.site_code).toUpperCase() !== 'SIP'),
       };
     }
-    const picker = document.querySelector('#shops-wap');
+    const picker = document.querySelector('#shops-wap') || document.querySelector('.shops-wap');
     if (!picker) return { loaded: false, items: [] };
-    const requiredManualSites = new Set(['TW', 'PH', 'SG', 'TH', 'MY', 'MX', 'VN', 'BR']);
-    const checkboxes = [...picker.querySelectorAll('input[type="checkbox"]')];
-    if (!checkboxes.length) return { loaded: false, items: [] };
-    const seen = new Set();
-    const discoveredManualSites = [];
-    const items = checkboxes.filter((input) => input.checked).map((input) => {
-      const siteGroup = input.closest('[data-site-code],.shop-country-item,.shop-site-item,.site-shop-row,tr,.el-checkbox-group') || input.parentElement;
+    // 站点级勾选通常是 checkbox；老结构里也可能直接是 radio。先按 checkbox 读，
+    // 没有再看 radio（不要把「店铺 radio」误当成站点勾选）。
+    const siteCheckboxes = [...picker.querySelectorAll('input[type="checkbox"]')];
+    const siteInputs = siteCheckboxes.length
+      ? siteCheckboxes
+      : [...picker.querySelectorAll('input[type="radio"]')];
+    if (!siteInputs.length) return { loaded: false, items: [] };
+    const siteGroupSelector = '[data-site-code],.shop-country-item,.shop-site-item,.site-shop-row,.site,tr,.el-checkbox-group';
+    const siteCodeOfInput = (input) => {
+      const siteGroup = input.closest(siteGroupSelector) || input.parentElement;
       const siteText = clean(siteGroup?.textContent);
-      const siteCode = clean(siteGroup?.dataset?.siteCode || input?.dataset?.siteCode || input.value || siteCodeFromText(siteText)).toUpperCase();
-      if (siteCode === 'SIP') return null;
-      discoveredManualSites.push(siteCode);
-      if (!siteCode) return null;
-      const selectedRadios = [...(siteGroup?.querySelectorAll?.('input[type="radio"]') || [])].filter((radio) => radio.checked);
-      if (selectedRadios.length !== 1) return null;
-      const radio = selectedRadios[0];
-      const container = radio.closest('[data-store-id],[data-shop-id],label,.el-radio,tr') || radio.parentElement;
-      const text = clean(container?.textContent);
       return {
-        site_code: siteCode,
-        store_id: clean(container?.dataset?.storeId || container?.dataset?.shopId || radio?.dataset?.storeId || radio.value),
+        group: siteGroup,
+        code: clean(siteGroup?.dataset?.siteCode || input?.dataset?.siteCode || input.value || siteCodeFromText(siteText)).toUpperCase(),
+      };
+    };
+    const seen = new Set();
+    const groupsSeen = new Set();
+    const items = [];
+    const usingSiteCheckboxes = siteCheckboxes.length > 0;
+    for (const input of siteInputs) {
+      const { group, code } = siteCodeOfInput(input);
+      if (!/^(TW|PH|SG|TH|MY|MX|VN|BR|SIP)$/.test(code)) continue;
+      if (code === 'SIP') continue;
+      groupsSeen.add(code);
+      if (!input.checked) continue;
+      let storeInput = input;
+      if (usingSiteCheckboxes) {
+        // 站点 checkbox 只是「这个站点启用」；还必须有一个选中的店铺 radio。
+        storeInput = [...(group?.querySelectorAll?.('input[type="radio"]') || [])]
+          .find((radio) => radio.checked && radio !== input) || null;
+        if (!storeInput) continue;
+      }
+      const container = storeInput.closest('[data-store-id],[data-shop-id],label,.el-radio,.el-checkbox,tr') || storeInput.parentElement;
+      const text = clean(container?.textContent);
+      const item = {
+        site_code: code,
+        store_id: clean(container?.dataset?.storeId || container?.dataset?.shopId || storeInput?.dataset?.storeId || storeInput.value),
         store_name: clean(container?.dataset?.storeName || text),
       };
-    }).filter((item) => item && (item.store_id || item.store_name))
-      .filter((item) => {
-        const key = `${item.site_code}:${item.store_id || item.store_name}`;
-        if (seen.has(key)) return false;
-        seen.add(key);
-        return true;
-      });
-    const uniqueManualSites = new Set(discoveredManualSites.filter(Boolean));
-    const loaded = requiredManualSites.size === uniqueManualSites.size
-      && [...requiredManualSites].every((siteCode) => uniqueManualSites.has(siteCode))
-      && items.length === discoveredManualSites.length;
+      if (!item.store_id && !item.store_name) continue;
+      const key = `${item.site_code}:${item.store_id || item.store_name}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      items.push(item);
+    }
+    // 「已加载」= 选择器渲染出了站点分组 + 至少勾了一个店铺。
+    // 3PF 店只勾部分站点是常态，不能再要求 8 个站点全勾（会把店铺/活动整批丢掉）。
+    const loaded = groupsSeen.size >= 1 && items.length >= 1;
     return { loaded, items };
   };
   const transactionModel = (detailVm) => {
@@ -897,6 +991,9 @@
     },
     category_attributes: readCategoryAttributes(storeCategory),
     sku_rows: readSkuRows(detailVm),
+    // 页面「变种信息」卡片里已选的颜色/尺码轴值：3PF 的 SKU 网格可能没有独立的
+    // 颜色/尺码列，行解析拿不到时用它兜底填模板的「规格与 SKU」。
+    variation_axes: readVariationAxes(),
     target_site_stores_loaded: targetSiteStores.loaded,
     target_site_stores: targetSiteStores.items,
     transaction_information: readTransactionInformation(detailVm),

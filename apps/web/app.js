@@ -6799,6 +6799,7 @@ function closeBaseImageEditor() {
 
 const CNSC_CONFIGURATION_LABELS = {
   cnsc_store: "跨境店铺",
+  global_price_cny: "全球价",
   target_site_stores: "目标站点店铺",
   site_price_matrix: "站点价格矩阵",
   warehouse_stock_defaults: "三仓库存",
@@ -6828,16 +6829,25 @@ function cnscConfigurationLabel(field) {
 
 function cnscTemplateMissingFields(template) {
   if (!isCnscPageMode(template)) return [];
+  const threePf = normalizeListingMode(template) === "cnsc_3pf";
   const missing = new Set((template.missing_configuration || []).map(String).filter(Boolean));
   const targets = Array.isArray(template.target_site_stores) ? template.target_site_stores : [];
+  if (!targets.length) missing.add("target_site_stores");
+  for (const target of targets) {
+    const code = String(target.site_code || "UNKNOWN").toUpperCase();
+    if (!String(target.mabang_discount_id || "").trim()) missing.add(`target_site_stores.${code}.discount_activity`);
+  }
+  if (threePf) {
+    // 3PF：没有价格档/三仓/站点矩阵，只要求模板全球价。
+    if (!(Number(template.global_price_cny) > 0)) missing.add("global_price_cny");
+    return [...missing];
+  }
   const tiers = Array.isArray(template.price_tiers) ? template.price_tiers : [];
   const warehouses = template.warehouse_stock_defaults || {};
-  if (!targets.length) missing.add("target_site_stores");
   const defaultDiscount = Number(template.default_site_discount_percent ?? 40);
   if (!(defaultDiscount > 0 && defaultDiscount < 100)) missing.add("default_site_discount_percent");
   for (const target of targets) {
     const code = String(target.site_code || "UNKNOWN").toUpperCase();
-    if (!String(target.mabang_discount_id || "").trim()) missing.add(`target_site_stores.${code}.discount_activity`);
     const effectiveDiscount = String(target.discount_percent ?? "").trim() ? Number(target.discount_percent) : defaultDiscount;
     if (!(effectiveDiscount > 0 && effectiveDiscount < 100)) missing.add(`target_site_stores.${code}.discount_percent`);
   }
@@ -6893,7 +6903,9 @@ function renderStoreTemplateTable() {
       : [];
     const sizes = (template.sizes || []).join(", ");
     const price = cnsc
-      ? (template.price_tiers || []).map((tier) => `${tier.id} ¥${tier.global_price_cny || "-"}`).join(" / ")
+      ? (normalizeListingMode(template) === "cnsc_3pf"
+        ? [`全球 ¥${template.global_price_cny || "-"}`, [template.normal_price, template.sale_price].filter((item) => item !== "").join("/")].filter(Boolean).join(" · ")
+        : (template.price_tiers || []).map((tier) => `${tier.id} ¥${tier.global_price_cny || "-"}`).join(" / "))
       : [template.normal_price, template.sale_price].filter((item) => item !== "").join(" / ");
     const promotion = cnsc ? `目标站点 ${(template.target_site_stores || []).length}` : (template.discount_label || (template.promotion_activity_id ? "已配置活动" : "活动未配置"));
     const transaction = cnsc
@@ -6935,7 +6947,9 @@ function renderStoreTemplateCards() {
       : [];
     const sizes = (template.sizes || []).join(" · ") || "尺码未配置";
     const price = cnsc
-      ? (template.price_tiers || []).map((tier) => `${tier.id} ¥${tier.global_price_cny || "-"}`).join(" · ")
+      ? (normalizeListingMode(template) === "cnsc_3pf"
+        ? [`全球 ¥${template.global_price_cny || "-"}`, [template.normal_price, template.sale_price].filter((item) => item !== "").join("→")].filter(Boolean).join(" · ")
+        : (template.price_tiers || []).map((tier) => `${tier.id} ¥${tier.global_price_cny || "-"}`).join(" · "))
       : [template.normal_price, template.sale_price].filter((item) => item !== "").join(" → ");
     const promotion = template.discount_label || (template.promotion_activity_id ? "已配置活动" : "无活动");
     const accountLabel = storeTemplateAccountLabel(template.account_id);
@@ -8471,10 +8485,11 @@ function renderCnscTargetStoreConfigs() {
   const body = $("store-template-target-store-config-body");
   const select = $("store-template-target-sites");
   if (!body || !select) return;
+  const threePf = normalizeListingMode($("store-template-listing-mode")?.value) === "cnsc_3pf";
   const defaultDiscount = $("store-template-default-site-discount-percent")?.value || 40;
   const targets = [...select.selectedOptions];
   if (!targets.length) {
-    body.innerHTML = '<tr><td colspan="5" class="muted">请先选择目标站点店铺</td></tr>';
+    body.innerHTML = `<tr><td colspan="${threePf ? 3 : 5}" class="muted">请先选择目标站点店铺</td></tr>`;
     return;
   }
   const tierPrice = (tierId, code) => {
@@ -8494,7 +8509,8 @@ function renderCnscTargetStoreConfigs() {
       const name = item.name || item.discount_name || id;
       return `<option value="${escapeHtml(id)}" data-discount-name="${escapeHtml(name)}" data-discount-label="${escapeHtml(item.discount_label || name)}" ${id === config.mabang_discount_id ? "selected" : ""}>${escapeHtml(name)}</option>`;
     })].join("");
-    return `<tr data-cnsc-target-store-row="${escapeHtml(storeId)}"><td><strong>${escapeHtml(code)}</strong><small>${escapeHtml(option.dataset.storeName || option.textContent || storeId)}</small></td><td><select data-cnsc-target-activity>${options}</select></td><td><input data-cnsc-target-discount-percent type="number" min="0.01" max="99.99" step="0.01" value="${escapeHtml(config.discount_percent ?? "")}" placeholder="继承 ${escapeHtml(defaultDiscount)}" /></td><td>${escapeHtml(tierPrice("standard", code))}</td><td>${escapeHtml(tierPrice("large", code))}</td></tr>`;
+    const priceCells = threePf ? "" : `<td>${escapeHtml(tierPrice("standard", code))}</td><td>${escapeHtml(tierPrice("large", code))}</td>`;
+    return `<tr data-cnsc-target-store-row="${escapeHtml(storeId)}"><td><strong>${escapeHtml(code)}</strong><small>${escapeHtml(option.dataset.storeName || option.textContent || storeId)}</small></td><td><select data-cnsc-target-activity>${options}</select></td><td><input data-cnsc-target-discount-percent type="number" min="0.01" max="99.99" step="0.01" value="${escapeHtml(config.discount_percent ?? "")}" placeholder="继承 ${escapeHtml(defaultDiscount)}" /></td>${priceCells}</tr>`;
   }).join("");
 }
 
@@ -9229,34 +9245,40 @@ function validateStoreTemplateForm() {
   ];
   const cnscPage = isCnscPageMode(listingMode);
   if (cnscPage) {
-    // 纯跨境 CNSC 用「全球商品店铺」代替普通店铺；跨境本土 3PF 仍要选普通店铺
-    // （其 store_name / mabang_store_id 是副本与就绪检查的身份来源）。
-    if (isPureCnscMode(listingMode)) {
+    const pureCnsc = isPureCnscMode(listingMode);
+    if (pureCnsc) {
+      // 纯跨境 CNSC 用「全球商品店铺」代替普通店铺，价格走 standard/large 价格档。
       required.splice(required.findIndex(([id]) => id === "store-template-store"), 1);
-      // 纯跨境的身份来自「全球商品店铺」；3PF 用普通店铺下拉，不再要求这一项。
-      required.push(["store-template-cnsc-store", "CNSC 店铺"]);
+      required.splice(required.findIndex(([id]) => id === "store-template-normal-price"), 1);
+      required.splice(required.findIndex(([id]) => id === "store-template-stock"), 1);
+      required.push(["store-template-cnsc-global-standard", "standard 全球价"]);
+      required.push(["store-template-cnsc-global-large", "large 全球价"]);
+    } else {
+      // 3PF：价格按本土模板走（店铺/原价/库存仍必填），只多一个模板全球价。
+      required.push(["store-template-global-price", "全球价"]);
     }
-    required.splice(required.findIndex(([id]) => id === "store-template-normal-price"), 1);
-    required.splice(required.findIndex(([id]) => id === "store-template-stock"), 1);
-    required.push(["store-template-cnsc-global-standard", "standard 全球价"]);
-    required.push(["store-template-cnsc-global-standard", "standard 全球价"]);
-    required.push(["store-template-cnsc-global-large", "large 全球价"]);
+    // 两种跨境页都从「CNSC 店铺」选择器读店铺身份。
+    required.push(["store-template-cnsc-store", "CNSC 店铺"]);
     const targetSites = selectedCnscTargetSiteStores();
     if (!targetSites.length) return "请至少配置一个目标站点店铺";
     if (new Set(targetSites.map((item) => item.site_code)).size !== targetSites.length) return "同一站点只能选择一个目标店铺";
-    const defaultDiscount = Number($("store-template-default-site-discount-percent")?.value);
-    if (!Number.isFinite(defaultDiscount) || defaultDiscount <= 0 || defaultDiscount >= 100) return "默认折扣必须大于 0 且小于 100";
+    if (pureCnsc) {
+      const defaultDiscount = Number($("store-template-default-site-discount-percent")?.value);
+      if (!Number.isFinite(defaultDiscount) || defaultDiscount <= 0 || defaultDiscount >= 100) return "默认折扣必须大于 0 且小于 100";
+    }
     const missingActivity = targetSites.find((item) => !item.mabang_discount_id);
     if (missingActivity) return `${missingActivity.site_code} ${missingActivity.store_name} 缺少折扣活动`;
     const invalidOverride = targetSites.find((item) => String(item.discount_percent || "").trim() && !(Number(item.discount_percent) > 0 && Number(item.discount_percent) < 100));
     if (invalidOverride) return `${invalidOverride.site_code} %OFF 必须大于 0 且小于 100`;
-    const tiers = cnscPriceTiers();
-    const selectedSizes = selectedTemplateSizes();
-    const assignedSizes = tiers.flatMap((tier) => tier.sizes);
-    if (new Set(assignedSizes).size !== assignedSizes.length || selectedSizes.some((size) => !assignedSizes.includes(size)) || assignedSizes.some((size) => !selectedSizes.includes(size))) {
-      return "CNSC 价格档位必须覆盖全部已选尺码且不能重复";
+    if (pureCnsc) {
+      const tiers = cnscPriceTiers();
+      const selectedSizes = selectedTemplateSizes();
+      const assignedSizes = tiers.flatMap((tier) => tier.sizes);
+      if (new Set(assignedSizes).size !== assignedSizes.length || selectedSizes.some((size) => !assignedSizes.includes(size)) || assignedSizes.some((size) => !selectedSizes.includes(size))) {
+        return "CNSC 价格档位必须覆盖全部已选尺码且不能重复";
+      }
+      if (!state.cnscPricePreview) return "请先解析并应用站点价格表";
     }
-    if (!state.cnscPricePreview) return "请先解析并应用站点价格表";
   }
   for (const [id, label] of required) {
     const control = $(id);
@@ -9524,6 +9546,7 @@ async function createStoreTemplate() {
   const listingMode = normalizeListingMode($("store-template-listing-mode")?.value);
   const cnscPage = isCnscPageMode(listingMode);
   const localLike = isLocalLikeMode(listingMode);
+  const threePf = listingMode === "cnsc_3pf";
   const targetSiteStores = selectedCnscTargetSiteStores();
   const priceTiers = cnscPage ? cnscPriceTiers() : [];
   const cnscStoreSelect = $("store-template-cnsc-store");
@@ -9594,7 +9617,8 @@ async function createStoreTemplate() {
       target_site_stores: cnscPage ? targetSiteStores : [],
       site_price_order: cnscPage ? cnscSiteOrder() : [],
       default_site_discount_percent: cnscPage ? ($("store-template-default-site-discount-percent")?.value || 40) : null,
-      price_tiers: priceTiers,
+      price_tiers: threePf ? [] : priceTiers,
+      global_price_cny: threePf ? ($("store-template-global-price")?.value.trim() || "") : "",
       warehouse_stock_defaults: cnscPage ? {
         TH: $("store-template-warehouse-th")?.value || 0,
         CN_GZ: $("store-template-warehouse-cn-gz")?.value || 0,
@@ -9685,6 +9709,7 @@ function updateCnscTemplateVisibility() {
   const mode = normalizeListingMode($("store-template-listing-mode")?.value);
   const cnscPage = isCnscPageMode(mode);
   const pureCnsc = isPureCnscMode(mode);
+  const threePf = mode === "cnsc_3pf";
   // 跨境模式关闭：刊登模式下拉隐藏跨境选项（CNSC / 跨境本土 3PF）。用 hidden 而不是
   // 移除，已打开的跨境模板仍能程序化选中并正常保存，不会损坏数据。
   for (const value of ["cnsc_global", "cnsc_3pf"]) {
@@ -9693,6 +9718,23 @@ function updateCnscTemplateVisibility() {
       ?.toggleAttribute("hidden", !crossBorderModeEnabled());
   }
   $("cnsc-global-section")?.toggleAttribute("hidden", !cnscPage);
+  // 3PF 用模板价格（原价/折扣价 + 一个全球价），没有标准/大量价格档与站点价格表；
+  // 纯跨境才显示价格档编辑器。
+  const tierControls = [
+    "store-template-global-price-line",
+    "store-template-cnsc-standard-global-line",
+    "store-template-cnsc-large-global-line",
+    "store-template-cnsc-standard-sizes-line",
+    "store-template-cnsc-large-sizes-line",
+    "store-template-price-matrix-line",
+    "store-template-price-tools",
+  ];
+  $(tierControls[0])?.toggleAttribute("hidden", !threePf);
+  for (const id of tierControls.slice(1)) $(id)?.toggleAttribute("hidden", threePf || !cnscPage);
+  for (const id of ["cnsc-target-th-standard", "cnsc-target-th-large"]) {
+    $(id)?.toggleAttribute("hidden", threePf || !cnscPage);
+  }
+  if (threePf) renderCnscTargetStoreConfigs();
   // 本土专属能力在跨境 3PF 下同样生效，只有纯跨境 CNSC 才隐藏。
   document.querySelector(".default-sku-head")?.toggleAttribute("hidden", pureCnsc);
   $("store-template-default-sku-block")?.toggleAttribute("hidden", pureCnsc);
@@ -9982,6 +10024,7 @@ async function openStoreTemplateEditor(templateId) {
   }
   for (const option of $("store-template-target-sites")?.options || []) option.selected = targetIds.has(option.value);
   if ($("store-template-cnsc-global-standard")) $("store-template-cnsc-global-standard").value = template.price_tiers?.find((tier) => tier.id === "standard")?.global_price_cny ?? "";
+  if ($("store-template-global-price")) $("store-template-global-price").value = template.global_price_cny ?? "";
   if ($("store-template-cnsc-global-large")) $("store-template-cnsc-global-large").value = template.price_tiers?.find((tier) => tier.id === "large")?.global_price_cny ?? "";
   if ($("store-template-cnsc-standard-sizes")) $("store-template-cnsc-standard-sizes").value = (template.price_tiers?.find((tier) => tier.id === "standard")?.sizes || ["XS", "S", "M", "L"]).join(",");
   if ($("store-template-cnsc-large-sizes")) $("store-template-cnsc-large-sizes").value = (template.price_tiers?.find((tier) => tier.id === "large")?.sizes || ["XL", "XXL", "XXXL"]).join(",");
@@ -10078,6 +10121,7 @@ async function openNewStoreTemplateEditor() {
   $("store-template-warehouse-ph").value = "";
   $("store-template-price-matrix").value = "";
   if ($("store-template-cnsc-global-standard")) $("store-template-cnsc-global-standard").value = "";
+  if ($("store-template-global-price")) $("store-template-global-price").value = "";
   if ($("store-template-cnsc-global-large")) $("store-template-cnsc-global-large").value = "";
   if ($("store-template-cnsc-standard-sizes")) $("store-template-cnsc-standard-sizes").value = "XS,S,M,L";
   if ($("store-template-cnsc-large-sizes")) $("store-template-cnsc-large-sizes").value = "XL,XXL,XXXL";
@@ -10285,7 +10329,9 @@ async function collectMabangPageImport() {
   if (result) result.textContent = "正在只读采集马帮当前页...";
   try {
     const run = await api(`/api/mabang-page-imports/${encodeURIComponent(state.mabangPageImportRunId)}/collect`, {
-      method: "POST", body: JSON.stringify({}),
+      method: "POST",
+      // 采集时才选「跨境本土 (3PF)」也要生效（run 是弹窗打开时建的）。
+      body: JSON.stringify({ requested_listing_mode: $("mabang-page-import-listing-mode")?.value || "" }),
     });
     state.mabangPageImportRun = run;
     renderMabangImportPreview(run);
@@ -10361,14 +10407,30 @@ function renderMabangImportPreview(run) {
   };
   const transactionPreview = { ...transaction, ...priceDefaults };
   if (cnsc) {
-    const tiers = snapshot.price_tiers || [];
+    // 3PF 不用价格档 / 三仓库存 / 站点价格矩阵：预览也只显示全球价 + 目标店铺活动，
+    // 否则会一直提示「价格档」「站点价格表」这些 3PF 根本不填的字段。
+    const threePf = !isPureCnscMode(snapshot);
+    const tiers = threePf ? [] : (snapshot.price_tiers || []);
     const warehouses = snapshot.warehouse_stock_defaults || {};
     const targets = snapshot.target_site_stores || [];
+    const firstGlobalPrice = (snapshot.cnsc_sku_rows || [])
+      .map((row) => String(row?.global_price_cny ?? "").trim())
+      .find(Boolean) || "";
+    const firstSitePrice = (snapshot.cnsc_sku_rows || [])
+      .map((row) => (targets[0]?.site_code ? row?.site_prices?.[targets[0].site_code] : null))
+      .find((price) => price && (price.original_price || price.sale_price)) || null;
     const cnscLines = [
-      ...tiers.map((tier) => `${tier.id} 全球价（CNY）：${tier.global_price_cny || "待补充"}`),
-      `泰国仓：${warehouses.TH ?? "待补充"}`,
-      `广州仓：${warehouses.CN_GZ ?? "待补充"}`,
-      `菲律宾仓：${warehouses.PH ?? "待补充"}`,
+      ...(threePf
+        ? [
+          `全球价（CNY）：${firstGlobalPrice || "待补充"}`,
+          `原价 / 折扣价：${firstSitePrice?.original_price || "待补充"} / ${firstSitePrice?.sale_price || "待补充"}`,
+        ]
+        : [
+          ...tiers.map((tier) => `${tier.id} 全球价（CNY）：${tier.global_price_cny || "待补充"}`),
+          `泰国仓：${warehouses.TH ?? "待补充"}`,
+          `广州仓：${warehouses.CN_GZ ?? "待补充"}`,
+          `菲律宾仓：${warehouses.PH ?? "待补充"}`,
+        ]),
       `目标店铺：${targets.map((item) => {
         const site = item.site_code || "";
         const store = item.store_name || item.store_id || "";
@@ -10472,6 +10534,8 @@ function renderMabangImportPreview(run) {
         return `${labels[key] || transactionLabels[key]}部分 SKU 价格不同，默认按多数价 ${item.value}（另有 ${item.differing_count} 行不同）`;
       }) : []),
     ...(!cnsc && !snapshot.selected_promotion_id ? ["活动未配置"] : []),
+    ...((snapshot.capture_debug?.cnsc_prepare?.errors || []).map((item) => `采集提示：${String(item).slice(0, 120)}`)),
+    ...((snapshot.variation?.sizes || []).length ? [] : ["未采集到规格尺码，请在模板里补「规格与 SKU」"]),
   ];
   if ($("mabang-import-warnings")) $("mabang-import-warnings").textContent = warnings.join("；");
   preview.removeAttribute("hidden");
@@ -11003,15 +11067,23 @@ function renderListingCopySkuTable(copy) {
   const table = $("listing-copy-sku-table");
   if (!tbody || !table) return;
   const cnsc = isCNSCListingCopy(copy);
+  const threePf = normalizeListingMode(copy) === "cnsc_3pf";
   // CNSC 副本显示仓库批量库存条，普通副本显示统一库存按钮，二者互斥。
+  // 3PF 的 SKU 明细按本土（库存/原价/折扣价）+ 全球价，不显示仓库批量条。
   const warehouseBatch = $("listing-copy-warehouse-batch");
-  if (warehouseBatch) warehouseBatch.hidden = !cnsc;
+  if (warehouseBatch) warehouseBatch.hidden = !cnsc || threePf;
   const applyStockButton = $("listing-copy-apply-stock");
-  if (applyStockButton) applyStockButton.hidden = cnsc;
-  table.querySelector("thead").innerHTML = cnsc
-    ? "<tr><th>Seller SKU</th><th>颜色</th><th>尺码</th><th>价格档位</th><th>全球价（CNY）</th><th>泰国仓</th><th>广州仓</th><th>菲律宾仓</th><th>站点价格矩阵</th></tr>"
-    : "<tr><th>SKU</th><th>颜色</th><th>尺码</th><th>库存</th><th>原价</th><th>六折售价</th></tr>";
+  if (applyStockButton) applyStockButton.hidden = cnsc && !threePf;
+  table.querySelector("thead").innerHTML = threePf
+    ? "<tr><th>SKU</th><th>颜色</th><th>尺码</th><th>库存</th><th>原价</th><th>六折售价</th><th>全球价（CNY）</th></tr>"
+    : (cnsc
+      ? "<tr><th>Seller SKU</th><th>颜色</th><th>尺码</th><th>价格档位</th><th>全球价（CNY）</th><th>泰国仓</th><th>广州仓</th><th>菲律宾仓</th><th>站点价格矩阵</th></tr>"
+      : "<tr><th>SKU</th><th>颜色</th><th>尺码</th><th>库存</th><th>原价</th><th>六折售价</th></tr>");
   tbody.innerHTML = (copy.skus || []).map((sku) => {
+    if (threePf) {
+      const price = sku.price || {};
+      return `<tr><td title="${escapeHtml(sku.sku_code || "")}">${escapeHtml(sku.sku_code || "-")}</td><td>${escapeHtml(sku.color_cn || sku.color_code || "-")}</td><td>${escapeHtml(sku.size || "-")}</td><td><input data-listing-copy-sku-stock="${escapeHtml(sku.id)}" type="number" min="0" step="1" value="${escapeHtml(sku.stock ?? "")}" /></td><td><input data-listing-copy-normal-price="${escapeHtml(price.id || "")}" data-sku-id="${escapeHtml(sku.id)}" type="number" min="0" step="0.01" value="${escapeHtml(price.normal_price ?? "")}" /></td><td><input data-listing-copy-sale-price="${escapeHtml(price.id || "")}" data-sku-id="${escapeHtml(sku.id)}" type="number" min="0" step="0.01" value="${escapeHtml(price.sale_price ?? "")}" /></td><td>${escapeHtml(sku.global_price_cny ?? "-")}</td></tr>`;
+    }
     if (cnsc) {
       const warehouses = sku.warehouse_stocks || {};
       const matrix = JSON.stringify(sku.site_price_matrix || {});
@@ -11020,7 +11092,7 @@ function renderListingCopySkuTable(copy) {
     }
     const price = sku.price || {};
     return `<tr><td title="${escapeHtml(sku.sku_code || "")}">${escapeHtml(sku.sku_code || "-")}</td><td>${escapeHtml(sku.color_cn || sku.color_code || "-")}</td><td>${escapeHtml(sku.size || "-")}</td><td><input data-listing-copy-sku-stock="${escapeHtml(sku.id)}" type="number" min="0" step="1" value="${escapeHtml(sku.stock ?? "")}" /></td><td><input data-listing-copy-normal-price="${escapeHtml(price.id || "")}" data-sku-id="${escapeHtml(sku.id)}" type="number" min="0" step="0.01" value="${escapeHtml(price.normal_price ?? "")}" /></td><td><input data-listing-copy-sale-price="${escapeHtml(price.id || "")}" data-sku-id="${escapeHtml(sku.id)}" type="number" min="0" step="0.01" value="${escapeHtml(price.sale_price ?? "")}" /></td></tr>`;
-  }).join("") || `<tr><td colspan="${cnsc ? 9 : 6}" class="muted">暂无 SKU 明细</td></tr>`;
+  }).join("") || `<tr><td colspan="${threePf ? 7 : (cnsc ? 9 : 6)}" class="muted">暂无 SKU 明细</td></tr>`;
 }
 
 function isCNSCListingCopy(copy) {
@@ -11072,6 +11144,18 @@ function renderListingCopyCnscConfig(copy) {
   const cnsc = isCNSCListingCopy(copy);
   section.hidden = !cnsc;
   if (!cnsc) return;
+  const threePf = normalizeListingMode(copy) === "cnsc_3pf";
+  // 3PF 价格由模板价推导：没有价格档/绑定模式/站点价格矩阵，只保留目标站点活动。
+  for (const id of [
+    "listing-copy-cnsc-default-discount-line",
+    "listing-copy-cnsc-tier-head",
+    "listing-copy-cnsc-binding-bar",
+    "listing-copy-cnsc-parse",
+    "listing-copy-cnsc-tier-coverage",
+    "listing-copy-cnsc-tier-table-wrap",
+  ]) {
+    $(id)?.toggleAttribute("hidden", threePf);
+  }
   $("listing-copy-cnsc-default-discount").value = copy.default_site_discount_percent ?? "";
   const modeSelect = $("listing-copy-cnsc-binding-mode");
   if (modeSelect) modeSelect.value = listingCopyCnscBindingMode(copy);
@@ -11336,6 +11420,7 @@ function renderListingCopyCnscTierCoverage() {
 }
 
 function listingCopyCnscTierCoverageError() {
+  if (normalizeListingMode(state.editingListingCopy || {}) === "cnsc_3pf") return "";
   if (($("listing-copy-cnsc-binding-mode")?.value || "colors") !== "sizes") return "";
   if (!isCNSCListingCopy(state.editingListingCopy || {})) return "";
   const missing = listingCopyCnscSizeUniverse().filter((size) => {
@@ -11518,7 +11603,12 @@ function collectListingCopyCnscConfig(copy) {
   });
   const price_tiers = collectListingCopyCnscTiers();
   const bindingMode = $("listing-copy-cnsc-binding-mode")?.value || "colors";
-  const payload = { target_site_stores, price_tiers, cnsc_binding_mode: bindingMode, default_site_discount_percent: $("listing-copy-cnsc-default-discount")?.value ?? "" };
+  const payload = { target_site_stores, default_site_discount_percent: $("listing-copy-cnsc-default-discount")?.value ?? "" };
+  // 3PF 没有价格档/绑定模式：价格由模板价推导，别把空档位写回副本。
+  if (normalizeListingMode(copy) !== "cnsc_3pf") {
+    payload.price_tiers = price_tiers;
+    payload.cnsc_binding_mode = bindingMode;
+  }
   if (copy.cnsc_store && typeof copy.cnsc_store === "object") payload.cnsc_store = copy.cnsc_store;
   return payload;
 }
@@ -11529,6 +11619,7 @@ function isCnscReadinessField(field) {
     || key.startsWith("site_price_matrix.")
     || key.startsWith("price_tiers")
     || key === "cnsc_store"
+    || key === "global_price_cny"
     || key === "default_site_discount_percent"
     || key === "warehouse_stock_defaults"
     || key === "cnsc_price_tier_size_coverage";
@@ -11644,6 +11735,7 @@ function renderListingCopyReadiness(copy) {
 function collectListingCopyPayload() {
   const copy = state.editingListingCopy || {};
   const cnsc = isCNSCListingCopy(copy);
+  const threePf = normalizeListingMode(copy) === "cnsc_3pf";
   const promotion = $("listing-copy-promotion");
   const selectedPromotion = promotion.options[promotion.selectedIndex];
   const skus = [...document.querySelectorAll("[data-listing-copy-sku-stock]")].map((input) => ({
@@ -11675,8 +11767,8 @@ function collectListingCopyPayload() {
     package_length_cm: $("listing-copy-package-length-cm").value,
     package_width_cm: $("listing-copy-package-width-cm").value,
     package_height_cm: $("listing-copy-package-height-cm").value,
-    skus: cnsc ? cnscSkus : skus,
-    prices: cnsc ? [] : prices,
+    skus: threePf ? skus : (cnsc ? cnscSkus : skus),
+    prices: cnsc && !threePf ? [] : prices,
   };
   if (!cnsc) {
     payload.promotion_activity_id = promotion.value;

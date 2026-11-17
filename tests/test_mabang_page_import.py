@@ -518,6 +518,8 @@ def test_cnsc_3pf_override_marks_snapshot_and_keeps_cnsc_fields() -> None:
     assert snapshot["cnsc_store"]["id"] == "cnsc-store-1"
     assert snapshot["price_tiers"]
     assert snapshot["warehouse_stock_defaults"] == {"TH": 300, "CN_GZ": 0, "PH": 0}
+    # 3PF 不用价格档/三仓/站点价格矩阵：预览只提示真正缺的东西（这里没采到目标站点）。
+    assert snapshot["missing_configuration"] == ["target_site_stores"]
 
 
 def test_confirm_3pf_import_does_not_update_the_existing_cnsc_template() -> None:
@@ -543,3 +545,85 @@ def test_confirm_3pf_import_does_not_update_the_existing_cnsc_template() -> None
     existing = next(item for item in data["store_templates"] if item["id"] == "cnsc-template")
     assert existing["version"] == 7
     assert existing["listing_mode"] == "cnsc_global"
+
+
+def test_confirm_3pf_import_accepts_only_the_checked_sites() -> None:
+    """3PF 店通常只勾部分站点：采集给出 3 个站点也必须原样落库（旧逻辑要求 8 个全勾）。"""
+    data = _store()
+    capture = _cnsc_capture()
+    capture["target_site_stores_loaded"] = True
+    capture["target_site_stores"] = [
+        {
+            "site_code": code,
+            "store_id": f"{code.lower()}-store",
+            "store_name": f"海宁{code}",
+            "mabang_discount_id": f"{code.lower()}-30",
+            "discount_name": f"{code} 30%",
+            "discount_percent": 30,
+            "discount_catalog_loaded": True,
+            "discount_catalog": [
+                {"mabang_discount_id": f"{code.lower()}-30", "name": f"{code} 30%", "discount_percent": 30},
+                {"mabang_discount_id": f"{code.lower()}-40", "name": f"{code} 40%", "discount_percent": 40},
+            ],
+        }
+        for code in ("TW", "PH", "TH")
+    ]
+    data["mabang_page_import_runs"][0]["requested_listing_mode"] = "cnsc_3pf"
+    stage_page_import(data, "run-1", capture, now="2026-11-17T00:01:00Z")
+
+    template = confirm_page_import(data, "run-1", now="2026-11-17T00:02:00Z")["template"]
+
+    assert template["listing_mode"] == "cnsc_3pf"
+    # 3PF 不落价格档，全球价从页面采集推导出来。
+    assert template["price_tiers"] == []
+    assert float(template["global_price_cny"]) > 0
+    assert [item["site_code"] for item in template["target_site_stores"]] == ["TW", "PH", "TH"]
+    assert template["target_site_stores"][1]["mabang_discount_id"] == "ph-30"
+    assert [entry["mabang_discount_id"] for entry in template["target_site_stores"][1]["discount_catalog"]] == ["ph-30", "ph-40"]
+
+
+def test_confirm_import_keeps_previous_activity_when_catalog_loaded_without_selection() -> None:
+    """活动清单读到了但页面没选中活动：只更新可选项，保留模板里已配好的活动。"""
+    data = _store()
+    data["store_templates"] = [{
+        "id": "cnsc-template",
+        "listing_mode": "cnsc_global",
+        "mabang_store_id": "cnsc-store-1",
+        "mabang_category_id": "100244",
+        "default_site_discount_percent": 40,
+        "target_site_stores": [{
+            "site_code": "PH", "store_id": "ph-store", "store_name": "海宁PH",
+            "mabang_discount_id": "discount-ph", "discount_name": "旧活动", "discount_label": "旧活动",
+            "discount_percent": 35, "discount_catalog_loaded": True,
+            "discount_catalog": [{"mabang_discount_id": "discount-ph", "name": "旧活动", "discount_percent": 35}],
+        }],
+        "price_tiers": [
+            {"id": "standard", "sizes": ["XS", "S", "M", "L"], "global_price_cny": 18, "site_prices": {"PH": {"sale_price": 746, "original_price": 1243}}},
+            {"id": "large", "sizes": ["XL", "XXL", "XXXL"], "global_price_cny": 21, "site_prices": {"PH": {"sale_price": 811, "original_price": 1352}}},
+        ],
+        "warehouse_stock_defaults": {"TH": 100, "CN_GZ": 1, "PH": 2},
+        "status": "active",
+        "version": 1,
+    }]
+    capture = _cnsc_capture()
+    capture["target_site_stores_loaded"] = True
+    capture["target_site_stores"] = [{
+        "site_code": "PH",
+        "store_id": "ph-store",
+        "store_name": "海宁PH",
+        "mabang_discount_id": "",
+        "discount_catalog_loaded": True,
+        "discount_catalog": [
+            {"mabang_discount_id": "ph-20", "name": "PH 20%", "discount_percent": 20},
+            {"mabang_discount_id": "ph-40", "name": "PH 40%", "discount_percent": 40},
+        ],
+    }]
+    stage_page_import(data, "run-1", capture, now="2026-11-17T00:01:00Z")
+
+    template = confirm_page_import(data, "run-1", now="2026-11-17T00:02:00Z")["template"]
+
+    target = template["target_site_stores"][0]
+    assert target["mabang_discount_id"] == "discount-ph"
+    assert target["discount_name"] == "旧活动"
+    assert target["discount_percent"] == 35
+    assert [entry["mabang_discount_id"] for entry in target["discount_catalog"]] == ["ph-20", "ph-40"]

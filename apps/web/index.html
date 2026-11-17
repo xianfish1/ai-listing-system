@@ -308,23 +308,24 @@
               <div class="template-section-head"><h3>CNSC 全球商品</h3><p>保存到 CNSC 待发布商品；站点价格仅作为后续分发准备，本次不会刊登站点。</p></div>
               <div class="template-section-grid transaction-grid">
                 <label>全球商品店铺<select id="store-template-cnsc-store"></select></label>
+                <label id="store-template-global-price-line" hidden>全球价（CNY）<input id="store-template-global-price" type="number" min="0.01" step="0.01" /><small class="muted">跨境本土(3PF)：所有 SKU 共用这一个全球价；原价/折扣价在交易信息里按本土口径维护。</small></label>
                 <label>默认折扣（%OFF）<input id="store-template-default-site-discount-percent" type="number" min="0.01" max="99.99" step="0.01" value="40" /></label>
-                <label>standard 全球价（CNY）<input id="store-template-cnsc-global-standard" type="number" min="0.01" step="0.01" /></label>
-                <label>large 全球价（CNY）<input id="store-template-cnsc-global-large" type="number" min="0.01" step="0.01" /></label>
-                <label>standard 尺码<input id="store-template-cnsc-standard-sizes" value="XS,S,M,L" placeholder="XS,S,M,L" /></label>
-                <label>large 尺码<input id="store-template-cnsc-large-sizes" value="XL,XXL,XXXL" placeholder="XL,XXL,XXXL" /></label>
+                <label id="store-template-cnsc-standard-global-line">standard 全球价（CNY）<input id="store-template-cnsc-global-standard" type="number" min="0.01" step="0.01" /></label>
+                <label id="store-template-cnsc-large-global-line">large 全球价（CNY）<input id="store-template-cnsc-global-large" type="number" min="0.01" step="0.01" /></label>
+                <label id="store-template-cnsc-standard-sizes-line">standard 尺码<input id="store-template-cnsc-standard-sizes" value="XS,S,M,L" placeholder="XS,S,M,L" /></label>
+                <label id="store-template-cnsc-large-sizes-line">large 尺码<input id="store-template-cnsc-large-sizes" value="XL,XXL,XXXL" placeholder="XL,XXL,XXXL" /></label>
                 <label>泰国仓库存<input id="store-template-warehouse-th" type="number" min="0" step="1" /></label>
                 <label>广州仓库存<input id="store-template-warehouse-cn-gz" type="number" min="0" step="1" /></label>
                 <label>菲律宾仓库存<input id="store-template-warehouse-ph" type="number" min="0" step="1" /></label>
                 <label class="wide">目标站点店铺<select id="store-template-target-sites" multiple size="6" aria-describedby="store-template-target-sites-help"></select><small id="store-template-target-sites-help" class="muted">按 Ctrl 或 Command 多选；SIP 店铺由 Shopee 自动分发，不加入手动选择。</small></label>
                 <div class="wide cnsc-target-config-wrap">
                   <table class="cnsc-target-config-table">
-                    <thead><tr><th>站点店铺</th><th>折扣活动</th><th>%OFF</th><th>standard 价格 / 折扣价</th><th>large 价格 / 折扣价</th></tr></thead>
+                    <thead><tr><th>站点店铺</th><th>折扣活动</th><th>%OFF</th><th id="cnsc-target-th-standard">standard 价格 / 折扣价</th><th id="cnsc-target-th-large">large 价格 / 折扣价</th></tr></thead>
                     <tbody id="store-template-target-store-config-body"><tr><td colspan="5" class="muted">请先选择目标站点店铺</td></tr></tbody>
                   </table>
                 </div>
-                <label class="wide">站点价格表（TSV，按表头识别“价格 / 折扣价”，列顺序不限）<textarea id="store-template-price-matrix" rows="4" placeholder="TW 价格\tTW 折扣价\tPH 价格\tPH 折扣价"></textarea><small class="muted">本次仅保存，不提交站点；无表头粘贴按“识别顺序”对应站点，每站两列：售价、原价</small></label>
-                <div class="wide"><button id="store-template-price-preview-btn" type="button" class="secondary-button">解析价格表</button><button id="store-template-cnsc-site-order" type="button" class="secondary-button">识别顺序</button><span id="store-template-cnsc-site-order-display" class="muted"></span><pre id="store-template-price-preview" class="muted"></pre></div>
+                <label class="wide" id="store-template-price-matrix-line">站点价格表（TSV，按表头识别“价格 / 折扣价”，列顺序不限）<textarea id="store-template-price-matrix" rows="4" placeholder="TW 价格\tTW 折扣价\tPH 价格\tPH 折扣价"></textarea><small class="muted">本次仅保存，不提交站点；无表头粘贴按“识别顺序”对应站点，每站两列：售价、原价</small></label>
+                <div class="wide" id="store-template-price-tools"><button id="store-template-price-preview-btn" type="button" class="secondary-button">解析价格表</button><button id="store-template-cnsc-site-order" type="button" class="secondary-button">识别顺序</button><span id="store-template-cnsc-site-order-display" class="muted"></span><pre id="store-template-price-preview" class="muted"></pre></div>
               </div>
             </section>
 
@@ -1426,7 +1427,7 @@
             <span class="muted">折扣活动 · %OFF · 价格档 · 站点价格矩阵</span>
           </div>
           <div class="listing-editor-grid">
-            <label>默认 %OFF<input id="listing-copy-cnsc-default-discount" type="number" min="0.01" max="99.99" step="0.01" placeholder="例如 40" /></label>
+            <label id="listing-copy-cnsc-default-discount-line">默认 %OFF<input id="listing-copy-cnsc-default-discount" type="number" min="0.01" max="99.99" step="0.01" placeholder="例如 40" /></label>
           </div>
           <details id="listing-copy-cnsc-target-details" class="listing-copy-cnsc-details">
             <summary class="listing-copy-cnsc-target-summary">
@@ -1440,7 +1441,7 @@
               </table>
             </div>
           </details>
-          <h4 class="listing-copy-cnsc-subhead">价格档 / 站点价格矩阵</h4>
+          <h4 id="listing-copy-cnsc-tier-head" class="listing-copy-cnsc-subhead">价格档 / 站点价格矩阵</h4>
           <div class="listing-copy-cnsc-binding-bar">
             <label>价格绑定模式
               <select id="listing-copy-cnsc-binding-mode">
@@ -1458,7 +1459,7 @@
             <pre id="listing-copy-cnsc-price-preview" class="listing-copy-cnsc-price-preview" hidden></pre>
           </div>
           <div id="listing-copy-cnsc-tier-coverage" class="muted listing-copy-cnsc-coverage" hidden></div>
-          <div class="listing-copy-sku-scroll">
+          <div id="listing-copy-cnsc-tier-table-wrap" class="listing-copy-sku-scroll">
             <table id="listing-copy-cnsc-tier-table" class="listing-copy-sku-table">
               <thead><tr><th>颜色/款式 / 价格档</th><th data-cnsc-tier-col="sizes">尺码（点选互斥分配）</th><th data-cnsc-tier-col="global">全球价（CNY）</th><th>站点价格（原价 / 售价）</th><th></th></tr></thead>
               <tbody></tbody>
@@ -1543,7 +1544,7 @@
     </dialog>
 
     <script src="/local-folder-batch.js?v=local-import-transparent-skip-v1"></script>
-    <script src="/app.js?v=update-reminder-v2&feature=store-promotion-recollect-v1&feature=desc-profile-base-detail-v2&feature=base-product-multiselect-v1&feature=description-media-v1&feature=local-folder-batch-v1&feature=local-import-queue-v1&feature=import-scoped-assets-v1&feature=product-image-upload-v2&feature=category-custom-option-v1&feature=base-product-stage-v1&feature=desc-required-spec-rows-v1&feature=field-not-editable-v1&feature=job-requeue-in-place-v1&feature=retry-no-detail-dialog-v1&feature=description-tail-insert-v1&feature=loader-retry-v1&feature=template-sale-price-editable-v1&feature=size-chart-template-label-v1&feature=size-chart-local-image-v1&feature=size-chip-drag-order-v1&feature=size-price-editable-v1&feature=copy-list-new-only-v1&feature=automation-live-steps-v3&feature=local-import-queue-v1&feature=base-product-time-all-v1&feature=jobs-sku-thumb-v1&feature=size-chart-last-image-v1&feature=watermark-redesign-v1&feature=mabang-account-list-v1&feature=worker-per-account-v1&feature=mabang-account-ui-v4&feature=import-headed-window-v1&feature=base-color-follow-images-v1&feature=page-import-worker-standby-v2&feature=store-template-duplicate-v1&feature=store-template-account-v1&feature=hide-fill-missing-batch-v1&feature=base-product-rerecognize-v1&feature=category-quick-template-values-v1&feature=github-updates-v1&feature=cross-border-mode-v1&feature=stale-select-text-fallback-v1&feature=cnsc-price-section-hide-v1&feature=color-quick-pick-v1&feature=color-quick-select-all-v1&feature=color-dropdown-live-refresh-v1&feature=skills-management-v1&feature=title-workbench-v1&feature=quick-template-reliable-v1&feature=base-common-sizes-v1&feature=base-batch-cost-v1&feature=retry-title-skill-v1&feature=variant-image-thumb-picker-v2&feature=description-image-width-log-v1&feature=description-image-width-fix-v1&feature=local-import-duplicate-guard-v1&feature=base-save-queue-v1&feature=base-selection-clear-on-nav-v2&feature=copy-batch-delete-v1&feature=copy-image-asset-root-v1&feature=title-ai-suggest-v2&feature=title-audience-detect-v1&feature=update-reminder-v2&feature=media-step-status-v1&feature=base-product-audience-v1&feature=base-selection-clear-on-filter-v1&feature=base-product-filter-axes-v1&feature=local-import-transparent-skip-v1&feature=cnsc-3pf-mode-v1&feature=worker-heartbeat-v1"></script>
+    <script src="/app.js?v=update-reminder-v2&feature=store-promotion-recollect-v1&feature=desc-profile-base-detail-v2&feature=base-product-multiselect-v1&feature=description-media-v1&feature=local-folder-batch-v1&feature=local-import-queue-v1&feature=import-scoped-assets-v1&feature=product-image-upload-v2&feature=category-custom-option-v1&feature=base-product-stage-v1&feature=desc-required-spec-rows-v1&feature=field-not-editable-v1&feature=job-requeue-in-place-v1&feature=retry-no-detail-dialog-v1&feature=description-tail-insert-v1&feature=loader-retry-v1&feature=template-sale-price-editable-v1&feature=size-chart-template-label-v1&feature=size-chart-local-image-v1&feature=size-chip-drag-order-v1&feature=size-price-editable-v1&feature=copy-list-new-only-v1&feature=automation-live-steps-v3&feature=local-import-queue-v1&feature=base-product-time-all-v1&feature=jobs-sku-thumb-v1&feature=size-chart-last-image-v1&feature=watermark-redesign-v1&feature=mabang-account-list-v1&feature=worker-per-account-v1&feature=mabang-account-ui-v4&feature=import-headed-window-v1&feature=base-color-follow-images-v1&feature=page-import-worker-standby-v2&feature=store-template-duplicate-v1&feature=store-template-account-v1&feature=hide-fill-missing-batch-v1&feature=base-product-rerecognize-v1&feature=category-quick-template-values-v1&feature=github-updates-v1&feature=cross-border-mode-v1&feature=stale-select-text-fallback-v1&feature=cnsc-price-section-hide-v1&feature=color-quick-pick-v1&feature=color-quick-select-all-v1&feature=color-dropdown-live-refresh-v1&feature=skills-management-v1&feature=title-workbench-v1&feature=quick-template-reliable-v1&feature=base-common-sizes-v1&feature=base-batch-cost-v1&feature=retry-title-skill-v1&feature=variant-image-thumb-picker-v2&feature=description-image-width-log-v1&feature=description-image-width-fix-v1&feature=local-import-duplicate-guard-v1&feature=base-save-queue-v1&feature=base-selection-clear-on-nav-v2&feature=copy-batch-delete-v1&feature=copy-image-asset-root-v1&feature=title-ai-suggest-v2&feature=title-audience-detect-v1&feature=update-reminder-v2&feature=media-step-status-v1&feature=base-product-audience-v1&feature=base-selection-clear-on-filter-v1&feature=base-product-filter-axes-v1&feature=local-import-transparent-skip-v1&feature=cnsc-3pf-mode-v1&feature=worker-heartbeat-v1&feature=cnsc-3pf-template-pricing-v3&feature=cnsc-3pf-import-preview-v1"></script>
     <script src="/title-workbench.js?v=7-children-20261102"></script>
   </body>
 </html>

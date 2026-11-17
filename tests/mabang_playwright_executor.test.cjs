@@ -3335,3 +3335,44 @@ test('3PF 仍尝试描述插图：入口缺失只降级成警告，不抛错', a
   assert.equal(result.status, 'warning');
   assert.ok(result.code);
 });
+
+test('3PF 没有价格档也能通过 payload 校验（价格由模板价推导）', () => {
+  const task = {
+    store: {
+      listing_mode: 'cnsc_3pf',
+      cnsc_store: { id: 'store-1', name: '全球商品店' },
+      target_site_stores: [{ site_code: 'PH', store_id: 'ph-1', mabang_discount_id: 'act-1' }],
+      default_site_discount_percent: 40,
+    },
+    cnsc: { price_tiers: [] },
+    sku_grid: {
+      skus: [{
+        sku_code: 'A||S',
+        global_price_cny: 19.2,
+        site_price_matrix: { PH: { original_price: 100, sale_price: 60 } },
+      }],
+    },
+  };
+
+  assert.deepEqual(executor.validateCNSCTaskPayload(task), { ok: true, errors: [] });
+});
+
+test('3PF DOM 网格计划：页面没有三仓列也能通过', () => {
+  const headers = [
+    { className: 'vxe-header--column col_1', text: 'SKU' },
+    { className: 'vxe-header--column col_2', text: '全球商品价格' },
+  ];
+  const grid = { expected_rows: 1, skus: [{ sku_code: 'A||S', global_price_cny: 19.2 }], prices: [] };
+
+  const plan = executor.buildCNSCDomGridPlan(
+    grid,
+    headers,
+    ['col_2', 'col_3'],
+    1,
+    { warehousesRequired: false },
+  );
+
+  assert.equal(plan.ok, true);
+  assert.equal(plan.columns.global_price, 'col_3');
+  assert.equal(plan.columns.TH, undefined);
+});

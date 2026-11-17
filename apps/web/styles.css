@@ -7691,3 +7691,17 @@ button.mini {
   font-weight: 500;
   word-break: break-word;
 }
+
+/* 3PF：模板编辑器只保留一个「全球价」，价格档/standard-large 尺码/站点价格表全部收起。
+   组件样式里有 label{display:grid} 一类规则，[hidden] 必须显式压回去。 */
+#store-template-global-price-line[hidden],
+#store-template-cnsc-standard-global-line[hidden],
+#store-template-cnsc-large-global-line[hidden],
+#store-template-cnsc-standard-sizes-line[hidden],
+#store-template-cnsc-large-sizes-line[hidden],
+#store-template-price-matrix-line[hidden],
+#store-template-price-tools[hidden],
+#cnsc-target-th-standard[hidden],
+#cnsc-target-th-large[hidden] {
+  display: none !important;
+}

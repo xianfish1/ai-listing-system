@@ -127,3 +127,25 @@ def test_cnsc_3pf_mode_is_wired_through_editor_and_page_import() -> None:
     assert "const localLike = isLocalLikeMode(listingMode);" in source
     assert "cnsc_store: cnscPage ?" in source
     assert "default_sku: localLike ?" in source
+
+
+def test_cnsc_3pf_template_uses_one_global_price_without_tiers() -> None:
+    """3PF：模板单设全球价、不落价格档；副本 SKU 明细按本土列 + 全球价。"""
+    html = INDEX.read_text(encoding="utf-8")
+    source = APP.read_text(encoding="utf-8")
+
+    assert 'id="store-template-global-price"' in html
+    assert 'required.push(["store-template-global-price", "全球价"]);' in source
+    assert 'price_tiers: threePf ? [] : priceTiers' in source
+    assert 'global_price_cny: threePf ?' in source
+    # 副本 SKU 表：3PF 走本土列 + 全球价。
+    assert 'const threePf = normalizeListingMode(copy) === "cnsc_3pf";' in source
+    assert '<th>全球价（CNY）</th></tr>"' in source
+
+
+def test_page_import_collect_sends_the_selected_listing_mode() -> None:
+    """采集时选的「跨境本土 (3PF)」也要随 collect 请求带上（run 是弹窗打开时建的）。"""
+    source = APP.read_text(encoding="utf-8")
+
+    assert 'requested_listing_mode: $("mabang-page-import-listing-mode")?.value || ""' in source
+    assert "snapshot.capture_debug?.cnsc_prepare?.errors" in source

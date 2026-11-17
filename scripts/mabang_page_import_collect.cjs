@@ -257,9 +257,15 @@ async function collectPageImport({ cdpUrl = CDP_DEFAULT, plan = {} } = {}) {
       };
     }
     const target = targets[targets.length - 1];
-    // CNSC 的店铺选择器与每站折扣活动默认不渲染：先展开读出，再采快照。
-    // 本土页没有这些交互（也只对 global=4 执行），行为不变。
-    const isCnscPage = /[?&#]global=4(?:&|#|$)/.test(String(target.url || ''));
+    // CNSC / 跨境本土(3PF) 的店铺选择器与每站折扣活动默认不渲染：先展开读出，再采快照。
+    // 本土页没有这些交互，行为不变。global=4 是 CNSC 页的标记；3PF 如果走了别的入口，
+    // 只要页面里有 #shops-wap 也照样展开（选择器在就说明是跨境形态）。
+    let isCnscPage = /[?&#]global=4(?:&|#|$)/.test(String(target.url || ''));
+    if (!isCnscPage) {
+      isCnscPage = await target.frame
+        .evaluate(() => Boolean(document.querySelector('#shops-wap, .shops-wap')))
+        .catch(() => false);
+    }
     let cnscPrepare = { attempted: false };
     if (isCnscPage) {
       try {

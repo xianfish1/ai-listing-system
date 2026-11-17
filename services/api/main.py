@@ -4728,8 +4728,13 @@ class ApiHandler(BaseHTTPRequestHandler):
                 error = capture_result.get("error") or "Unable to read the current Mabang page"
                 storage.record_mabang_page_import_error(run_id, error)
                 raise ApiRequestError(error, 422)
+            # 采集时才选「跨境本土 (3PF)」也要生效：run 是弹窗打开时建的，模式可能之后才改。
+            requested_mode = str(payload.get("requested_listing_mode") or "").strip().lower()
+            capture_payload = dict(capture_result["capture"] or {})
+            if requested_mode in {"site", "cnsc_global", "cnsc_3pf"}:
+                capture_payload["requested_listing_mode"] = requested_mode
             try:
-                result = storage.stage_mabang_page_import(run_id, capture_result["capture"])
+                result = storage.stage_mabang_page_import(run_id, capture_payload)
             except MabangPageImportError as exc:
                 raise ApiRequestError(str(exc), 422) from exc
             # 现场要求（2026-10-01）：马帮采集的时候就顺手把水印目录更新到最新，

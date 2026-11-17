@@ -21,6 +21,7 @@ from typing import Any, Callable, Iterator
 
 from services.api import settings
 from services.api.listing_modes import (
+    LISTING_MODE_CNSC_3PF,
     LISTING_MODE_SITE,
     is_cnsc_page,
     is_local_like,
@@ -3308,6 +3309,8 @@ def _copy_store_template_payload(
         "normal_price",
         "sale_price",
         "size_price_overrides",
+        # 3PF 的模板全球价：换店铺也照抄（价格本身与店铺无关）。
+        "global_price_cny",
         # 默认视频 ID 属于账号的视频库，跨账号另存时不可复用。
         "default_video_id",
     )
@@ -4286,13 +4289,16 @@ def _sync_site_template_prices_to_store_copies(
     *,
     now: str,
 ) -> None:
-    """把模板「交易信息」的原价/六折售价改动同步到已有**本土**副本。
+    """把模板「交易信息」的原价/六折售价改动同步到已有**本土/3PF**副本。
 
     只改写"当前值仍等于旧模板算出来的价"的行：操作员在副本价格表里手工改过的
-    行保持不动。默认 SKU(白T恤) 有自己的价格来源、跨境副本走价目表，两者都跳过。
+    行保持不动。默认 SKU(白T恤) 有自己的价格来源、纯跨境副本走价目表，两者都跳过。
+    3PF 还要同步每个 SKU 的全球价与站点价矩阵（都由模板值推导）。
     """
-    if is_cnsc_page(template.get("listing_mode")):
+    if is_pure_cnsc(template.get("listing_mode")):
         return
+    three_pf = normalize_listing_mode(template.get("listing_mode")) == LISTING_MODE_CNSC_3PF
+    template_global = _float_or_empty(template.get("global_price_cny"))
     template_id = str(template.get("id") or "")
     if not template_id:
         return
@@ -4300,26 +4306,54 @@ def _sync_site_template_prices_to_store_copies(
     for listing_copy in data.get("store_listing_copies", []):
         if str(listing_copy.get("template_id") or "") != template_id:
             continue
-        if is_cnsc_page(listing_copy.get("listing_mode")):
+        if is_pure_cnsc(listing_copy.get("listing_mode")):
             continue
         copy_id = str(listing_copy.get("id") or "")
+        target_sites = [
+            str(entry.get("site_code") or "").strip().upper()
+            for entry in listing_copy.get("target_site_stores") or []
+            if str(entry.get("site_code") or "").strip()
+        ]
         changed = False
         for price in data.get("listing_prices", []):
             if str(price.get("listing_copy_id") or "") != copy_id:
                 continue
             sku = skus_by_id.get(str(price.get("sku_id") or "")) or {}
             if str(sku.get("sku_source") or "") == "default_sku":
+                # 默认 SKU 的价格由它自己的配置管理，但 3PF 的全球价是模板级。
+                if three_pf and _float_or_empty(sku.get("global_price_cny")) != template_global:
+                    sku["global_price_cny"] = template_global
+                    sku["updated_at"] = now
+                    changed = True
                 continue
             previous = _site_row_prices(previous_template, sku.get("size"))
             updated = _site_row_prices(template, sku.get("size"))
-            if previous == updated:
-                continue
-            if not (_price_pair_matches(price.get("normal_price"), previous[0]) and _price_pair_matches(price.get("sale_price"), previous[1])):
-                continue
-            price["normal_price"] = updated[0]
-            price["sale_price"] = updated[1]
-            price["updated_at"] = now
-            changed = True
+            if previous != updated and (
+                _price_pair_matches(price.get("normal_price"), previous[0])
+                and _price_pair_matches(price.get("sale_price"), previous[1])
+            ):
+                price["normal_price"] = updated[0]
+                price["sale_price"] = updated[1]
+                price["updated_at"] = now
+                changed = True
+            if three_pf:
+                normal_price, sale_price = updated
+                matrix = (
+                    {
+                        site: {"original_price": float(normal_price), "sale_price": sale_price}
+                        for site in target_sites
+                    }
+                    if normal_price not in ("", None)
+                    else {}
+                )
+                if _float_or_empty(sku.get("global_price_cny")) != template_global:
+                    sku["global_price_cny"] = template_global
+                    sku["updated_at"] = now
+                    changed = True
+                if sku.get("site_price_matrix") != matrix:
+                    sku["site_price_matrix"] = matrix
+                    sku["updated_at"] = now
+                    changed = True
         if not changed:
             continue
         listing_copy["updated_at"] = now
@@ -4447,6 +4481,8 @@ def update_store_template(template_id: str, payload: dict[str, Any]) -> dict[str
                 "normal_price": _float_or_empty(template.get("normal_price")),
                 "sale_price": _float_or_empty(template.get("sale_price")),
                 "size_price_overrides": _normalize_size_price_overrides(template.get("size_price_overrides")),
+                # 3PF 的全球价也是模板-owned：改价要同步到已有副本的 SKU 行。
+                "global_price_cny": _float_or_empty(template.get("global_price_cny")),
             }
             template.clear()
             template.update(updated)
@@ -4470,8 +4506,9 @@ def update_store_template(template_id: str, payload: dict[str, Any]) -> dict[str
                 previous_price_fields["normal_price"] != updated.get("normal_price")
                 or previous_price_fields["sale_price"] != updated.get("sale_price")
                 or previous_price_fields["size_price_overrides"] != _normalize_size_price_overrides(updated.get("size_price_overrides"))
+                or previous_price_fields["global_price_cny"] != _float_or_empty(updated.get("global_price_cny"))
             )
-            if normalize_listing_mode(updated.get("listing_mode")) == LISTING_MODE_SITE and price_changed:
+            if is_local_like(updated.get("listing_mode")) and price_changed:
                 _sync_site_template_prices_to_store_copies(
                     data,
                     {**previous_price_fields, "id": template_id},
@@ -5311,6 +5348,36 @@ def update_store_listing_copy(listing_copy_id: str, payload: dict[str, Any]) -> 
             if "sale_price" in update:
                 row["sale_price"] = _validated_non_negative_number(update.get("sale_price"), "折后价")
             row["updated_at"] = now
+        # 3PF：SKU 站点价矩阵是从该行原价/折扣价推导的；编辑器里改了价就同步刷新，
+        # 否则执行器仍按旧矩阵写站点价格表。
+        if price_updates and normalize_listing_mode(item.get("listing_mode")) == LISTING_MODE_CNSC_3PF:
+            target_sites = [
+                str(entry.get("site_code") or "").strip().upper()
+                for entry in item.get("target_site_stores") or []
+                if str(entry.get("site_code") or "").strip()
+            ]
+            price_by_sku = {
+                str(price.get("sku_id") or ""): price
+                for price in data.get("listing_prices", [])
+                if str(price.get("listing_copy_id") or "") == listing_copy_id
+            }
+            for sku_row in data.get("listing_skus", []):
+                if str(sku_row.get("listing_copy_id") or "") != listing_copy_id:
+                    continue
+                if str(sku_row.get("sku_source") or "") == "default_sku":
+                    continue
+                price = price_by_sku.get(str(sku_row.get("id") or "")) or {}
+                normal = _float_or_empty(price.get("normal_price"))
+                sale = _float_or_empty(price.get("sale_price"))
+                sku_row["site_price_matrix"] = (
+                    {
+                        site: {"original_price": float(normal), "sale_price": sale}
+                        for site in target_sites
+                    }
+                    if normal not in ("", None)
+                    else {}
+                )
+                sku_row["updated_at"] = now
         # 维护入口（不在编辑器 UI 里）：按当前商品 × 当前模板重生成 SKU/价格行。
         # 用途是把"复制时按旧规则生成的尺码"（如商品识别字母码覆盖了模板 cm 码）
         # 对齐到模板现在的尺码轴，省掉"删副本再重复制"。
@@ -8413,6 +8480,9 @@ def _cnsc_copy_price_tiers(base: dict[str, Any], template: dict[str, Any]) -> tu
     """
     if not is_cnsc_page(template.get("listing_mode")):
         return "sizes", deepcopy(template.get("price_tiers") or [])
+    # 3PF：价格按本土模板价走（原价/折扣价 + 模板全球价），没有价格档。
+    if normalize_listing_mode(template.get("listing_mode")) == LISTING_MODE_CNSC_3PF:
+        return "", []
     base_tiers = _normalize_base_price_tiers(base.get("price_tiers") or [])
     color_tiers = [tier for tier in base_tiers if (tier.get("colors") or [])]
     if color_tiers:
@@ -8577,13 +8647,18 @@ def _cnsc_configuration_issues(
     if not str(store.get("id") or store.get("name") or "").strip():
         add("cnsc_store", "cnsc_store is required")
 
+    # 跨境本土(3PF)：页面仍是 CNSC 页，但价格按本土模板走（模板原价/折扣价 + 一个
+    # 全球价），不需要价格档、站点价矩阵、三仓默认。这里只校验目标站点 + 每站活动
+    # + 全球价，和纯跨境(cnsc_global)的配置要求彻底分开。
+    three_pf = normalize_listing_mode(config.get("listing_mode")) == LISTING_MODE_CNSC_3PF
+
     targets = list(config.get("target_site_stores") or [])
     if not targets:
         add("target_site_stores", "target_site_stores is required")
 
     default_discount = _float_or_empty(config.get("default_site_discount_percent"))
     default_ok = default_discount != "" and 0 < float(default_discount) < 100
-    if not default_ok:
+    if not three_pf and not default_ok:
         add(
             "default_site_discount_percent",
             "default_site_discount_percent must be greater than 0 and less than 100",
@@ -8596,6 +8671,8 @@ def _cnsc_configuration_issues(
             add(f"target_site_stores.{code}.store_identity", "each target site requires a store identity")
         if not str(target.get("mabang_discount_id") or "").strip():
             add(f"target_site_stores.{code}.discount_activity", "each target site requires a discount activity")
+        if three_pf:
+            continue
         override = _float_or_empty(target.get("discount_percent"))
         if override != "":
             effective_discount: float | None = float(override)
@@ -8610,6 +8687,12 @@ def _cnsc_configuration_issues(
             )
         if effective_discount is not None:
             effective_discounts[code] = effective_discount
+
+    if three_pf:
+        global_price = _float_or_empty(config.get("global_price_cny"))
+        if global_price == "" or float(global_price) <= 0:
+            add("global_price_cny", "global_price_cny is required")
+        return issues
 
     try:
         _validated_cnsc_warehouse_stocks(config.get("warehouse_stock_defaults"))
@@ -8949,6 +9032,28 @@ def _normalize_store_template_payload(payload: dict[str, Any], *, now: str) -> d
         sizes = [str(item or "").strip() for item in sizes if str(item or "").strip()]
     else:
         sizes = []
+    # 3PF 从旧的 CNSC 模板切过来时：尺码/全球价优先沿用已有的价格档输入，
+    # 避免运营还要再录一遍（价格档本身会被清掉）。
+    if listing_mode == LISTING_MODE_CNSC_3PF:
+        tier_source = payload.get("price_tiers") if isinstance(payload.get("price_tiers"), list) else []
+        if not sizes:
+            derived_sizes: list[str] = []
+            for tier in tier_source:
+                if not isinstance(tier, dict):
+                    continue
+                for size in tier.get("sizes") or []:
+                    text = str(size or "").strip()
+                    if text and text not in derived_sizes:
+                        derived_sizes.append(text)
+            sizes = derived_sizes
+        if _float_or_empty(payload.get("global_price_cny")) in ("", None):
+            for tier in tier_source:
+                if not isinstance(tier, dict):
+                    continue
+                value = _float_or_empty(tier.get("global_price_cny"))
+                if value not in ("", None) and float(value) > 0:
+                    payload = {**payload, "global_price_cny": value}
+                    break
     discount_id = str(_value_or_default(payload, profile_defaults, "discount_id", "") or "").strip()
     mabang_discount_id = str(_value_or_default(payload, profile_defaults, "mabang_discount_id", discount_id) or "").strip()
     if not discount_id:
@@ -8990,6 +9095,8 @@ def _normalize_store_template_payload(payload: dict[str, Any], *, now: str) -> d
         "mabang_discount_id": mabang_discount_id,
         "normal_price": _float_or_empty(_value_or_default(payload, profile_defaults, "normal_price")),
         "sale_price": _float_or_empty(_value_or_default(payload, profile_defaults, "sale_price")),
+        # 跨境本土(3PF)：模板单设一个全球价（CNY），所有 SKU 行共用；不设价格档。
+        "global_price_cny": _float_or_empty(payload.get("global_price_cny")),
         "size_price_overrides": _normalize_size_price_overrides(payload.get("size_price_overrides")),
         "discount_label": str(_value_or_default(payload, profile_defaults, "discount_label", "") or "").strip(),
         "discount_id": discount_id,
@@ -9334,12 +9441,21 @@ def _build_store_listing_copy(
         "site_price_order": [str(site or "").strip().upper() for site in (template.get("site_price_order") or [])],
         "default_site_discount_percent": template.get("default_site_discount_percent") or 40,
         "price_tiers": deepcopy(copy_price_tiers),
+        # 3PF：模板单设的全球价随副本走，每个 SKU 行都用它。
+        "global_price_cny": _float_or_empty(template.get("global_price_cny")),
         # 默认视频（马帮 videoId，本土模板）：副本带上它，执行器按 ID 选视频而不再上传。
         "default_video_id": str(template.get("default_video_id") or "").strip(),
         # 模板的尺码 chip 顺序：本土副本尺码轴按它排（模板已删时执行器退回这份）。
         "sizes": deepcopy(template.get("sizes") or []),
-        "cnsc_binding_mode": cnsc_binding_mode if is_cnsc_page(template.get("listing_mode")) else "",
-        "warehouse_stock_defaults": deepcopy(template.get("warehouse_stock_defaults") or {"TH": 0, "CN_GZ": 0, "PH": 0}),
+        "cnsc_binding_mode": cnsc_binding_mode if is_pure_cnsc(template.get("listing_mode")) else "",
+        "warehouse_stock_defaults": deepcopy(
+            template.get("warehouse_stock_defaults")
+            or (
+                {}
+                if normalize_listing_mode(template.get("listing_mode")) == LISTING_MODE_CNSC_3PF
+                else {"TH": 0, "CN_GZ": 0, "PH": 0}
+            )
+        ),
         "group_id": base.get("group_id") or "",
         "main_sku": base.get("main_sku") or base.get("group_id") or "",
         "product_name_cn": base_name,
@@ -9466,13 +9582,21 @@ def _cnsc_sale_price(original: Any, sale: Any, discount_percent: float | None = 
 
 def _generate_listing_skus(base: dict[str, Any], template: dict[str, Any], listing_copy: dict[str, Any]) -> list[dict[str, Any]]:
     colors = [str(item or "").strip() for item in base.get("recognized_colors") or [] if str(item or "").strip()] or ["default"]
-    cnsc = is_cnsc_page(listing_copy.get("listing_mode"))
+    mode = normalize_listing_mode(listing_copy.get("listing_mode"))
+    pure_cnsc = mode == "cnsc_global"
+    three_pf = mode == LISTING_MODE_CNSC_3PF
     # SKU 尺码源：本土按模板尺码（模板 chip 顺序即上架顺序），模板没配尺码才回退
     # 商品勾选/识别尺码；跨境仍以商品勾选/识别尺码优先。见 _listing_sizes。
     # 跨境与本土一致：SKU 均为 颜色×尺码；价格仍按颜色档（同色不同码同价）。
     sizes = _listing_sizes(base, template)
     rows = []
     now = utc_now()
+    target_sites = [
+        str(entry.get("site_code") or "").strip().upper()
+        for entry in listing_copy.get("target_site_stores") or []
+        if str(entry.get("site_code") or "").strip()
+    ]
+    template_global_price = _float_or_empty(template.get("global_price_cny"))
     base_color_tiers = {
         str((tier.get("colors") or [""])[0] or "").strip().casefold(): tier
         for tier in (_normalize_base_price_tiers(base.get("price_tiers") or []) or [])
@@ -9481,23 +9605,37 @@ def _generate_listing_skus(base: dict[str, Any], template: dict[str, Any], listi
     for color in colors:
         for size in sizes:
             sku_code = _format_listing_sku(template, base, color, size)
-            tier_source = listing_copy.get("price_tiers") if cnsc else template.get("price_tiers")
-            tier = next((item for item in (tier_source or []) if _tier_matches(item, color, size)), None)
+            tier_source = listing_copy.get("price_tiers") if pure_cnsc else template.get("price_tiers")
+            tier = None if three_pf else next((item for item in (tier_source or []) if _tier_matches(item, color, size)), None)
             warehouse_stocks = _normalize_cnsc_warehouse_stocks(template.get("warehouse_stock_defaults"))
-            site_price_matrix = deepcopy(tier.get("site_prices") or {}) if tier else {}
-            # 全球商品价格：CNSC 的 SKU 表 *全球商品价格 列必填。颜色档在复制时已
-            # 用成本价填充（见 _cnsc_copy_price_tiers）；此处再兜底一次——旧 copy
-            # 数据颜色档可能仍缺 global，用 base 同颜色档成本价补齐，绝不写空串。
-            global_price_cny = tier.get("global_price_cny") if tier else ""
-            if cnsc and global_price_cny in ("", None):
-                base_tier = base_color_tiers.get(str(color or "").strip().casefold())
-                if base_tier:
-                    cost = base_tier.get("cost_price")
-                    if cost not in ("", None) and float(cost) > 0:
-                        global_price_cny = float(cost)
-                if global_price_cny in ("", None):
-                    global_price_cny = _default_template_global_price(template)
-            if cnsc:
+            if three_pf:
+                # 3PF：每行价格取模板价（原价/折扣价，含分尺码覆盖），站点价直接由
+                # 模板价推导（每站原价=模板原价、售价=模板折扣价）；全球价用模板单设值。
+                normal_price, sale_price = _site_row_prices(template, size)
+                site_price_matrix = (
+                    {
+                        site: {"original_price": float(normal_price), "sale_price": sale_price}
+                        for site in target_sites
+                    }
+                    if normal_price not in ("", None)
+                    else {}
+                )
+                global_price_cny = template_global_price
+            else:
+                site_price_matrix = deepcopy(tier.get("site_prices") or {}) if tier else {}
+                # 全球商品价格：CNSC 的 SKU 表 *全球商品价格 列必填。颜色档在复制时已
+                # 用成本价填充（见 _cnsc_copy_price_tiers）；此处再兜底一次——旧 copy
+                # 数据颜色档可能仍缺 global，用 base 同颜色档成本价补齐，绝不写空串。
+                global_price_cny = tier.get("global_price_cny") if tier else ""
+                if pure_cnsc and global_price_cny in ("", None):
+                    base_tier = base_color_tiers.get(str(color or "").strip().casefold())
+                    if base_tier:
+                        cost = base_tier.get("cost_price")
+                        if cost not in ("", None) and float(cost) > 0:
+                            global_price_cny = float(cost)
+                    if global_price_cny in ("", None):
+                        global_price_cny = _default_template_global_price(template)
+            if pure_cnsc:
                 # 跨境售价：来源档（base 颜色档 / 模板尺码档）手填了 sale 则尊重手填值；
                 # sale 留空的站点按目标店铺活动折扣（%OFF）推导 sale = original × (1 - off/100)。
                 default_off = float(listing_copy.get("default_site_discount_percent") or 40)
@@ -9593,7 +9731,7 @@ def _listing_size_order_rank(
     """本土副本的尺码顺序秩：按模板 chip 顺序（复用 _order_sizes_by_template），
     模板里没有的尺码按原相对顺序排在后面。跨境返回 None，调用方沿用
     _size_sort_value 旧排序——跨境网格按行号填写，换序属于跨境行为变更。"""
-    if is_cnsc_page(listing_copy.get("listing_mode")):
+    if is_pure_cnsc(listing_copy.get("listing_mode")):
         return None
     unique_sizes: list[str] = []
     seen: set[str] = set()
@@ -9686,15 +9824,21 @@ def _default_sku_rows(
             sale_price = _float_or_empty(default_sku.get("sale_price"))
         global_price_cny: float | str = ""
         site_price_matrix: dict[str, Any] = {}
-        if cnsc_page and normal_price not in ("", None) and float(normal_price) > 0:
-            global_price_cny = float(normal_price)
-            for site_code in site_codes:
-                site_price_matrix[site_code] = {
-                    "original_price": float(normal_price),
-                    "sale_price": _cnsc_sale_price(
-                        normal_price, sale_price, site_discounts.get(site_code, default_off)
-                    ),
-                }
+        if cnsc_page:
+            # 3PF 的全球价是模板单设值（所有 SKU 共用）；老数据没设时才退回默认 SKU 自己的原价。
+            template_global = _float_or_empty(template.get("global_price_cny"))
+            if template_global not in ("", None) and float(template_global) > 0:
+                global_price_cny = float(template_global)
+            elif normal_price not in ("", None) and float(normal_price) > 0:
+                global_price_cny = float(normal_price)
+            if normal_price not in ("", None) and float(normal_price) > 0:
+                for site_code in site_codes:
+                    site_price_matrix[site_code] = {
+                        "original_price": float(normal_price),
+                        "sale_price": _cnsc_sale_price(
+                            normal_price, sale_price, site_discounts.get(site_code, default_off)
+                        ),
+                    }
         rows.append({
             "id": str(uuid.uuid4()),
             "listing_copy_id": listing_copy.get("id") or "",
@@ -9841,6 +9985,7 @@ def _generate_listing_prices(
     base_tiers = [tier for tier in (base_price_tiers or []) if isinstance(tier, dict)]
     # CNSC: only copy site prices for the template's target sites, in template order.
     cnsc_mode = is_cnsc_page(listing_copy.get("listing_mode"))
+    three_pf = normalize_listing_mode(listing_copy.get("listing_mode")) == LISTING_MODE_CNSC_3PF
     target_sites: list[str] = []
     if cnsc_mode:
         target_sites = [
@@ -9867,7 +10012,10 @@ def _generate_listing_prices(
                 normal_price = _float_or_empty(default_sku.get("normal_price"))
                 sale_price = _float_or_empty(default_sku.get("sale_price"))
         else:
-            normal_price, sale_price = ("", "") if global_mode else _site_row_prices(template, sku.get("size"))
+            # 3PF 价格跟本土一样取模板原价/折扣价（含分尺码覆盖）；纯跨境没有本土价。
+            normal_price, sale_price = (
+                ("", "") if cnsc_mode and not three_pf else _site_row_prices(template, sku.get("size"))
+            )
         color = str(sku.get("color_code") or sku.get("color_cn") or "").strip()
         size = str(sku.get("size") or "").strip()
         base_tier = next((tier for tier in base_tiers if _tier_matches(tier, color, size)), None)
@@ -10026,26 +10174,21 @@ def _check_automation_readiness(
     if not prices:
         missing.append("listing_prices")
     if is_cnsc:
-        # 跨境(CNSC)的成本价以基础商品价格表为唯一来源：每个价格行必须带成本价
-        # （缺失阻止自动化但仍允许保存副本）。本土(site)店铺的成本价走模板/导出
-        # 自己的兜底，不要求基础商品维护里补——故此处只在 CNSC 分支检查。
-        # 默认 SKU(白T恤) 的行没有 base 成本档（该颜色是模板追加的），成本价检查
-        # 只针对真实商品颜色；它们的价格已在 _default_sku_rows 里就地给出。
+        # 纯跨境(CNSC)才要求「每个价格行都带基础商品成本价」；3PF 按本土口径用模板价，
+        # 不要求成本价。
         default_sku_ids = {
             str(sku.get("id") or "")
             for sku in skus
             if str(sku.get("sku_source") or "") == "default_sku"
         }
-        if any(
+        if is_pure_cnsc(listing_copy.get("listing_mode")) and any(
             price.get("cost_price") in ("", None)
             and str(price.get("sku_id") or "") not in default_sku_ids
             for price in prices
         ):
             missing.append("base_product_cost_price")
-        # CNSC 没有总库存字段：只要任一 SKU 的泰国/广州/菲律宾仓有库存，
-        # 库存即视为就绪，不再提醒"缺少库存"。2026-09-27 起三仓全 0 也是合法状态
-        # （马帮把三仓列当必填，0 也要照填，留空才报错）：每个仓都能解析出非负整数
-        # （SKU 自带值 → 副本级默认）即放行，执行器会把 0 逐仓写上页面。
+        # 纯跨境没有总库存字段：只要任一 SKU 的三仓有库存（或可解析出默认值，0 也合法）
+        # 就放行。3PF 页面有三仓列时同样用它兜底；没有三仓列时仍要求模板库存。
         if "stock" in missing and (
             _cnsc_warehouse_stock_present(skus)
             or _cnsc_warehouse_stocks_resolvable(skus, listing_copy.get("warehouse_stock_defaults"))
@@ -10266,9 +10409,11 @@ def _build_browser_inputs(
                 product_image_form_paths = [*stripped_paths, size_chart_file]
                 size_chart_last_product_image = True
     sizes = _unique_sorted_sizes(skus)
-    # 颜色轴顺序：本土按操作员在商品维护里排的顺序（recognized_colors）生成；跨境
+    # 颜色轴顺序：本土按操作员在商品维护里排的顺序（recognized_colors）生成；纯跨境
     # 沿用字母序——跨境网格按行号填写，换序属于跨境行为变更，要单独验证。
-    if is_cnsc_page(listing_copy.get("listing_mode")):
+    # 3PF 按本土口径（模板尺码 + 操作员颜色顺序），执行器仍按行号填，但轴序由我们
+    # 给出的 variation 决定，两者一致。
+    if is_pure_cnsc(listing_copy.get("listing_mode")):
         colors = _unique_sorted_colors(skus, listing_copy)
     else:
         # 尺码轴顺序：本土按模板的尺码 chip 顺序（操作员在模板里拖动的顺序即

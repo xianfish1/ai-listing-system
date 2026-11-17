@@ -102,6 +102,8 @@ def _three_pf_template(tmp_path: Path, **overrides) -> dict:
         "cnsc_store": {"id": "cnsc-store", "name": "3PF 全球商品店"},
         "normal_price": 100,
         "sale_price": 60,
+        "stock": 500,
+        "global_price_cny": 19.2,
         "default_size_chart_path": _size_chart_file(tmp_path),
         "default_sku": _default_sku_config(tmp_path),
         **_cnsc_common(tmp_path),
@@ -171,9 +173,12 @@ def test_three_pf_copy_keeps_cnsc_config_and_local_extras(tmp_path: Path) -> Non
     assert copy["listing_mode"] == "cnsc_3pf"
     # 跨境页面能力照旧
     assert copy["target_site_stores"][0]["site_code"] == "PH"
-    assert copy["price_tiers"]
+    # 3PF 不再有价格档：价格由模板价推导，全球价是模板单设值。
+    assert copy["price_tiers"] == []
+    assert copy["global_price_cny"] == 19.2
     assert copy["warehouse_stock_defaults"] == {"TH": 300, "CN_GZ": 0, "PH": 0}
-    assert copy["cnsc_binding_mode"] in {"colors", "sizes"}
+    # 3PF 没有价格档，也就没有绑定模式。
+    assert copy["cnsc_binding_mode"] == ""
     # 本土上款能力
     assert copy["default_sku"]["enabled"] is True
     assert copy["size_chart_as_last_product_image"] is True
@@ -193,8 +198,8 @@ def test_three_pf_default_sku_rows_carry_global_and_site_prices(tmp_path: Path) 
         "AL9999-PureWhite-140cm",
     ]
     for row in default_rows:
-        # 页面「全球商品价格」用默认 SKU 自己的原价（人民币档）。
-        assert row["global_price_cny"] == 120.0
+        # 全球价用模板单设值；站点价仍用默认 SKU 自己的价。
+        assert row["global_price_cny"] == 19.2
         assert row["site_price_matrix"]["PH"] == {"original_price": 120.0, "sale_price": 79.0}
         assert row["warehouse_stocks"] == {"TH": 300, "CN_GZ": 0, "PH": 0}
 
@@ -202,13 +207,14 @@ def test_three_pf_default_sku_rows_carry_global_and_site_prices(tmp_path: Path) 
     default_price = prices["AL9999-PureWhite-130cm"]
     assert default_price["normal_price"] == 120.0
     assert default_price["sale_price"] == 79.0
-    assert default_price["global_price_cny"] == 120.0
+    assert default_price["global_price_cny"] == 19.2
     assert default_price["site_price_matrix"]["PH"]["sale_price"] == 79.0
-    # 普通颜色仍走跨境价格档（不写本土原价/售价）。
+    # 普通颜色按模板价（原价/折扣价），站点价由模板价推导。
     other_price = prices["AL0353-Black-130cm"]
-    assert other_price["normal_price"] == ""
-    assert other_price["sale_price"] == ""
+    assert other_price["normal_price"] == 100.0
+    assert other_price["sale_price"] == 60.0
     assert other_price["global_price_cny"] == 19.2
+    assert other_price["site_price_matrix"]["PH"] == {"original_price": 100.0, "sale_price": 60.0}
 
 
 def test_three_pf_readiness_requires_cnsc_config_plus_size_chart(tmp_path: Path) -> None:
@@ -226,19 +232,10 @@ def test_three_pf_readiness_requires_cnsc_config_plus_size_chart(tmp_path: Path)
         "mabang_category_id": "category-1",
     }
 
-    # 真实颜色没有基础商品成本价 → 跨境成本价门照旧拦（3PF 不豁免整条规则）。
+    # 3PF 按本土口径用模板价：不要求基础商品成本价，默认 SKU 行也不影响。
     result = storage._check_automation_readiness(ready_copy, skus=skus, prices=prices)
-    assert "base_product_cost_price" in result["missing_fields"]
-
-    # 补齐真实颜色的成本价后即就绪：默认 SKU 行缺成本价不算问题。
-    priced = [
-        {**price, "cost_price": 10}
-        for price in prices
-        if price.get("sku_id") not in default_ids
-    ] + [price for price in prices if price.get("sku_id") in default_ids]
-    assert all(price.get("cost_price") in ("", None) for price in priced if price.get("sku_id") in default_ids)
-    result = storage._check_automation_readiness(ready_copy, skus=skus, prices=priced)
     assert result["ready"] is True, result["missing_fields"]
+    priced = prices
 
     # 去掉尺码图：3PF 按本土口径，必须拦。
     without_chart = {
@@ -312,3 +309,28 @@ def test_existing_modes_are_unchanged(tmp_path: Path) -> None:
     assert site_default["global_price_cny"] == ""
     assert site_default["site_price_matrix"] == {}
     assert site_copy["listing_mode"] == "site"
+
+
+def test_three_pf_template_price_change_syncs_to_existing_copy(tmp_path: Path) -> None:
+    """模板改原价/全球价后，已生成的 3PF 副本要跟着更新价格行与 SKU 矩阵。"""
+    base = _make_base(tmp_path)
+    template = _three_pf_template(tmp_path)
+    copy = storage.copy_base_product_to_store_templates(base["id"], [template["id"]])["created"][0]
+
+    storage.update_store_template(
+        template["id"],
+        {"normal_price": 200, "sale_price": 120, "global_price_cny": 25},
+    )
+
+    prices = {price["sku_code"]: price for price in storage.list_listing_prices(copy["id"])}
+    skus = {sku["sku_code"]: sku for sku in storage.list_listing_skus(copy["id"])}
+    assert prices["AL0353-Black-130cm"]["normal_price"] == 200.0
+    assert prices["AL0353-Black-130cm"]["sale_price"] == 120.0
+    assert skus["AL0353-Black-130cm"]["global_price_cny"] == 25.0
+    assert skus["AL0353-Black-130cm"]["site_price_matrix"]["PH"] == {
+        "original_price": 200.0,
+        "sale_price": 120.0,
+    }
+    # 默认 SKU 的价格仍用自己配置，但全球价跟模板走。
+    assert prices["AL9999-PureWhite-130cm"]["normal_price"] == 120.0
+    assert skus["AL9999-PureWhite-130cm"]["global_price_cny"] == 25.0
