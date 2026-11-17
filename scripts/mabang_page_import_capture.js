@@ -102,6 +102,10 @@
   };
   const columnLabel = (column) => clean(column?.title ?? column?.label ?? column?.text)
     .replace(/^[*＊\s]+/, '');
+  // 表头比较统一走 headerKey：去空白/星号、再按包含匹配。真机 CNSC 表头可能带单位
+  // （例如「全球商品价格(CNY)」）或 VXE 分组表头的多余空白，精确相等会漏判。
+  const headerKey = (value) => clean(value).replace(/[*＊\s\u3000]+/g, '');
+  const headerLabelMatches = (label, required) => headerKey(label).includes(headerKey(required));
   const columnField = (column) => clean(column?.field ?? column?.property ?? column?.key);
   const flattenColumns = (columns) => (Array.isArray(columns) ? columns : []).flatMap((column) => [
     column,
@@ -159,6 +163,20 @@
     });
     return [...vueColumns, ...domColumns];
   };
+  const tableDomElement = (table) => {
+    if (!table) return null;
+    return [...document.querySelectorAll('.vxe-table')]
+      .find((element) => (element.__vue__ || element.__vueParentComponent?.proxy) === table) || null;
+  };
+  const tableHeaderLabels = (table) => {
+    if (!table) return [];
+    const labels = tableColumns(table).map(columnLabel).filter(Boolean);
+    const element = tableDomElement(table);
+    const domLabels = [...(element?.querySelectorAll?.('.vxe-header--column') || [])]
+      .map((cell) => clean(cell.textContent))
+      .filter(Boolean);
+    return [...new Set([...labels, ...domLabels])];
+  };
   const renderedTable = (table) => [...document.querySelectorAll('.vxe-table')]
     .find((element) => (element.__vue__ || element.__vueParentComponent?.proxy) === table);
   const renderedRowValues = (table, rowIndex) => {
@@ -196,16 +214,21 @@
     }
     return fields;
   };
+  const fieldForLabel = (fields, label) => {
+    if (own(fields, label)) return fields[label];
+    const match = Object.keys(fields).find((candidate) => headerLabelMatches(candidate, label));
+    return match ? fields[match] : '';
+  };
   const semanticValue = (row, fields, labels, fallbackKeys = [], rendered = {}) => {
     for (const label of labels) {
-      const field = fields[label];
+      const field = fieldForLabel(fields, label);
       if (field && own(row, field)) {
         const value = row[field];
         if (clean(value)) return value;
       }
     }
     for (const label of labels) {
-      const field = fields[label];
+      const field = fieldForLabel(fields, label);
       const value = renderedValue(rendered, field);
       if (clean(value)) return value;
     }
@@ -214,9 +237,23 @@
   const findTransactionTable = (detailVm) => {
     const transactionRef = detailVm?.$refs?.transactionInformationModuleRef;
     const transactionTable = transactionRef?.$refs?.tradeInfoTableRef;
-    if (Array.isArray(transactionTable?.tableData)) return transactionTable;
-    return [...document.querySelectorAll('.vxe-table')].map((element) => element.__vue__)
-      .find((vm) => Array.isArray(vm?.tableData) && vm.tableData.length);
+    const hasCnscColumns = (table) => tableHeaderLabels(table)
+      .some((label) => headerLabelMatches(label, '全球商品价格'));
+    // CNSC 页面在交易信息里同时渲染「SKU 网格」和「站点价格矩阵」两张 vxe 表，ref 有可能
+    // 指向价格矩阵。按表头（全球商品价格）认 SKU 网格，和保存执行器同一判据；页面不是
+    // CNSC 时 hasCnscColumns 全为 false，行为不变。
+    const candidates = [...document.querySelectorAll('.vxe-table')]
+      .map((element) => ({
+        element,
+        table: element.__vue__ || element.__vueParentComponent?.proxy,
+      }))
+      .filter(({ table }) => Array.isArray(table?.tableData) && table.tableData.length);
+    const cnscGrid = candidates.find(({ table }) => hasCnscColumns(table));
+    if (Array.isArray(transactionTable?.tableData)) {
+      if (hasCnscColumns(transactionTable)) return transactionTable;
+      return cnscGrid?.table || transactionTable;
+    }
+    return cnscGrid?.table || candidates[0]?.table;
   };
   const readSeparateSitePriceRows = (globalTable) => {
     const tables = [...document.querySelectorAll('.vxe-table')]
@@ -258,7 +295,7 @@
     const sitePriceFields = resolveSitePriceFields(table);
     const separateSiteRows = readSeparateSitePriceRows(table);
     const cnscGrid = ['全球商品价格', '泰国仓库存', '广州仓库存', '菲律宾仓库存']
-      .every((label) => Boolean(fields[label]));
+      .every((label) => Boolean(fieldForLabel(fields, label)));
     return (table?.tableData || []).filter((row) => row && typeof row === 'object').map((row, rowIndex) => {
       const rendered = renderedRowValues(table, rowIndex);
       const base = {
@@ -310,9 +347,20 @@
   };
   const readListingMode = (detailVm) => {
     const table = findTransactionTable(detailVm);
-    const labels = new Set(tableColumns(table).map(columnLabel).filter(Boolean));
     const requiredHeaders = ['全球商品价格', '泰国仓库存', '广州仓库存', '菲律宾仓库存'];
-    const matchedHeaders = requiredHeaders.filter((header) => labels.has(header));
+    // 整页所有 vxe 表头都收进来（Vue 列 + DOM 表头）：有些 CNSC 构建把价格/库存列拆到
+    // 交易信息里的同级表格，只看 ref 那张表会把 CNSC 页误判成本土。
+    const seenHeaders = new Set(tableHeaderLabels(table));
+    for (const element of document.querySelectorAll('.vxe-table')) {
+      const labels = [
+        ...tableHeaderLabels(element.__vue__ || element.__vueParentComponent?.proxy),
+        ...[...(element.querySelectorAll?.('.vxe-header--column') || [])].map((cell) => clean(cell.textContent)),
+      ];
+      for (const label of labels) if (label) seenHeaders.add(label);
+    }
+    const matchedHeaders = requiredHeaders.filter((header) => (
+      [...seenHeaders].some((label) => headerLabelMatches(label, header))
+    ));
     const fallbackHref = `${clean(location.origin)}${clean(location.pathname)}`;
     const locationUrl = new URL(clean(location.href) || fallbackHref, clean(location.origin) || undefined);
     let hashParams = new URL(location.origin).searchParams;
@@ -325,7 +373,11 @@
     const globalParam = locationUrl.searchParams.get('global') === '4' || hashParams.get('global') === '4';
     return {
       listing_mode: globalParam && matchedHeaders.length === requiredHeaders.length ? 'cnsc_global' : 'site',
-      listing_mode_evidence: { global_param: globalParam, matched_headers: matchedHeaders },
+      listing_mode_evidence: {
+        global_param: globalParam,
+        matched_headers: matchedHeaders,
+        seen_headers: [...seenHeaders].slice(0, 40),
+      },
     };
   };
   const readTargetSiteStores = () => {

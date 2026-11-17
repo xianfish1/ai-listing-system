@@ -149,10 +149,12 @@ test('current-page capture detects CNSC from hash and semantic VXE headers witho
   });
 
   assert.equal(result.listing_mode, 'cnsc_global');
-  assert.deepEqual(result.listing_mode_evidence, {
-    global_param: true,
-    matched_headers: ['全球商品价格', '泰国仓库存', '广州仓库存', '菲律宾仓库存'],
-  });
+  assert.equal(result.listing_mode_evidence.global_param, true);
+  assert.deepEqual(
+    result.listing_mode_evidence.matched_headers,
+    ['全球商品价格', '泰国仓库存', '广州仓库存', '菲律宾仓库存'],
+  );
+  assert.ok(result.listing_mode_evidence.seen_headers.includes('全球商品价格'));
   assert.deepEqual(result.sku_rows[0], {
     color: 'A',
     size: 'XS',
@@ -180,8 +182,90 @@ test('ordinary current-page capture remains site mode when neither CNSC signal e
   });
 
   assert.equal(result.listing_mode, 'site');
-  assert.deepEqual(result.listing_mode_evidence, { global_param: false, matched_headers: [] });
+  assert.equal(result.listing_mode_evidence.global_param, false);
+  assert.deepEqual(result.listing_mode_evidence.matched_headers, []);
+  assert.deepEqual(result.listing_mode_evidence.seen_headers, ['尺码', '库存']);
   assert.equal(result.sku_rows[0].stock, 999);
+});
+
+test('CNSC headers are recognized when the trade ref points at the site-price matrix instead of the SKU grid', () => {
+  // 真机上 CNSC 交易信息里有两张 vxe 表：ref 可能指向站点价格矩阵。表头在兄弟表里，
+  // 只看 ref 那张表会误判成本土（global=4 与表头不一致）。
+  const sitePriceColumns = [
+    { field: 'col_20', title: 'TW 折扣价' },
+    { field: 'col_25', title: 'PH 折扣价' },
+  ];
+  const sitePriceRows = [{ col_20: '99', col_25: '120' }];
+  const cnscGridTable = {
+    tableData: [{ col_6: '19.2', col_10: '300', col_12: '0', col_14: '0' }],
+    getColumns: () => [
+      { field: 'col_1', title: '颜色' },
+      { field: 'col_2', title: '尺码' },
+      { field: 'col_6', title: '全球商品价格' },
+      { field: 'col_10', title: '泰国仓库存' },
+      { field: 'col_12', title: '广州仓库存' },
+      { field: 'col_14', title: '菲律宾仓库存' },
+    ],
+  };
+  const source = fs.readFileSync(path.join(__dirname, '../scripts/mabang_page_import_capture.js'), 'utf8');
+  const refTable = { tableData: sitePriceRows, getColumns: () => sitePriceColumns };
+  const detailVm = {
+    $refs: {
+      storeCategory: {
+        storeCategoryInfo: { shopId: 'cnsc-store-1', shopName: '广州小苗服饰有限公司' },
+        categoryInfo: { categoryId: '100244', path: '男装>上衣>T恤', idPath: ['1', '2', '100244'], is_leaf: true },
+        ProductAttributeInfo: { attributesNew: [] },
+      },
+      transactionInformationModuleRef: { $refs: { tradeInfoTableRef: refTable } },
+    },
+    $store: { state: { shopee: {} } },
+  };
+  const gridElement = { className: 'tradeInfoTableRef-table vxe-table', __vue__: cnscGridTable, querySelectorAll: () => [] };
+  const refElement = { className: 'tradeInfoTableRef-table vxe-table', __vue__: refTable, querySelectorAll: () => [] };
+  const parsed = new URL('https://publish.mabangerp.com/publish-ui/#/productDetailShopee?global=4');
+  const context = {
+    URL,
+    window: {},
+    location: { href: parsed.href, origin: parsed.origin, pathname: parsed.pathname, search: parsed.search, hash: parsed.hash },
+    document: {
+      querySelector: (selector) => (selector === '#box1' ? { __vue__: detailVm } : null),
+      querySelectorAll: (selector) => {
+        if (selector === '.vxe-table') return [refElement, gridElement];
+        return [];
+      },
+    },
+  };
+  const capture = vm.runInNewContext(`(${source})`, context);
+  const result = JSON.parse(JSON.stringify(capture({ platform: 'shopee', country: '' })));
+
+  assert.equal(result.listing_mode, 'cnsc_global');
+  assert.deepEqual(
+    result.listing_mode_evidence.matched_headers,
+    ['全球商品价格', '泰国仓库存', '广州仓库存', '菲律宾仓库存'],
+  );
+  assert.equal(result.sku_rows[0].global_price_cny, '19.2');
+  assert.deepEqual(result.sku_rows[0].warehouse_stocks, { TH: '300', CN_GZ: '0', PH: '0' });
+});
+
+test('decorated CNSC headers (units/whitespace) still match and their values are read', () => {
+  const result = executeCapture({
+    href: 'https://publish.mabangerp.com/publish-ui/#/productDetailShopee?global=4',
+    columns: [
+      { field: 'col_6', title: ' 全球商品价格(CNY) ' },
+      { field: 'col_10', title: '泰国仓库存（件）' },
+      { field: 'col_12', title: '广州仓库存(件)' },
+      { field: 'col_14', title: '菲律宾仓库存（件）' },
+    ],
+    rows: [{ col_6: '19.2', col_10: '300', col_12: '0', col_14: '0' }],
+  });
+
+  assert.equal(result.listing_mode, 'cnsc_global');
+  assert.deepEqual(
+    result.listing_mode_evidence.matched_headers,
+    ['全球商品价格', '泰国仓库存', '广州仓库存', '菲律宾仓库存'],
+  );
+  assert.equal(result.sku_rows[0].global_price_cny, '19.2');
+  assert.deepEqual(result.sku_rows[0].warehouse_stocks, { TH: '300', CN_GZ: '0', PH: '0' });
 });
 
 test('an empty CNSC site-picker shell is not treated as a loaded target-store catalog', () => {

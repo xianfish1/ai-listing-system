@@ -95,3 +95,24 @@ test('页面采集器：选中活动没有有效期时也要重采（首采只�
     promotion_options: [{ activity_id: '1', start_at: '', end_at: '', selected: true }],
   }), false);
 });
+
+test('页面采集器：页面类型证据矛盾时重采（表格晚渲染），不是直接失败', () => {
+  const cnscHeaders = ['全球商品价格', '泰国仓库存', '广州仓库存', '菲律宾仓库存'];
+  const conflict = {
+    listing_mode: 'site',
+    listing_mode_evidence: { global_param: true, matched_headers: [] },
+  };
+  assert.equal(collector.listingModeConflict(conflict), true);
+  assert.equal(collector.listingModeConflict({
+    listing_mode_evidence: { global_param: true, matched_headers: cnscHeaders },
+  }), false);
+  assert.equal(collector.listingModeConflict({
+    listing_mode_evidence: { global_param: false, matched_headers: [] },
+  }), false);
+  // 反过来：表头是 CNSC 但 URL 没有 global=4，也是矛盾。
+  assert.equal(collector.listingModeConflict({
+    listing_mode_evidence: { global_param: false, matched_headers: cnscHeaders },
+  }), true);
+  assert.match(SOURCE, /while \(listingModeConflict\(capture\) && listingModeRetries < LISTING_MODE_RETRY_LIMIT\)/);
+  assert.match(SOURCE, /listing_mode_retries: listingModeRetries/);
+});

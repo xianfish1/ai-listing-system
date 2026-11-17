@@ -278,8 +278,31 @@ def test_cnsc_snapshot_requires_both_global_parameter_and_all_cnsc_headers() -> 
     assert "cKey" not in json.dumps(snapshot)
 
     capture["listing_mode_evidence"]["matched_headers"].remove("菲律宾仓库存")
-    with pytest.raises(MabangImportSnapshotError, match="页面类型识别冲突"):
+    capture["listing_mode_evidence"]["seen_headers"] = ["颜色", "尺码", "全球商品价格(CNY)"]
+    with pytest.raises(MabangImportSnapshotError, match="页面类型识别冲突") as error:
         normalize_mabang_capture(capture)
+    assert "缺少表头：菲律宾仓库存" in str(error.value)
+    assert "全球商品价格(CNY)" in str(error.value)
+
+
+def test_cnsc_headers_match_with_units_and_extra_whitespace() -> None:
+    capture = _cnsc_fixture()
+    capture["listing_mode_evidence"]["matched_headers"] = [
+        " 全球商品价格(CNY) ",
+        "泰国仓库存（件）",
+        "广州仓库存(件)",
+        "菲律宾仓库存（件）",
+    ]
+
+    snapshot = normalize_mabang_capture(capture)
+
+    assert snapshot["listing_mode"] == "cnsc_global"
+    assert snapshot["listing_mode_evidence"]["matched_headers"] == [
+        "全球商品价格",
+        "泰国仓库存",
+        "广州仓库存",
+        "菲律宾仓库存",
+    ]
 
 
 def test_cnsc_snapshot_derives_price_tiers_and_uniform_warehouse_defaults() -> None:

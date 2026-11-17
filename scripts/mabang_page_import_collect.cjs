@@ -42,6 +42,11 @@ const PROMOTION_LABELS = [
   '\u4fc3\u9500\u6d3b\u52a8',
   '\u6298\u6263\u6d3b\u52a8',
 ];
+// 交易信息表格是异步渲染的：刚进页面就点采集时，URL 已带 global=4 但表头还没画出来。
+// 证据自相矛盾时短暂重采几次，别让「页面没加载完」直接变成采集失败。
+const LISTING_MODE_RETRY_LIMIT = 4;
+const LISTING_MODE_RETRY_DELAY_MS = 1200;
+const CNSC_HEADER_COUNT = 4;
 
 function parseArgs(argv) {
   const args = { cdpUrl: CDP_DEFAULT, plan: {} };
@@ -161,11 +166,24 @@ function promotionValidityMissing(capture) {
   return !String(selected.start_at || '').trim() || !String(selected.end_at || '').trim();
 }
 
-function readPromotionPageSource() {
-  return fs.readFileSync(PROMOTION_PAGE_PATH, 'utf8');
+/**
+ * 采集证据是否自相矛盾：URL 说是 CNSC（global=4）但没读到 4 个 CNSC 表头，或反过来。
+ *
+ * 这多半是交易信息表格还没渲染完（真机首采常见），所以在采集脚本里重采而不是直接失败；
+ * 重采用尽后仍矛盾，后端会带着「已读到哪些表头」报错，方便定位。
+ */
+function listingModeConflict(capture) {
+  if (!capture || typeof capture !== 'object') return false;
+  const evidence = capture.listing_mode_evidence;
+  if (!evidence || typeof evidence !== 'object') return false;
+  const globalParam = evidence.global_param === true;
+  const matched = Array.isArray(evidence.matched_headers) ? evidence.matched_headers.length : 0;
+  return globalParam !== (matched >= CNSC_HEADER_COUNT);
 }
 
-function runPromotionPage(frame, phase) {
+function readPromotionPageSource() {
+  return fs.readFileSync(PROMOTION_PAGE_PATH, 'utf8');
+}function runPromotionPage(frame, phase) {
   const source = readPromotionPageSource();
   return frame.evaluate(
     ([pageSource, options]) => (0, eval)(`(${pageSource})`)(options),
@@ -213,9 +231,16 @@ async function collectPageImport({ cdpUrl = CDP_DEFAULT, plan = {} } = {}) {
       );
     let capture = null;
     let failure = '';
+    let listingModeRetries = 0;
     let promotionDialog = { attempted: false };
     try {
       capture = await readCapture();
+      // 页面类型证据矛盾（交易信息表格还没渲染完）时短暂重采，别让一次早读变成硬失败。
+      while (listingModeConflict(capture) && listingModeRetries < LISTING_MODE_RETRY_LIMIT) {
+        listingModeRetries += 1;
+        await new Promise((resolve) => setTimeout(resolve, LISTING_MODE_RETRY_DELAY_MS));
+        capture = await readCapture();
+      }
       // 活动列表没读到，或读到了但选中活动没有有效期：点开一次「选择折扣活动」把行
       // 加载出来再采一遍。有效期只在弹窗表格里，回显的选中项永远没有日期。
       promotionDialog.catalog_loaded_before = capture.promotion_catalog_loaded === true;
@@ -275,6 +300,7 @@ async function collectPageImport({ cdpUrl = CDP_DEFAULT, plan = {} } = {}) {
       page_url: target.url,
       product_pages: targets.map((item) => item.url),
       watermark_menu: menu,
+      listing_mode_retries: listingModeRetries,
       promotion_dialog: promotionDialog,
     };
   } finally {
@@ -306,6 +332,7 @@ module.exports = {
   isProductEditUrl,
   promotionCatalogMissing,
   promotionValidityMissing,
+  listingModeConflict,
   readPromotionPageSource,
   openPromotionList,
   closePromotionList,

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from copy import deepcopy
 from typing import Any
 from urllib.parse import urlsplit, urlunsplit
@@ -246,21 +247,60 @@ def snapshot_template_payload(snapshot: dict[str, Any]) -> dict[str, Any]:
     return result
 
 
+def _header_key(value: Any) -> str:
+    return re.sub(r"[*＊\s\u3000]+", "", _text(value))
+
+
+def _header_label_matches(label: Any, required: str) -> bool:
+    """Match a captured column label against a required header.
+
+    Real CNSC pages decorate headers with units or VXE group padding
+    (e.g. ``全球商品价格(CNY)``); exact equality would reject a valid page.
+    """
+    key = _header_key(label)
+    return bool(key) and _header_key(required) in key
+
+
 def _normalize_listing_mode(raw: dict[str, Any]) -> tuple[str, dict[str, Any]]:
     evidence = raw.get("listing_mode_evidence") if isinstance(raw.get("listing_mode_evidence"), dict) else {}
     global_param = evidence.get("global_param") is True
     supplied_headers = _string_list(evidence.get("matched_headers"))
-    matched_headers = [header for header in _CNSC_REQUIRED_HEADERS if header in supplied_headers]
+    matched_headers = [
+        header
+        for header in _CNSC_REQUIRED_HEADERS
+        if any(_header_label_matches(supplied, header) for supplied in supplied_headers)
+    ]
     has_cnsc_headers = len(matched_headers) == len(_CNSC_REQUIRED_HEADERS)
     supplied_mode = _text(raw.get("listing_mode")).lower()
     detected_mode = "cnsc_global" if global_param and has_cnsc_headers else "site"
     if global_param != has_cnsc_headers:
-        raise MabangImportSnapshotError("页面类型识别冲突：global=4 与 CNSC 表头不一致")
+        raise MabangImportSnapshotError(_listing_mode_conflict_message(global_param, matched_headers, evidence))
     if supplied_mode and supplied_mode not in {"site", "cnsc_global"}:
         raise MabangImportSnapshotError("马帮页面刊登模式无效")
     if supplied_mode and supplied_mode != detected_mode:
         raise MabangImportSnapshotError("页面类型识别冲突：采集模式与页面证据不一致")
     return detected_mode, {"global_param": global_param, "matched_headers": matched_headers}
+
+
+def _listing_mode_conflict_message(
+    global_param: bool,
+    matched_headers: list[str],
+    evidence: dict[str, Any],
+) -> str:
+    if global_param:
+        missing = [header for header in _CNSC_REQUIRED_HEADERS if header not in matched_headers]
+        detail = f"缺少表头：{'、'.join(missing)}" if missing else "交易信息表头没读到"
+        seen = _string_list(evidence.get("seen_headers"))[:8]
+        if seen:
+            detail = f"{detail}；已读到：{'、'.join(seen)}"
+        return (
+            f"页面类型识别冲突：global=4 与 CNSC 表头不一致（{detail}）。"
+            "请确认当前页是 CNSC 全球商品编辑页、交易信息表格已展开并加载完，再点采集。"
+        )
+    return (
+        "页面类型识别冲突：global=4 与 CNSC 表头不一致（交易信息已是 CNSC 表头，但页面地址里没有 global=4）。"
+        "请确认当前页是 CNSC 全球商品编辑页后再采集。"
+    )
 
 
 def _normalize_cnsc_sku_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
