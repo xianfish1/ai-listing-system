@@ -121,11 +121,15 @@ def launch_mabang_browser(
             }
         _terminate_collection_chrome(profile_dir, port, process_query_fn=process_query_fn)
         if not _wait_for_cdp_shutdown(base_url, urlopen_fn, sleep_fn=sleep_fn):
-            # 端口还被别人占着（taskkill 失败 / 权限不足）：再起一只只会绑定失败。
-            raise MabangBrowserError(
-                f"CDP 端口 {port} 被其它浏览器占用且无法关闭，请先手动结束占用该端口的 Chrome"
-                "（例如上一次测试或上一版程序残留的浏览器）后重试"
-            )
+            # 前面按 profile/端口命令行匹配不到时（例如别的工具/上一版程序留的 Chrome，
+            # 命令行里没有 --remote-debugging-port），按端口找到占用者再杀一次 chrome.exe。
+            killed = _kill_port_owner_if_chrome(port)
+            if not killed or not _wait_for_cdp_shutdown(base_url, urlopen_fn, sleep_fn=sleep_fn):
+                # 端口还被别人占着（taskkill 失败 / 权限不足 / 不是 Chrome）：再起一只只会绑定失败。
+                raise MabangBrowserError(
+                    f"CDP 端口 {port} 被其它浏览器占用且无法关闭{_cdp_port_owner_hint(port)}，"
+                    "请先手动结束占用该端口的 Chrome（例如上一次测试或上一版程序残留的浏览器）后重试"
+                )
 
     if reuse_running_only:
         # 端口上没有可复用的浏览器（页面导入窗口可能正在重启中）：这时另起一只只会
@@ -526,6 +530,75 @@ def _terminate_collection_chrome(
     for pid in process_ids:
         _kill_process_tree(pid)
     return process_ids
+
+
+def _cdp_port_owner(port: int) -> tuple[str, str]:
+    """Best-effort「谁占着这个端口」→ (pid, 进程名)。"""
+
+    if os.name != "nt":
+        return "", ""
+    try:
+        completed = subprocess.run(
+            ["netstat", "-ano", "-p", "tcp"],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=8,
+            check=False,
+            **no_console_window_kwargs(),
+        )
+    except (OSError, subprocess.SubprocessError):
+        return "", ""
+    owner_pid = ""
+    for line in (completed.stdout or "").splitlines():
+        parts = line.split()
+        if len(parts) < 5 or "LISTENING" not in parts[-2].upper():
+            continue
+        if not parts[1].endswith(f":{port}"):
+            continue
+        owner_pid = parts[-1]
+        break
+    if not owner_pid or not owner_pid.isdigit():
+        return "", ""
+    name = ""
+    try:
+        tasklist = subprocess.run(
+            ["tasklist", "/FI", f"PID eq {owner_pid}", "/FO", "CSV", "/NH"],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=8,
+            check=False,
+            **no_console_window_kwargs(),
+        )
+        match = re.match(r'"([^"]+)"', (tasklist.stdout or "").strip())
+        if match:
+            name = match.group(1)
+    except (OSError, subprocess.SubprocessError):
+        pass
+    return owner_pid, name
+
+
+def _cdp_port_owner_hint(port: int) -> str:
+    pid, name = _cdp_port_owner(port)
+    if not pid:
+        return ""
+    return f"（占用进程 PID={pid}{f'，{name}' if name else ''}）"
+
+
+def _kill_port_owner_if_chrome(port: int) -> bool:
+    """收尾兜底：端口被一只 Chrome 占着（命令行里没有本账号 profile/端口时前面匹配不到）。
+
+    只杀 chrome.exe，绝不碰其它程序；杀完返回 True，调用方再等端口释放。
+    """
+
+    pid, name = _cdp_port_owner(port)
+    if not pid or name.strip().lower() != "chrome.exe":
+        return False
+    _kill_process_tree(int(pid))
+    return True
 
 
 def _wait_for_cdp_shutdown(

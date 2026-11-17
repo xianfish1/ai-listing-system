@@ -65,7 +65,7 @@ const TEXT = Object.freeze({
 });
 
 const PUBLISH_TEXTS = [TEXT.saveAndList, TEXT.list, TEXT.publish, TEXT.submitReview];
-const CDP_DEFAULT = 'http://127.0.0.1:9223';
+const CDP_DEFAULT = 'http://127.0.0.1:18223';
 // Playwright 默认 30s 的连接预算对「已经开了几小时、DOM 很大的马帮刊登页」不够：
 // 现场 2026-09-27 19:0x 实测 connectOverCDP 要 34s，30s 直接报
 // 「browserType.connectOverCDP: Timeout 30000ms exceeded」——这是连接超时，不是页面问题。

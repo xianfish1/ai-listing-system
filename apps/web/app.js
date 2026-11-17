@@ -1445,9 +1445,9 @@ async function saveMabangAccount() {
 function mabangBrowserPort(cdpUrl) {
   try {
     const port = new URL(String(cdpUrl || "")).port;
-    return port || "9223";
+    return port || "18223";
   } catch (_error) {
-    return "9223";
+    return "18223";
   }
 }
 

@@ -25,9 +25,13 @@ TEST_BASE = 19223
 
 
 def _migrated_port(port: int) -> int:
-    """只迁移老端口段 [9223, 19223)：自定义端口与测试端口段一律不动。"""
+    """只迁移老端口段 [9223, 18223)：新基址、自定义端口与测试端口段一律不动。
 
-    if OLD_BASE <= port < TEST_BASE:
+    上界是 NEW_BASE 而不是 TEST_BASE：18223/18224 已经是迁移后的端口，落在
+    [18223, 19223) 里；若按 TEST_BASE 判，重复执行会把 18223 再迁成 27223。
+    """
+
+    if OLD_BASE <= port < NEW_BASE:
         return port - OLD_BASE + NEW_BASE
     return port
 

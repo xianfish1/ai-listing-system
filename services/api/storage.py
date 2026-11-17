@@ -1401,6 +1401,8 @@ def _normalize_legacy_store_shape(data: dict[str, Any], *, migrate_job_snapshots
             changed = True
     if _migrate_mabang_accounts(data):
         changed = True
+    if _migrate_legacy_cdp_ports(data):
+        changed = True
     if _migrate_store_template_accounts(data):
         changed = True
     if _migrate_automation_job_accounts(data):
@@ -3736,6 +3738,70 @@ def _cdp_port_base() -> int:
 
 
 MABANG_CDP_PORT_BASE = _cdp_port_base()
+# 老生产基址 9223 → 18223 的自动迁移：升级后的老库如果账号端口 / worker.cdp_url 还是
+# 9223，启动采集会去抢 9223；那里最容易残留别的 Chrome，于是报「CDP 端口被其它浏览器
+# 占用且无法关闭」。迁移脚本 scripts/migrate_cdp_port_base.py 是手动的，忘了跑就会复发；
+# 这里在读写库时自动迁一次（幂等）。测试/自定义基址（AI_LISTING_CDP_PORT_BASE）不迁。
+_LEGACY_CDP_PORT_BASE = 9223
+_TEST_CDP_PORT_BASE = 19223
+
+
+def _migrated_legacy_cdp_port(port: int) -> int:
+    """只迁老生产段 [9223, 18223)；新基址、自定义端口与测试端口一律不动。
+
+    上界必须是新基址 18223，不能写 19223：否则已经迁好的 18223/18224 会被再迁一次
+    （18223 → 27223），重启一次端口就漂一次。
+    """
+
+    if _LEGACY_CDP_PORT_BASE <= port < 18223:
+        return port - _LEGACY_CDP_PORT_BASE + 18223
+    return port
+
+
+def _migrated_legacy_cdp_url(url: Any) -> str:
+    text = str(url or "").strip()
+    match = re.match(r"^(https?://(?:127\.0\.0\.1|localhost):)(\d+)$", text)
+    if not match:
+        return text
+    port = _migrated_legacy_cdp_port(int(match.group(2)))
+    return f"{match.group(1)}{port}" if port != int(match.group(2)) else text
+
+
+def _migrate_legacy_cdp_ports(data: dict[str, Any]) -> bool:
+    """把老库里的 9223 段 CDP 端口迁到 18223（幂等，自动跑）。
+
+    账号端口、`runtime_configuration.worker.cdp_url` 都可能留着 9223。测试或显式
+    自定义基址（AI_LISTING_CDP_PORT_BASE）时不做迁移，免得把 19223 测试段带进来。
+    """
+
+    if str(os.environ.get("AI_LISTING_CDP_PORT_BASE") or "").strip():
+        return False
+    changed = False
+    for account in data.get("mabang_accounts") or []:
+        if not isinstance(account, dict):
+            continue
+        try:
+            old_port = int(account.get("cdp_port") or 0)
+        except (TypeError, ValueError):
+            continue
+        new_port = _migrated_legacy_cdp_port(old_port)
+        if new_port != old_port:
+            account["cdp_port"] = new_port
+            changed = True
+    runtime = data.get("runtime_configuration")
+    if isinstance(runtime, dict):
+        for group_name in ("worker", "mabang"):
+            group = runtime.get(group_name)
+            if not isinstance(group, dict):
+                continue
+            for key in ("cdp_url", "browser_cdp_url"):
+                if key not in group:
+                    continue
+                migrated = _migrated_legacy_cdp_url(group.get(key))
+                if migrated != group.get(key):
+                    group[key] = migrated
+                    changed = True
+    return changed
 # 同一个账号的并行槽位（slot）整体挪到下一个百位段：2 号槽位 = 18223+100、3 号 = +200。
 # 账号端口本身是 18223 起按账号顺延，槽位 stride 取 100 就保证「账号若干 × 槽位若干」
 # 不会互相撞端口（最多 4 槽位 ⇒ 只用到 18223~18524）。
