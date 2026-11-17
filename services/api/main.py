@@ -1328,7 +1328,6 @@ def _worker_supervisors() -> MultiWorkerSupervisor | None:
     # 却少一套进程/日志/状态；只有真正需要并行（≥2 个目标）才拆进程。
     if len(targets) < 2:
         return None
-    worker_config = config["worker"]
     runtime_dir = settings.DATA_DIR / "worker-runtime"
     if _MULTI_WORKER_SUPERVISOR is None or _MULTI_WORKER_RUNTIME_DIR != runtime_dir:
         accounts_root = runtime_dir / "accounts"
@@ -1338,18 +1337,22 @@ def _worker_supervisors() -> MultiWorkerSupervisor | None:
             slot = int(target.get("slot") or 0)
             target_dir = _worker_target_runtime_dir(accounts_root, target)
             account_runtime = storage.resolve_mabang_account_runtime(account_id, slot=slot)
+            # 每次起 Worker 都重读设置：这个 Supervisor 是常驻对象，闭包捕获的
+            # worker_config 会让「改了 poll/lease 再点重启」仍然套用旧值（现场：
+            # lease_seconds 120→300 后新进程命令行还是 120，执行器超时仍是 480s）。
+            current_worker = storage.get_runtime_configuration()["worker"]
             return WorkerSupervisor(
                 target_dir,
                 command=[
                     sys.executable, "-m", "scripts.automation_worker",
                     "--api-url", _local_api_url(),
-                    "--cdp-url", str(account_runtime.get("cdp_url") or worker_config["cdp_url"]),
+                    "--cdp-url", str(account_runtime.get("cdp_url") or current_worker["cdp_url"]),
                     "--account-id", account_id,
                     "--worker-slot", str(slot),
                     "--worker-id", _worker_target_id(target),
                     "--pending-completion-file", str(_worker_pending_completion_path(target)),
-                    "--poll-seconds", str(worker_config["poll_seconds"]),
-                    "--lease-seconds", str(worker_config["lease_seconds"]),
+                    "--poll-seconds", str(current_worker["poll_seconds"]),
+                    "--lease-seconds", str(current_worker["lease_seconds"]),
                     "--lock-file", str(target_dir / "automation-worker.lock"),
                     # 存活心跳：Supervisor 用它区分「进程活着」和「进程卡死」。
                     "--heartbeat-file", str(target_dir / "worker-heartbeat.json"),
@@ -4682,17 +4685,6 @@ class ApiHandler(BaseHTTPRequestHandler):
             })
             return
 
-        if path.startswith("/api/mabang-page-imports/") and path.endswith("/cancel"):
-            run_id = path.strip("/").split("/")[2]
-            try:
-                result = storage.cancel_mabang_page_import(run_id)
-            except storage.MabangPageImportNotFound as exc:
-                raise ApiRequestError(str(exc), 404) from exc
-            except MabangPageImportError as exc:
-                raise ApiRequestError(str(exc), 422) from exc
-            self._json(result)
-            return
-
         if path.startswith("/api/mabang-page-imports/") and path.endswith("/complete"):
             run_id = path.strip("/").split("/")[2]
             try:
@@ -6534,14 +6526,6 @@ def _warm_store_read_cache() -> None:
 
 def main() -> None:
     storage.ensure_dirs()
-    # 上一次进程遗留的「进行中」页面导入已经失效：先清掉，否则 Worker 起来后
-    # 会以为操作员还在用采集浏览器，一直等（任务全部待领取）。
-    try:
-        cleared = storage.cancel_interrupted_page_imports()
-        if cleared:
-            print(f"Cleared {cleared} interrupted page import session(s) on startup")
-    except Exception as exc:  # noqa: BLE001 - 清理失败不能挡住 API 启动
-        print(f"Clear interrupted page imports failed: {exc}")
     runtime_config = storage.get_runtime_configuration()
     worker_config = runtime_config["worker"]
     initial_host = network_access.resolve_bind_host(runtime_config.get("network") or {})

@@ -65,7 +65,7 @@ const TEXT = Object.freeze({
 });
 
 const PUBLISH_TEXTS = [TEXT.saveAndList, TEXT.list, TEXT.publish, TEXT.submitReview];
-const CDP_DEFAULT = 'http://127.0.0.1:18223';
+const CDP_DEFAULT = 'http://127.0.0.1:9223';
 // Playwright 默认 30s 的连接预算对「已经开了几小时、DOM 很大的马帮刊登页」不够：
 // 现场 2026-09-27 19:0x 实测 connectOverCDP 要 34s，30s 直接报
 // 「browserType.connectOverCDP: Timeout 30000ms exceeded」——这是连接超时，不是页面问题。
@@ -1109,8 +1109,10 @@ async function findCNSCSitePriceTable(frame, plan) {
 async function writeCNSCSitePricesByModel(table, plan) {
   const result = await table.evaluate((element, sites) => {
     const vm = element.__vue__ || (element.__vueParentComponent && element.__vueParentComponent.proxy);
-    const rows = vm && (vm.getTableData ? vm.getTableData().fullData : vm.tableData);
-    if (!Array.isArray(rows) || !rows.length) return { ok: false, reason: 'cnsc_site_price_rows_missing' };
+    const rawRows = vm && (vm.getTableData ? vm.getTableData().fullData : vm.tableData);
+    // VXE 虚拟滚动的 fullData 可能有空洞/undefined 行：先剔除，后面 row.sku 才不会崩。
+    const rows = Array.isArray(rawRows) ? rawRows.filter((row) => row && typeof row === 'object') : [];
+    if (!rows.length) return { ok: false, reason: 'cnsc_site_price_rows_missing' };
     const expectedRows = sites[0]?.rows || [];
     if (rows.length !== expectedRows.length) {
       return { ok: false, reason: 'cnsc_site_price_row_count_mismatch', rows: rows.length };
@@ -1121,7 +1123,7 @@ async function writeCNSCSitePricesByModel(table, plan) {
       const diff = Array.isArray(row.diff_info) ? row.diff_info : null;
       if (!diff) return { ok: false, reason: 'cnsc_site_price_diff_info_missing', sku: String(row.sku || '') };
       for (const site of sites) {
-        const expected = (site.rows || []).find((candidate) => String(candidate.seller_sku) === String(row.sku));
+        const expected = (site.rows || []).find((candidate) => candidate && String(candidate.seller_sku) === String(row.sku));
         if (!expected) {
           missing.push({ sku: String(row.sku || ''), site_code: site.site_code });
           continue;
@@ -1245,7 +1247,9 @@ async function readCNSCSitePriceSnapshot(frame, table, plan) {
     const visible = (node) => node && node.getClientRects().length > 0;
     const mainOnly = (node) => !node.closest('.vxe-table--fixed-left-wrapper, .vxe-table--fixed-right-wrapper');
     const vm = element.__vue__ || (element.__vueParentComponent && element.__vueParentComponent.proxy);
-    const rows = (vm && (vm.getTableData ? vm.getTableData().fullData : vm.tableData)) || [];
+    const rawRows = (vm && (vm.getTableData ? vm.getTableData().fullData : vm.tableData)) || [];
+    // 同 writeCNSCSitePricesByModel：剔除 VXE 虚拟滚动留下的空行，row.sku 才不会崩。
+    const rows = Array.isArray(rawRows) ? rawRows.filter((row) => row && typeof row === 'object') : [];
     // One discount sub-header per site in the main header; post-selection it reads
     // "折扣活动 <activity name>", which is the readback's activity identity.
     const activityHeaders = [...element.querySelectorAll('.vxe-header--column')]
@@ -1423,30 +1427,39 @@ function ownLabelText(value, options = {}) {
 
 // 按"表单项自己的 label"精确匹配。子串匹配会让类目属性「尺寸」撞上物流的
 // 「包裹尺寸」（长/宽/高三个输入框），轻则 field_not_unique，重则把值填错字段。
+// 性能：原来逐项做 count / innerText / isVisible 三次往返，40+ 项的表单**单次扫描**
+// 就要 0.5~3 秒；而每个属性平均要扫 2~3 次（找字段 → 落值 → 回读），一单 20 个属性
+// 光扫描就 150 秒以上（现场 2026-11-18：set_category_attributes 190s）。现在改成
+// 一次 evaluate 在页面里算完，只回传命中的索引；判定条件与原来完全一致。
 async function formItemByOwnLabel(frame, label, options = {}) {
   const wanted = ownLabelText(label, options);
   if (!wanted) return null;
-  const items = frame.locator('.el-form-item');
-  const matches = [];
-  for (let index = 0, count = await items.count().catch(() => 0); index < count; index += 1) {
-    const item = items.nth(index);
-    const own = item.locator(':scope > .el-form-item__label').first();
-    if (!(await own.count().catch(() => 0))) continue;
-    const text = ownLabelText(await own.innerText().catch(() => ''), options);
-    if (text !== wanted) continue;
-    if (!(await isVisible(item))) continue;
-    matches.push(item);
-  }
-  if (matches.length === 1) return matches[0];
-  if (matches.length > 1) {
-    const measured = await Promise.all(matches.map(async (locator) => {
-      const box = await locator.boundingBox();
-      return { locator, area: (box?.width || 99999) * (box?.height || 99999) };
-    }));
-    measured.sort((left, right) => left.area - right.area);
-    return measured[0].locator;
-  }
-  return null;
+  const matches = await frame.evaluate(({ wantedText, loose }) => {
+    const norm = (value) => {
+      let text = String(value || '').replace(/[：:]/g, '').replace(/^[*＊]+/, '');
+      text = text.replace(/[！-～]/g, (ch) => String.fromCharCode(ch.charCodeAt(0) - 0xfee0));
+      if (loose) text = text.replace(/[（(][^）)]*[）)]/g, '');
+      return text.replace(/\s+/g, '').trim();
+    };
+    const visible = (el) => {
+      const style = getComputedStyle(el);
+      const rect = el.getBoundingClientRect();
+      return style.display !== 'none' && style.visibility !== 'hidden' && rect.width > 0 && rect.height > 0;
+    };
+    const found = [];
+    [...document.querySelectorAll('.el-form-item')].forEach((item, index) => {
+      const own = item.querySelector(':scope > .el-form-item__label');
+      if (!own) return;
+      if (norm(own.textContent) !== wantedText) return;
+      if (!visible(item)) return;
+      const rect = item.getBoundingClientRect();
+      found.push({ index, area: (rect.width || 99999) * (rect.height || 99999) });
+    });
+    return found;
+  }, { wantedText: wanted, loose: options.loose === true }).catch(() => []);
+  if (!Array.isArray(matches) || !matches.length) return null;
+  matches.sort((left, right) => left.area - right.area);
+  return frame.locator('.el-form-item').nth(matches[0].index);
 }
 
 // 子串回退的收窄版：只保留"自身 label 以目标文案开头"的表单项。本土属性页上
@@ -1478,7 +1491,15 @@ async function formItemForLabels(frame, labels, options = {}) {
       const item = items.nth(index);
       if (await isVisible(item)) visible.push(item);
     }
-    const candidates = options.loose === true ? await prefixAnchoredItems(visible, label, options) : visible;
+    const candidates = await (async () => {
+      // 前缀锚定只在 site（loose）和 3PF（anchorLabels）启用：子串回退会把「尺寸」匹配到
+      // 物流的「包裹尺寸」（长/宽/高 三个输入框），随后 uniqueField 报 field_not_unique，
+      // 可选属性被跳过、必填属性直接阻断（现场 2026-11-17）。cnsc_global 的上款路径
+      // 保持原样，不受这里影响。
+      if (options.loose !== true && options.anchorLabels !== true) return visible;
+      const anchored = await prefixAnchoredItems(visible, label, options);
+      return anchored.length ? anchored : (options.loose === true ? anchored : visible);
+    })();
     if (candidates.length === 1) return candidates[0];
     if (candidates.length > 1) {
       const measured = await Promise.all(candidates.map(async (locator) => {
@@ -1503,7 +1524,8 @@ async function waitForFormItemForLabels(frame, labels, timeoutMs = 5000, options
 }
 
 async function uniqueField(frame, labels, selector = 'input:not([type="hidden"]),textarea,[contenteditable="true"]', options = {}) {
-  const item = await formItemForLabels(frame, labels, options);
+  // 调用方已经解析过表单项时直接复用，省一次全表扫描（0.5~3s）。
+  const item = options.knownItem || await formItemForLabels(frame, labels, options);
   let candidates = item ? item.locator(selector) : frame.locator(selector);
   const visible = [];
   for (let index = 0, count = await candidates.count(); index < count; index += 1) {
@@ -1511,6 +1533,25 @@ async function uniqueField(frame, labels, selector = 'input:not([type="hidden"])
     if (await isVisible(candidate)) visible.push(candidate);
   }
   if (visible.length !== 1) {
+    // 现场排查用：把这一格里"被当成可见"的输入框逐个记下来，下次再报 field_not_unique
+    // 就能直接看出是撞了别的表单项（包裹尺寸 = 长/宽/高 三个框），还是同一格里真有多个
+    // 可填控件（文本 + 单位下拉之类）——不再靠猜。scoped=false 说明连表单项都没定位到。
+    const inputs = [];
+    for (const candidate of visible.slice(0, 6)) {
+      const info = await candidate.evaluate((node) => ({
+        tag: node && node.tagName ? String(node.tagName).toLowerCase() : '',
+        type: node && node.getAttribute ? String(node.getAttribute('type') || '') : '',
+        placeholder: node && node.getAttribute ? String(node.getAttribute('placeholder') || '').slice(0, 40) : '',
+        readonly: Boolean(node && node.hasAttribute && node.hasAttribute('readonly')),
+        disabled: Boolean(node && node.hasAttribute && node.hasAttribute('disabled')),
+        value: String((node && node.value) || '').slice(0, 40),
+      })).catch(() => null);
+      if (info) inputs.push(info);
+    }
+    attrPickDebug({
+      phase: 'field_ambiguous', field: labels[0], count: visible.length,
+      scoped: Boolean(item), inputs,
+    });
     throw new BlockedError('field_not_unique', { field: labels[0], count: visible.length });
   }
   return visible[0];
@@ -2096,7 +2137,9 @@ async function selectElementOption(frame, labels, values, options = {}) {
     }
     phaseMarkAt = now;
   };
-  const item = await waitForFormItemForLabels(frame, labels, 5000, options);
+  // 调用方（类目属性循环）已经按标签解析过这一格的表单项了：直接复用，省掉每次
+  // 0.5~3 秒的全表扫描（每个属性要扫 2~3 次，一单就是上百秒）。
+  const item = options.knownItem || await waitForFormItemForLabels(frame, labels, 5000, options);
   phase('form_item');
   const targets = values.map((value) => String(value || '')).filter(Boolean);
   const matchesTarget = (selected, target) => selectTextMatches(selected, target);
@@ -2137,9 +2180,58 @@ async function selectElementOption(frame, labels, values, options = {}) {
   while (Date.now() < optionDeadline) {
     for (const value of targets) {
       for (const optionText of selectTextVariants(value)) {
-        const optionLocators = frame.locator('.el-select-dropdown:visible .el-select-dropdown__item').filter({ hasText: optionText });
-        const optionCount = await optionLocators.count();
-        if (optionCount > 1) throw new BlockedError('select_option_not_unique', { field: labels[0], count: optionCount });
+        let optionLocators = frame.locator('.el-select-dropdown:visible .el-select-dropdown__item').filter({ hasText: optionText });
+        let optionCount = await optionLocators.count();
+        // 子串匹配天然会撞车：页面上的选项只渲染英文（快照里是「棉花 (Cotton)」，控件上是
+        // "Cotton"），于是变体 "Cotton" 同时命中「棉花 (Cotton)」和「精梳棉 (Combed Cotton)」，
+        // 以前直接抛 select_option_not_unique（现场：任务 e20a0a34 的材料属性）。这类歧义
+        // 其实可解：文字**完全等于**目标的那一条才是操作员要的，先按整串相等收窄；只有连
+        // 整串相等都不止一条（或一条都没有）才算真歧义，仍然拒绝猜。
+        // 非 3PF（site / cnsc_global）保持原样：命中多条直接判歧义，绝不猜。
+        if (optionCount > 1 && options.anchorLabels !== true) {
+          throw new BlockedError('select_option_not_unique', { field: labels[0], count: optionCount });
+        }
+        if (optionCount > 1 && options.anchorLabels === true) {
+          // 收窄规则：候选的**结构化变体**里有一条与当前搜索词完全相等，才算点名命中。
+          // 例：搜索词 "Cotton" → 「棉花 (Cotton)」的变体含 Cotton（命中）、
+          // 「精梳棉 (Combed Cotton)」只有 Combed Cotton（不命中）。只比整串文字是不够的，
+          // 因为页面渲染的是中英双语「棉花 (Cotton)」而不是纯 "Cotton"（现场 68153398）。
+          const wantedVariants = new Set(
+            selectTextVariants(optionText).map((variant) => compactText(variant).toLocaleLowerCase()),
+          );
+          const seenTexts = [];
+          const exactIndexes = [];
+          for (let index = 0; index < optionCount; index += 1) {
+            const text = cleanText(await optionLocators.nth(index).innerText().catch(() => ''));
+            seenTexts.push(text);
+            const candidateVariants = selectTextVariants(text)
+              .map((variant) => compactText(variant).toLocaleLowerCase());
+            if (candidateVariants.some((variant) => wantedVariants.has(variant))) exactIndexes.push(index);
+          }
+          // 两个面板同时可见时同一个选项会出现两次：文字完全一样就当成一条，取第一个。
+          const exactTexts = new Set(exactIndexes.map((index) => compactText(seenTexts[index]).toLocaleLowerCase()));
+          if (!exactIndexes.length || exactTexts.size > 1) {
+            // 收窄失败 = 命中的几条里没有一条的点名变体与搜索词相等。把变体、全部命中
+            // 文字和"同时可见的下拉面板数"记下来，现场就能确定是真歧义还是面板叠加。
+            const panels = await frame.locator('.el-select-dropdown:visible').count().catch(() => 0);
+            attrPickDebug({
+              phase: 'option_ambiguous', field: labels[0], target: optionText,
+              field_value: value, count: optionCount, panels,
+              candidates: seenTexts.slice(0, 8),
+            });
+            throw new BlockedError('select_option_not_unique', {
+              field: labels[0], count: optionCount, target: optionText,
+              candidates: seenTexts.slice(0, 5), panels,
+            });
+          }
+          const exactIndex = exactIndexes[0];
+          attrPickDebug({
+            phase: 'option_narrowed', field: labels[0], target: optionText,
+            picked: seenTexts[exactIndex], candidates: seenTexts.slice(0, 5),
+          });
+          optionLocators = optionLocators.nth(exactIndex);
+          optionCount = 1;
+        }
         if (optionCount === 1 && await isVisible(optionLocators.first())) {
           // 马帮多选下拉是 toggle：选项已勾选（class 含 selected）时再点一次会把
           // 刚选好的值点掉。现场：重试复用同一详情页（openListingWorkspace 先复用
@@ -2148,7 +2240,9 @@ async function selectElementOption(frame, labels, values, options = {}) {
           // 先读勾选态/标签，已选中就不再点。
           const optionClass = String(await optionLocators.first().getAttribute('class').catch(() => '') || '');
           const optionAriaSelected = String(await optionLocators.first().getAttribute('aria-selected').catch(() => '') || '').toLowerCase();
-          const currentItem = await formItemForLabels(frame, labels, {});
+          // 这一格的表单项上面已经解析出来了（item），不要再按标签全表扫一遍：
+          // formItemForLabels 每次要遍历所有 .el-form-item 读 innerText，单次要 0.5~1.2s。
+          const currentItem = item;
           const preTexts = currentItem ? await selectedTextsForItem(currentItem) : [];
           const alreadyPicked = tagBasedSite
             ? tagBasedEvidence(preTexts, value)
@@ -2174,7 +2268,7 @@ async function selectElementOption(frame, labels, values, options = {}) {
                 clicks: committed.clicks,
               });
             }
-            await closeOpenSelectPanels(frame, (await formItemForLabels(frame, labels, options)) || item, options);
+            await closeOpenSelectPanels(frame, item, options);
             return { value: committed.value, method: 'element_ui_tag' };
           }
           if (!alreadyPicked) {
@@ -2205,13 +2299,20 @@ async function selectElementOption(frame, labels, values, options = {}) {
           }
           const deadline = Date.now() + 5000;
           let stableMatches = 0;
+          let refreshedClass = '';
+          let refreshedAriaSelected = '';
           while (Date.now() < deadline) {
-            const refreshedItem = await formItemForLabels(frame, labels, options);
-            const actualTexts = refreshedItem ? await selectedTextsForItem(refreshedItem) : [];            // 标签是用户可见的真值；选项的勾选 class 是同一状态的第二来源
-            // （标签渲染偶发滞后时，class 仍能证明值已提交进控件）。
-            const refreshedClass = String(await optionLocators.first().getAttribute('class').catch(() => '') || '');
-            const refreshedAriaSelected = String(await optionLocators.first().getAttribute('aria-selected').catch(() => '') || '').toLowerCase();
-            const matched = selectionEvidenceMatches(actualTexts, value, refreshedClass, refreshedAriaSelected);
+            // 用已经解析好的 item，不再每一轮按标签重扫整张表单（单次 0.5~1.2s）。
+            const refreshedItem = item;
+            const actualTexts = refreshedItem ? await selectedTextsForItem(refreshedItem) : [];            // 标签是用户可见的真值；选项的勾选 class 是同一状态的第二来源。
+            // 选项行定位器（`:visible` + hasText）非常贵（现场一次迭代 60s），所以只在
+            // 标签还没刷出来时才去读它——文本命中时结果与老实现完全一致。
+            let matched = selectionEvidenceMatches(actualTexts, value, '', '');
+            if (!matched) {
+              refreshedClass = String(await optionLocators.first().getAttribute('class').catch(() => '') || '');
+              refreshedAriaSelected = String(await optionLocators.first().getAttribute('aria-selected').catch(() => '') || '').toLowerCase();
+              matched = selectionEvidenceMatches(actualTexts, value, refreshedClass, refreshedAriaSelected);
+            }
             stableMatches = matched ? stableMatches + 1 : 0;
             if (stableMatches >= 5) {
               attrPickDebug({
@@ -2231,7 +2332,8 @@ async function selectElementOption(frame, labels, values, options = {}) {
             }
             await new Promise((resolve) => setTimeout(resolve, 100));
           }
-          const diagnosticItem = await formItemForLabels(frame, labels, options);
+          // 诊断兜底同样复用已解析的 item（不再按标签重扫整张表单）。
+          const diagnosticItem = item;
           const diagnosticInput = diagnosticItem ? await valueInputForItem(diagnosticItem) : null;
           const diagnosticTexts = diagnosticItem ? await selectedTextsForItem(diagnosticItem) : [];
           const diagnosticOptions = frame.locator('.el-select-dropdown:visible .el-select-dropdown__item').filter({ hasText: value });
@@ -2306,11 +2408,11 @@ async function selectElementOptionOrCustom(frame, item, labels, values, options 
   }
   if (targets.length && !(await isSelectControl(item))) {
     const text = targets.join(', ');
-    await setField(frame, labels, text, options);
+    await setField(frame, labels, text, { ...options, knownItem: item });
     return { value: text, method: 'text_input' };
   }
   try {
-    return await selectElementOption(frame, labels, values, options);
+    return await selectElementOption(frame, labels, values, { ...options, knownItem: item });
   } catch (error) {
     if (!(error instanceof BlockedError) || error.message !== 'select_option_not_found') throw error;
     for (const value of values) {
@@ -2646,13 +2748,24 @@ async function findFormItemPresent(frame, labels, timeoutMs = 2000, options = {}
 // 尺寸…）折在「显示所有属性」按钮后面。计划里的属性在表单上找不到时先点开一次再找，
 // 否则这些值会被当成"页面没有该属性"静默跳过，刊登里其实是空的。
 // 展开后同一个按钮的文案变成「隐藏所有属性」，用它还原。
-async function expandHiddenCategoryAttributes(frame, timeoutMs = 2000) {
+async function expandHiddenCategoryAttributes(frame, timeoutMs = 2000, options = {}) {
   const deadline = Date.now() + timeoutMs;
+  // 3PF 页面的「显示所有属性」不一定是 el-button--text（也可能是普通按钮/链接/文字），
+  // broad 模式下放宽选择器；仍然只点"自身文字含这段文案"的可见元素，且由深到浅取最内层
+  // （span 和它的父容器都会命中同一条文案，点父容器可能点到别的区域）。
+  const selector = options.broad === true
+    ? 'button.el-button--text, button, .el-button, a, span'
+    : 'button.el-button--text';
   while (Date.now() < deadline) {
-    const toggles = frame.locator('button.el-button--text', { hasText: '显示所有属性' });
+    const toggles = frame.locator(selector, { hasText: '显示所有属性' });
+    const matches = [];
     for (let index = 0, count = await toggles.count().catch(() => 0); index < count; index += 1) {
       const toggle = toggles.nth(index);
       if (!(await isVisible(toggle))) continue;
+      matches.push(toggle);
+    }
+    const toggle = options.broad === true ? matches[matches.length - 1] : matches[0];
+    if (toggle) {
       await toggle.click({ timeout: 5000 }).catch(() => null);
       await new Promise((resolve) => setTimeout(resolve, 500));
       return true;
@@ -2963,9 +3076,14 @@ async function setCategoryAttributes(frame, task, page) {
     // 本土（site）与跨境（cnsc_global / cnsc_3pf）的匹配策略分开：下面这些容错
     // 只作用于本土站点刊登，跨境页保持原样，避免影响已验证过的 CNSC 填单路径。
     const siteMode = normalizeListingMode(task.store?.listing_mode) === LISTING_MODE_SITE;
+    // 跨境本土（3PF）专属的容错开关：这一版所有新容错（标签前缀锚定、选项歧义收窄、
+    // 可选属性失败降级）都只在 3PF 页面启用，cnsc_global / site 的上款路径保持原样。
+    const threePfMode = normalizeListingMode(task.store?.listing_mode) === 'cnsc_3pf';
     // 本土：类目属性下拉按现场证实的交互收尾（多选面板用 Esc 收，保住待提交值）；
     // 跨境页保持原样，改动需要单独验证。
-    const matchOptions = siteMode ? { loose: true, siteMultiSelectHandling: true } : {};
+    const matchOptions = siteMode
+      ? { loose: true, siteMultiSelectHandling: true }
+      : (threePfMode ? { anchorLabels: true } : {});
     let hiddenExpanded = false;
     const skipped = [];
     // 值只能查到"选项 id"、查不到文字的属性（现场：型号被存成 1790002081766）：不填、报出来。
@@ -2974,6 +3092,29 @@ async function setCategoryAttributes(frame, task, page) {
     const customOptionUiFailures = [];
     // 自选值真的走 UI 添加成功的字段（执行详情里能看见"这个值是添加出来的"）。
     const customOptionUiApplied = [];
+    // 可选属性填不进去（页面不唯一/选项找不到/回读对不上）：可选属性不值得阻断整单，
+    // 记成 warning 让草稿照样存下来，同时把原因写进执行详情供人工补填。
+    // 必填属性仍然照旧抛错——缺必填的刊登存下来也是废的。
+    const skippedOptionalFailures = [];
+    // 逐字段落值的统一入口：3PF 页面上可选属性失败降级成 warning，必填属性保持阻断；
+    // 其它流程（site / cnsc_global）完全保持原来的抛错行为。
+    const applyAttributeSafely = async (field, labels, item, values) => {
+      try {
+        return await selectElementOptionOrCustom(frame, item, labels, values, matchOptions);
+      } catch (error) {
+        if (!threePfMode || !(error instanceof BlockedError) || field.required) throw error;
+        const reason = classifyError(error);
+        const details = (error && error.details) || {};
+        skippedOptionalFailures.push({
+          field: labels[0], field_id: String(field.field_id), reason, details,
+        });
+        attrPickDebug({
+          phase: 'optional_attribute_skipped', field: labels[0],
+          field_id: String(field.field_id), reason, details,
+        });
+        return { value: '', method: 'skipped_optional', note: reason };
+      }
+    };
     // 页面上没有枚举的属性（条件 100413、型号 101639…）：判定方式跟"条件"保持一致——
     // 认控件回读值 + 页面表单模型的值，不死等多选 tag，也不去点那个根本不存在的
     // 「添加自选」入口（现场：型号 的下拉里没有这个入口，一点就整条流程失败）。
@@ -3047,6 +3188,27 @@ async function setCategoryAttributes(frame, task, page) {
       }
       attrPickDebug({ phase: 'model_batch_verify', fields: targets.length, confirmed: confirmed.size, ms: Date.now() - verifyStartedAt });
     }
+    // 3PF：马帮默认只渲染必填属性，其余（原产地/图案/季节/风格/领口/推荐年龄…）折在
+    // 「显示所有属性」后面。不在逐字段循环前展开，这些"快照里有值"的可选属性就会被当成
+    // 「页面没有该属性」静默跳过——现场 2026-11-18：20 个有值属性只填了 3 个必填。
+    // 只对 3PF 生效；site 走上面已有的批量模型写入路径，cnsc_global 保持原样。
+    if (threePfMode && !hiddenExpanded) {
+      const expandStartedAt = Date.now();
+      const beforeItems = await frame.locator('.el-form-item').count().catch(() => 0);
+      if (await expandHiddenCategoryAttributes(frame, 3000, { broad: true })) {
+        hiddenExpanded = true;
+        const afterItems = await frame.locator('.el-form-item').count().catch(() => 0);
+        attrPickDebug({
+          phase: 'attributes_expanded', mode: 'cnsc_3pf',
+          ms: Date.now() - expandStartedAt, form_items_before: beforeItems, form_items_after: afterItems,
+        });
+      } else {
+        attrPickDebug({
+          phase: 'attributes_expand_failed', mode: 'cnsc_3pf',
+          ms: Date.now() - expandStartedAt, form_items: beforeItems,
+        });
+      }
+    }
     for (const field of resolvedFields) {
       const optionLabels = (field.option_labels || []).map((value) => String(value || '')).filter(Boolean);
       const labels = [field.label, String(field.field_id)].filter(Boolean);
@@ -3061,10 +3223,10 @@ async function setCategoryAttributes(frame, task, page) {
       // 必填属性则明确报"字段未找到"，而不是退回整页扫描后报一个误导性的
       // field_not_unique（count 会是全页输入框数量）。
       let present = await findFormItemPresent(frame, labels, 2000, matchOptions);
-      if (!present && siteMode && !hiddenExpanded) {
+      if (!present && (siteMode || threePfMode) && !hiddenExpanded) {
         // 只尝试展开一次：展开后仍在的属性才是真的不在表单上。
         hiddenExpanded = true;
-        if (await expandHiddenCategoryAttributes(frame)) {
+        if (await expandHiddenCategoryAttributes(frame, 2000, { broad: threePfMode })) {
           present = await findFormItemPresent(frame, labels, 2000, matchOptions);
         }
       }
@@ -3194,30 +3356,23 @@ async function setCategoryAttributes(frame, task, page) {
         // resolveTemplateAttributeFields 里翻成标签，这里再退回 value_ids 就等于把 id 打上去。
         const value = optionLabels.join(', ');
         if (!value) continue;
-        results[field.field_id] = await selectElementOptionOrCustom(
-          frame,
-          present,
-          labels,
-          [value],
-          matchOptions,
-        );
+        results[field.field_id] = await applyAttributeSafely(field, labels, present, [value]);
         continue;
       }
       // 枚举属性里"值不在选项中"的情况（原产地=Philippines 这类自选值）：
       // selectElementOption 会在找不到选项时改走「添加自填选项」。
-      results[field.field_id] = await selectElementOptionOrCustom(
-        frame,
-        await waitForFormItemForLabels(frame, labels, 5000, matchOptions),
-        labels,
-        optionLabels,
-        matchOptions,
-      );
+      // present 就是上面 findFormItemPresent 已经解析好的那一格，别再按标签重扫一遍。
+      results[field.field_id] = await applyAttributeSafely(field, labels, present, optionLabels);
     }
     emit('stage', {
       stage: 'set_category_attributes',
       ok: true,
       count: Object.keys(results).length,
       skipped_optional: skipped,
+      // 可选属性没填进去：草稿照存，但整单降级成 saved_with_warnings，详情里能看到具体字段和原因。
+      ...(skippedOptionalFailures.length
+        ? { status: 'warning', skipped_optional_failed: skippedOptionalFailures }
+        : {}),
       ...(unresolvedOptionIdFields.length ? { unresolved_option_id: unresolvedOptionIdFields } : {}),
       ...(customOptionUiFailures.length ? { custom_option_ui_failed: customOptionUiFailures } : {}),
       ...(customOptionUiApplied.length ? { custom_option_ui: customOptionUiApplied } : {}),
@@ -6112,6 +6267,9 @@ async function fillSkuGrid(frame, task) {
 
 const CNSC_DOM_COLUMN_DEFINITIONS = Object.freeze([
   { key: 'sku', matches: (title) => title === 'sku' || title === 'sellersku' },
+  // 3PF 页面用单一必填列「库存」代替三仓库存；有这一列就填（optional 表示缺列不算错，
+  // 全球/本土页面本来就没有这列）。
+  { key: 'stock', optional: true, matches: (title) => title === '库存' || title === 'stock' },
   { key: 'global_price', matches: (title) => title.includes('全球商品价格') },
   { key: 'TH', matches: (title) => title.includes('泰国仓库存') },
   { key: 'CN_GZ', matches: (title) => title.includes('广州仓库存') },
@@ -6145,9 +6303,24 @@ function resolveCNSCWarehouseStock(sku, grid, code) {
   return 0;
 }
 
+// 跨境本土（3PF）页面把三个仓库存合成一列 `* 库存`（必填）；值就是 SKU 自己的
+// 总库存（task.sku_grid.skus[].stock），没有才退回三仓之和。留空会让马帮在保存时
+// 报「交易信息 N 必填项未填」，保存被静默拒绝（现场 2026-11-17：70 行全部空 → 70 未填）。
+function resolveCNSCSkuStock(sku, grid) {
+  const direct = Number(sku && sku.stock);
+  if (Number.isFinite(direct) && direct >= 0) return direct;
+  const total = ['TH', 'CN_GZ', 'PH']
+    .map((code) => resolveCNSCWarehouseStock(sku, grid, code))
+    .reduce((sum, value) => sum + value, 0);
+  return total;
+}
+
 function expectedCNSCDomRows(grid) {
-  return (grid?.skus || []).map((sku) => ({
+  // skus 里可能有空洞/空项（任务计划是 JSON 拼出来的）；`sku.sku_code` 在空项上会抛
+  // TypeError，所以先剔掉非对象项，剩下的才参与逐行比对。
+  return (Array.isArray(grid?.skus) ? grid.skus : []).filter((sku) => sku && typeof sku === 'object').map((sku) => ({
     sku: String(sku.sku_code || '').trim(),
+    stock: resolveCNSCSkuStock(sku, grid),
     global_price: sku.global_price_cny,
     TH: resolveCNSCWarehouseStock(sku, grid, 'TH'),
     CN_GZ: resolveCNSCWarehouseStock(sku, grid, 'CN_GZ'),
@@ -6168,6 +6341,14 @@ function buildCNSCDomGridPlan(grid, headers, bodyColumnIds, rowCount, options = 
   for (const definition of CNSC_DOM_COLUMN_DEFINITIONS) {
     const matches = (headers || []).filter((header) => definition.matches(normalizeCNSCDomText(header.text)));
     const bodyColumn = matches.length === 1 ? nextVxeColumnId(vxeColumnId(matches[0].className)) : '';
+    // 可选列（3PF 的单一「库存」）：只有 3PF（warehousesRequired === false）才启用；
+    // 全球/本土页面的列集合不同，原逻辑一字不动。
+    if (definition.optional) {
+      if (!warehousesRequired && bodyColumn && presentBodyColumns.has(bodyColumn)) {
+        columns[definition.key] = bodyColumn;
+      }
+      continue;
+    }
     // 3PF 页面不一定有三仓列（采集模板来的人，有些店只有单一库存）：有就填，没有不拦。
     if (!warehousesRequired && ['TH', 'CN_GZ', 'PH'].includes(definition.key)) {
       if (bodyColumn && presentBodyColumns.has(bodyColumn)) columns[definition.key] = bodyColumn;
@@ -6189,9 +6370,11 @@ function validateCNSCDomGridReadback(snapshot, grid, options = {}) {
   for (let index = 0; index < expectedRows.length; index += 1) {
     const expected = expectedRows[index];
     const actual = rows[index] || {};
+    // expected 理论上不会缺；缺了就跳过这一行，绝不让一次 undefined 读崩掉整次校验。
+    if (!expected) continue;
     const fields = [];
     if (String(actual[plan.columns.sku] || '').trim() !== expected.sku) fields.push('sku');
-    for (const field of ['global_price', 'TH', 'CN_GZ', 'PH']) {
+    for (const field of ['stock', 'global_price', 'TH', 'CN_GZ', 'PH']) {
       // 3PF 没有该列时跳过比对（不把「页面没这列」当成值不一致）。
       if (!plan.columns[field]) continue;
       const actualValue = Number(actual[plan.columns[field]]);
@@ -6261,7 +6444,7 @@ async function fillCNSCSkuGridFromDom(frame, task) {
     for (let index = 0; index < rowNodes.length; index += 1) {
       const row = rowNodes[index];
       const valuesByField = values[index];
-      for (const field of ['sku', 'global_price', 'TH', 'CN_GZ', 'PH']) {
+      for (const field of ['sku', 'stock', 'global_price', 'TH', 'CN_GZ', 'PH']) {
         // 3PF 页面没有的三仓列直接跳过（有列才写）。
         if (!columns[field]) continue;
         const inputs = [...row.querySelectorAll(`.vxe-body--column.${columns[field]} input.el-input__inner`)];
@@ -6572,7 +6755,15 @@ async function validateBeforeSave(frame, task, stages) {
       const rect = element.getBoundingClientRect();
       return style.display !== 'none' && style.visibility !== 'hidden' && rect.width > 0 && rect.height > 0;
     };
+    // 性能：原来对 body 下每个节点都做 visible()（getComputedStyle + getBoundingClientRect，
+    // 每个都强制一次样式/布局计算）再 innerText，Mabang 这种大表单上一次审计要 9 分钟
+    // （现场 2026-11-17：validate_before_save 546s 后才报错）。改成先用 textContent 做
+    // 廉价预筛，只有候选才调 visible() 和 innerText——判定结果与原实现逐字一致。
     const navMissing = [...document.querySelectorAll('body *')]
+      .filter((element) => {
+        const text = String(element.textContent || '').trim();
+        return Boolean(text) && text.length < 40 && /\d\s*\u5fc5\u586b\u9879\u672a\u586b/.test(text);
+      })
       .filter(visible)
       .map((element) => String(element.innerText || '').trim())
       .filter((text) => /^\d+\s*\u5fc5\u586b\u9879\u672a\u586b$/.test(text));
@@ -6582,7 +6773,12 @@ async function validateBeforeSave(frame, task, stages) {
       .filter(Boolean);
     const tables = [...document.querySelectorAll('.vxe-table')].map((element) => element.__vue__).filter(Boolean);
     const table = tables.find((vm) => (vm.tableColumn || []).some((column) => ['sku', 'sellerSku', 'variationSku'].includes(column.field)));
-    const rows = table && table.tableData ? table.tableData : [];
+    // VXE 的 tableData 在虚拟滚动/重渲染时会短暂出现空洞或 undefined 行，后面每处都按
+    // "行对象一定有值"读属性（row.sku / row.sellerSku），一个空行就让整个 evaluate 抛
+    // TypeError：Cannot read properties of undefined (reading 'sku')（现场 2026-11-17）。
+    // 只保留真正的行对象，空行一律丢弃。
+    const rows = (table && Array.isArray(table.tableData) ? table.tableData : [])
+      .filter((row) => row && typeof row === 'object');
     const cnscAudit = { missing_columns: [], value_mismatches: 0, selected_sites: 0, expected_sites: Number(cnsc.expected_sites || 0), auto_publish: false };
     if (cnsc.enabled && !table) cnscAudit.missing_columns = ['sku_table'];
     if (cnsc.enabled && table) {
@@ -6705,8 +6901,18 @@ async function validateBeforeSave(frame, task, stages) {
       const readback = validateCNSCDomGridReadback(snapshot, task.sku_grid || {}, { warehousesRequired: !threePf });
       audit.rows = snapshot.rows.length;
       if (readback.ok) {
-        const plan = buildCNSCDomGridPlan(task.sku_grid || {}, snapshot.headers, snapshot.body_column_ids, snapshot.rows.length);
-        audit.empty_skus = snapshot.rows.filter((row) => !String(row[plan.columns.sku] || '').trim()).length;
+        // 3PF 页面没有三仓列：这里必须跟上面 readback 用同一套 options，否则
+        // buildCNSCDomGridPlan 会因为「缺 TH/CN_GZ/PH 列」返回 {ok:false}（没有
+        // columns），下一行读 plan.columns.sku 就抛
+        // `Cannot read properties of undefined (reading 'sku')` —— 现场 2026-11-17
+        // 连续 6 次跑完 9 分钟后都倒在这一行。
+        const plan = buildCNSCDomGridPlan(
+          task.sku_grid || {}, snapshot.headers, snapshot.body_column_ids, snapshot.rows.length,
+          { warehousesRequired: !threePf },
+        );
+        audit.empty_skus = plan.ok
+          ? snapshot.rows.filter((row) => row && !String(row[plan.columns.sku] || '').trim()).length
+          : 0;
         audit.cnsc.missing_columns = [];
         audit.cnsc.value_mismatches = 0;
       } else if (readback.reason === 'cnsc_required_columns_missing') {
@@ -7351,6 +7557,10 @@ async function runPreSaveAttempt(browser, task, attempt, options = {}) {
           phase: 'stage_timing', stage: failedStage, attempt,
           ms: Date.now() - stageStartedAt, ok: false,
           error: cleanText(error && (error.reason || error.message)).slice(0, 120),
+          // 非 BlockedError（真正的代码 bug）把栈带回来，否则现场只知道一句话不知道在哪一行。
+          ...(error instanceof BlockedError ? {} : {
+            stack: String((error && error.stack) || '').split('\n').slice(0, 6).join(' | ').slice(0, 700),
+          }),
         });
         throw error;
       }
