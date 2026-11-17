@@ -13,7 +13,7 @@
 
 const { chromium } = require('playwright');
 
-const CDP_DEFAULT = 'http://127.0.0.1:9223';
+const CDP_DEFAULT = 'http://127.0.0.1:18223';
 // Same Shopee workspace URL the Python launcher opens; kept in sync with
 // services/api/mabang_browser.py MABANG_NEW_PRODUCT_URL.
 const WORKSPACE_URL_DEFAULT =

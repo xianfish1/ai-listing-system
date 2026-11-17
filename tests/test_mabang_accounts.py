@@ -50,8 +50,8 @@ def test_legacy_store_seeds_one_account_and_claims_its_store_options(monkeypatch
     assert len(accounts) == 1
     assert accounts[0]["login_account"] == "acct-a"
     assert data["mabang_store_options"][0]["account_id"] == accounts[0]["id"]
-    # 端口由系统分配，且只有一个账号时仍是 9223（与旧的全局 cdp_url 一致）
-    assert accounts[0]["cdp_port"] == 9223
+    # 端口由系统分配，且只有一个账号时就是端口基址（测试会话里是 19223 段）
+    assert accounts[0]["cdp_port"] == storage.MABANG_CDP_PORT_BASE
     # 迁出来的账号继续用现网的浏览器目录，避免把已登录的马帮会话丢掉
     assert storage.resolve_mabang_account_runtime(accounts[0]["id"])["profile_dir"].endswith(
         "browser-use-profile"

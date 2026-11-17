@@ -183,7 +183,7 @@ test('parseArgs keeps the defaults and accepts overrides', () => {
     cdpUrl: 'http://127.0.0.1:9333',
     workspaceUrl: autoLogin.WORKSPACE_URL_DEFAULT,
   });
-  assert.equal(autoLogin.CDP_DEFAULT, 'http://127.0.0.1:9223');
+  assert.equal(autoLogin.CDP_DEFAULT, 'http://127.0.0.1:18223');
 });
 
 test('the helper clicks the marketing login entry and has a direct login-page fallback', () => {

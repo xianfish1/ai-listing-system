@@ -17,7 +17,7 @@
  * 等行出现后再采一遍，最后收回弹窗；只展开、不点任何活动。
  *
  * 用法：
- *   node scripts/mabang_page_import_collect.cjs --cdp-url http://127.0.0.1:9223 --plan '{"platform":"shopee","country":"PH"}'
+ *   node scripts/mabang_page_import_collect.cjs --cdp-url http://127.0.0.1:18223 --plan '{"platform":"shopee","country":"PH"}'
  * 结果：
  *   MABANG_PAGE_IMPORT_RESULT {"ok":true,"status":"completed","capture":{...}}
  */
@@ -27,7 +27,7 @@ const path = require('node:path');
 const { chromium } = require('playwright-core');
 
 const RESULT_MARKER = 'MABANG_PAGE_IMPORT_RESULT ';
-const CDP_DEFAULT = 'http://127.0.0.1:9223';
+const CDP_DEFAULT = 'http://127.0.0.1:18223';
 const CDP_CONNECT_TIMEOUT_MS = 90000;
 const CAPTURE_PATH = path.join(__dirname, 'mabang_page_import_capture.js');
 // CNSC 的店铺选择器 / 每站折扣活动默认藏在交互后面：采集前先展开读出（只展开，不选）。

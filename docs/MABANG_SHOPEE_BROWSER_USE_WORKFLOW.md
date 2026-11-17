@@ -298,7 +298,7 @@ cd C:\Users\Administrator\Documents\Codex\2026-06-16\files-mentioned-by-the-user
 Dedicated Chrome CDP endpoint:
 
 ```powershell
-$env:BU_CDP_URL='http://127.0.0.1:9223'
+$env:BU_CDP_URL='http://127.0.0.1:18223'
 ```
 
 Health check:

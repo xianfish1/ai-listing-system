@@ -496,3 +496,50 @@ def test_confirm_with_a_loaded_promotion_catalog_retires_missing_activities() ->
     by_id = {item["activity_id"]: item for item in data["store_promotion_activities"]}
     assert by_id["live-1"]["status"] == "available"
     assert by_id["gone-1"]["status"] == "unresolved"
+
+
+def test_cnsc_3pf_override_rejects_a_site_page() -> None:
+    """操作员选「跨境本土 3PF」但当前页是本土站点商品页：必须报冲突，不能硬落。"""
+    data = _store()
+    data["mabang_page_import_runs"][0]["requested_listing_mode"] = "cnsc_3pf"
+
+    with pytest.raises(MabangPageImportError, match="跨境本土"):
+        stage_page_import(data, "run-1", _capture(), now="2026-11-17T00:01:00Z")
+
+
+def test_cnsc_3pf_override_marks_snapshot_and_keeps_cnsc_fields() -> None:
+    data = _store()
+    data["mabang_page_import_runs"][0]["requested_listing_mode"] = "cnsc_3pf"
+
+    run = stage_page_import(data, "run-1", _cnsc_capture(), now="2026-11-17T00:01:00Z")
+
+    snapshot = run["snapshot"]
+    assert snapshot["listing_mode"] == "cnsc_3pf"
+    assert snapshot["cnsc_store"]["id"] == "cnsc-store-1"
+    assert snapshot["price_tiers"]
+    assert snapshot["warehouse_stock_defaults"] == {"TH": 300, "CN_GZ": 0, "PH": 0}
+
+
+def test_confirm_3pf_import_does_not_update_the_existing_cnsc_template() -> None:
+    """同名店铺/类目下已有 CNSC 模板：3PF 导入要新建，不能改到现有跨境模板。"""
+    data = _store()
+    data["store_templates"] = [{
+        "id": "cnsc-template",
+        "listing_mode": "cnsc_global",
+        "mabang_store_id": "cnsc-store-1",
+        "mabang_category_id": "100244",
+        "status": "active",
+        "version": 7,
+    }]
+    data["mabang_page_import_runs"][0]["requested_listing_mode"] = "cnsc_3pf"
+    stage_page_import(data, "run-1", _cnsc_capture(), now="2026-11-17T00:01:00Z")
+
+    result = confirm_page_import(data, "run-1", now="2026-11-17T00:02:00Z")
+
+    template = result["template"]
+    assert len(data["store_templates"]) == 2
+    assert template["id"] != "cnsc-template"
+    assert template["listing_mode"] == "cnsc_3pf"
+    existing = next(item for item in data["store_templates"] if item["id"] == "cnsc-template")
+    assert existing["version"] == 7
+    assert existing["listing_mode"] == "cnsc_global"

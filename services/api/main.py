@@ -1351,6 +1351,8 @@ def _worker_supervisors() -> MultiWorkerSupervisor | None:
                     "--poll-seconds", str(worker_config["poll_seconds"]),
                     "--lease-seconds", str(worker_config["lease_seconds"]),
                     "--lock-file", str(target_dir / "automation-worker.lock"),
+                    # 存活心跳：Supervisor 用它区分「进程活着」和「进程卡死」。
+                    "--heartbeat-file", str(target_dir / "worker-heartbeat.json"),
                 ],
                 worker_pid_path=target_dir / "automation-worker.lock",
                 working_directory=settings.PROJECT_ROOT,
@@ -1372,7 +1374,7 @@ def _attach_account_worker_activities(
     时代的形状（worker.activity / activity_error / activity_at），界面代码不用分叉。
     """
 
-    activities: list[dict[str, Any]] = []
+    activities: list[tuple[dict[str, Any], dict[str, Any]]] = []
     for row in status.get("workers") or []:
         if not isinstance(row, dict):
             continue
@@ -1380,22 +1382,47 @@ def _attach_account_worker_activities(
         if supervisor is None:
             continue
         activity = _latest_worker_activity(supervisor)
+        heartbeat_status = str(row.get("heartbeat_status") or "")
+        if not activity and heartbeat_status:
+            # 日志还没刷（或日志被清空）时，用心跳里的状态兜底，避免面板只显示「运行中」。
+            activity = {
+                "activity": heartbeat_status,
+                "activity_error": str(row.get("paused_reason") or ""),
+                "activity_job_id": "",
+                "activity_at": str(row.get("heartbeat_at") or ""),
+            }
         if not activity:
             continue
         row.update(activity)
-        activities.append(activity)
+        activities.append((activity, row))
     if activities:
         # 顶层活动取「最值得看的」而不是「最新的」：一个账号在等浏览器/给导入让路，
         # 另一个账号刚报了 idle，界面不该被 idle 盖过去。
-        status.update(
-            max(
-                activities,
-                key=lambda item: (
-                    str(item.get("activity") or "") not in {"", "idle"},
-                    str(item.get("activity_at") or ""),
-                ),
-            )
+        chosen_activity, chosen_row = max(
+            activities,
+            key=lambda pair: (
+                str(pair[0].get("activity") or "") not in {"", "idle"},
+                str(pair[0].get("activity_at") or ""),
+            ),
         )
+        status.update(chosen_activity)
+        # 顶层「卡死」只要任一目标卡死就算：不然一个账号卡死、另一个刚 idle 时，
+        # 面板与「重新领取」按钮会以为整体正常。
+        stale_rows = [row for _, row in activities if row.get("stale")]
+        if stale_rows:
+            status["stale"] = True
+            status["stale_reason"] = str(stale_rows[0].get("stale_reason") or "")
+            status["heartbeat_age_seconds"] = stale_rows[0].get("heartbeat_age_seconds")
+            status["paused_reason"] = str(stale_rows[0].get("paused_reason") or "")
+        else:
+            for key in (
+                "heartbeat_at",
+                "heartbeat_age_seconds",
+                "paused",
+                "paused_reason",
+            ):
+                if key in chosen_row:
+                    status[key] = chosen_row[key]
     return status
 
 
@@ -1420,18 +1447,6 @@ def _retire_legacy_worker() -> None:
         print("Legacy global worker stopped: multi-account workers own every collection browser")
     except Exception as exc:  # noqa: BLE001
         print(f"Legacy global worker stop failed: {exc}", file=sys.stderr)
-
-
-def _target_worker_is_running(multi: "MultiWorkerSupervisor", key: str) -> bool:
-    """这个目标的 Worker 进程是否在跑（读不到状态时按「不在跑」处理，照旧准备浏览器）。"""
-
-    supervisor = multi.get(key)
-    if supervisor is None:
-        return False
-    try:
-        return str(dict(supervisor.status()).get("status") or "") == "running"
-    except Exception:  # noqa: BLE001 - 状态读不出来不该挡住启动
-        return False
 
 
 def _start_workers() -> dict[str, Any]:
@@ -1459,15 +1474,14 @@ def _login_error_detail(login: dict[str, Any]) -> str:
 def _run_account_worker_action(multi: MultiWorkerSupervisor, action: str) -> dict[str, Any]:
     """对每个「账号 × 槽位」的 Worker 执行动作。
 
-    启动类动作先给每个目标准备它自己那只浏览器与登录：准备失败的目标只记录失败、
-    不启动，其他目标照常启动——这正是「单账号登录过期不影响其他账号/槽位」。
+    启动类动作一律**先把进程拉起来**，浏览器与登录只做 best-effort（失败写进
+    `failures[].warning` 与每行的 `warning`）：Worker 自己的首轮预检会拉浏览器并
+    登录（带 60s 冷却 / 120s 超时）。2026-11-17 前这里是「登录没确认就不启动」，
+    结果卡死的旧进程永远换不掉——现场表现为点启动/重启毫无反应。
 
-    `start` / `resume` 对**已经在跑**的目标例外：不重新准备它的浏览器。新建任务或
-    「再次尝试」都会唤醒 Worker（`_wake_worker_for_created_jobs` /
-    `_schedule_retry_worker_wake`），而「准备浏览器」在复用时会清掉那只浏览器里的
-    所有页面（`_close_mabang_browser_pages`）再开一张新建刊登页 —— 在途任务正在填的
-    页面就这么被顶掉了。已经在跑的 Worker 不需要这份准备：它自己的启动预检与掉线恢复
-    会处理 CDP/登录（`resume` 对运行中的进程本来也是空操作）。
+    `start` / `resume` 对**已经在跑且心跳正常**的目标只做空操作：重新准备浏览器
+    会清掉那只浏览器里的所有页面（`_close_mabang_browser_pages`）再开一张新建
+    刊登页，把在途任务正在填的页面顶掉。心跳过期的目标必须按 restart 处理。
     """
 
     if action not in {"start", "pause", "resume", "stop", "restart"}:
@@ -1482,28 +1496,25 @@ def _run_account_worker_action(multi: MultiWorkerSupervisor, action: str) -> dic
             key = str(target.get("key") or "")
             account_id = str(target.get("account_id") or "")
             slot = int(target.get("slot") or 0)
-            if action in {"start", "resume"} and _target_worker_is_running(multi, key):
+            status = dict(_safe_worker_status(multi, key))
+            if action in {"start", "resume"} and str(status.get("status") or "") == "running" and not status.get("stale"):
                 preparations[key] = {"ok": True, "skipped": "already_running"}
                 ready.append(key)
                 continue
-            try:
-                preparation = _prepare_worker_browser_login(account_id, slot=slot)
-            except MabangBrowserError as exc:
-                failures.append({"account_id": account_id, "slot": slot, "error": str(exc)[:300]})
-                continue
+            # 浏览器/登录准备只作为「附加信息」：进程必须先起来，Worker 自己会在
+            # 启动预检里拉浏览器并登录（带冷却与超时）。准备失败绝不能再挡住启动，
+            # 否则「点启动/重启没反应」就是现在的现场。
+            preparation = _best_effort_worker_browser_login(account_id, slot=slot)
             preparations[key] = preparation
-            if preparation.get("ok"):
-                ready.append(key)
-                continue
-            login = preparation.get("auto_login") or {}
-            failures.append(
-                {
-                    "account_id": account_id,
-                    "slot": slot,
-                    "error": f"马帮登录未确认：{str(login.get('status') or 'failed')}"
-                    f"{_login_error_detail(login)}",
-                }
-            )
+            if not preparation.get("ok"):
+                failures.append(
+                    {
+                        "account_id": account_id,
+                        "slot": slot,
+                        "warning": str(preparation.get("warning") or "马帮登录未确认"),
+                    }
+                )
+            ready.append(key)
 
     workers: list[dict[str, Any]] = []
     for key in ready:
@@ -1525,22 +1536,22 @@ def _run_account_worker_action(multi: MultiWorkerSupervisor, action: str) -> dic
             if key in preparations:
                 row["auto_login"] = preparations[key].get("auto_login")
                 row["browser_mode"] = preparations[key].get("browser_mode")
+                if not preparations[key].get("ok"):
+                    row["warning"] = str(preparations[key].get("warning") or "马帮登录未确认")
             workers.append(row)
         except Exception as exc:  # noqa: BLE001 - 单个目标失败不影响其他目标
             workers.append(
                 {"key": key, "account_id": account_id, "slot": slot, "ok": False, "error": str(exc)[:300]}
             )
 
-    if not workers and failures:
-        # 全部目标都没准备好：保持旧的「登录未确认」失败语义，前端能看到原因。
-        raise RuntimeError(str(failures[0].get("error") or "马帮登录未确认"))
     return {"ok": True, "action": action, "workers": workers, "failures": failures}
 
 
 def _start_worker_targets(target_keys: list[str]) -> dict[str, Any]:
     """只启动指定目标（槽位数调大后，新槽位不该等操作员再点一次启动）。
 
-    已经在跑的目标不动：重新准备浏览器可能把它正在填的页面顶掉。
+    已经在跑且心跳正常的目标不动（重新准备浏览器会顶掉在途页面）；心跳过期的
+    目标走 restart，先结束卡死进程再起新的。
     """
 
     multi = _worker_supervisors()
@@ -1557,31 +1568,20 @@ def _start_worker_targets(target_keys: list[str]) -> dict[str, Any]:
         supervisor = multi.get(key)
         if supervisor is None:
             continue
-        try:
-            status = dict(supervisor.status())
-            if str(status.get("status") or "") == "running":
-                workers.append({"key": key, "account_id": account_id, "slot": slot, "ok": True, **status})
-                continue
-            preparation = _prepare_worker_browser_login(account_id, slot=slot)
-        except MabangBrowserError as exc:
-            failures.append({"account_id": account_id, "slot": slot, "error": str(exc)[:300]})
+        status = _safe_worker_status(multi, key)
+        running = str(status.get("status") or "") == "running"
+        if running and not status.get("stale"):
+            workers.append({"key": key, "account_id": account_id, "slot": slot, "ok": True, **status})
             continue
-        except Exception as exc:  # noqa: BLE001 - 单目标失败不影响其他目标
-            failures.append({"account_id": account_id, "slot": slot, "error": str(exc)[:300]})
-            continue
+        # 卡死（心跳过期）的进程要先杀掉再起：它占着 Worker 锁，直接 start 只会
+        # 让新进程立刻以 already_running 退出。
+        preparation = _best_effort_worker_browser_login(account_id, slot=slot)
         if not preparation.get("ok"):
-            login = preparation.get("auto_login") or {}
             failures.append(
-                {
-                    "account_id": account_id,
-                    "slot": slot,
-                    "error": f"马帮登录未确认：{str(login.get('status') or 'failed')}"
-                    f"{_login_error_detail(login)}",
-                }
+                {"account_id": account_id, "slot": slot, "warning": str(preparation.get("warning") or "")}
             )
-            continue
         try:
-            outcome = dict(supervisor.start())
+            outcome = dict(supervisor.restart() if status.get("stale") else supervisor.start())
             workers.append(
                 {
                     "key": key,
@@ -1590,6 +1590,7 @@ def _start_worker_targets(target_keys: list[str]) -> dict[str, Any]:
                     "ok": True,
                     "auto_login": preparation.get("auto_login"),
                     "browser_mode": preparation.get("browser_mode"),
+                    **({"warning": str(preparation.get("warning") or "")} if not preparation.get("ok") else {}),
                     **outcome,
                 }
             )
@@ -1687,12 +1688,25 @@ def _worker_wake_plan(
             str(target.get("key") or ""): multi.get(str(target.get("key") or ""))
             for target in targets
         }
-        running = sum(
-            1
-            for supervisor in supervisors.values()
-            if supervisor is not None and str(supervisor.status().get("status") or "") == "running"
-        )
+        running = 0
+        stale_keys: list[str] = []
+        for key, supervisor in supervisors.items():
+            if supervisor is None:
+                continue
+            status = supervisor.status()
+            if str(status.get("status") or "") != "running":
+                continue
+            if status.get("stale"):
+                # 心跳过期：进程还在但已经卡死，必须重启而不是当成「已有一个在跑」。
+                stale_keys.append(key)
+            else:
+                running += 1
         need = min(pending, len(targets)) - running
+        for key in stale_keys:
+            if need <= 0:
+                break
+            keys.append(key)
+            need -= 1
         for target in targets:
             if need <= 0:
                 break
@@ -1700,7 +1714,8 @@ def _worker_wake_plan(
             supervisor = supervisors.get(key)
             if supervisor is None or _supervisor_manual_hold_at(supervisor):
                 continue
-            if str(supervisor.status().get("status") or "") == "running":
+            status = supervisor.status()
+            if str(status.get("status") or "") == "running" and not status.get("stale"):
                 continue
             keys.append(key)
             need -= 1
@@ -1725,9 +1740,12 @@ def _wake_workers_for_pending_jobs(*, extra_accounts: dict[str, int] | None = No
         supervisor = _worker_supervisor()
         if _supervisor_manual_hold_at(supervisor):
             return {"ok": True, "action": "held", "keys": []}
-        if str(supervisor.status().get("status") or "") == "running":
+        current = supervisor.status()
+        if str(current.get("status") or "") == "running" and not current.get("stale"):
             return {"ok": True, "action": "already_running", "keys": [""]}
-        return {"ok": True, "action": "start", "keys": [""], "outcome": _run_worker_action("start")}
+        # 卡死的 running 必须重启（start 会被旧进程的 Worker 锁挡回 already_running）。
+        action = "restart" if current.get("stale") else "start"
+        return {"ok": True, "action": action, "keys": [""], "outcome": _run_worker_action(action)}
     keys = _worker_wake_plan(multi, extra_accounts=extra_accounts)
     if not keys:
         return {"ok": True, "action": "no_work", "keys": []}
@@ -2031,6 +2049,7 @@ def _worker_supervisor() -> WorkerSupervisor:
         "--poll-seconds", str(config["poll_seconds"]),
         "--lease-seconds", str(config["lease_seconds"]),
         "--lock-file", str(runtime_dir / "automation-worker.lock"),
+        "--heartbeat-file", str(runtime_dir / "worker-heartbeat.json"),
     ]
     _WORKER_SUPERVISOR = WorkerSupervisor(
         runtime_dir,
@@ -2185,6 +2204,40 @@ def _prepare_worker_browser_login(account_id: str | None = None, *, slot: int = 
     return result
 
 
+def _best_effort_worker_browser_login(account_id: str | None = None, *, slot: int = 0) -> dict[str, Any]:
+    """准备浏览器 + 登录，但失败只返回 warning，绝不阻止 Worker 启动。
+
+    启动/重启必须先让进程跑起来：Worker 自己的首轮预检会拉浏览器并登录（带 60s
+    冷却与 120s 超时），而 API 侧这层只要不抛错就行。以前这里失败会 `continue`，
+    结果卡死的旧进程永远不重启——「点启动/重启没反应」的根因。
+    """
+
+    try:
+        preparation = _prepare_worker_browser_login(account_id, slot=slot)
+    except MabangBrowserError as exc:
+        return {"ok": False, "warning": f"自动化浏览器未就绪：{str(exc)[:280]}"}
+    except Exception as exc:  # noqa: BLE001 - 准备失败不阻塞启动
+        return {"ok": False, "warning": f"准备自动化浏览器失败：{str(exc)[:280]}"}
+    if preparation.get("ok"):
+        return preparation
+    login = preparation.get("auto_login") or {}
+    return {
+        **preparation,
+        "ok": False,
+        "warning": f"马帮登录未确认：{str(login.get('status') or 'failed')}{_login_error_detail(login)}",
+    }
+
+
+def _safe_worker_status(multi: "MultiWorkerSupervisor", key: str) -> dict[str, Any]:
+    supervisor = multi.get(str(key or ""))
+    if supervisor is None:
+        return {}
+    try:
+        return dict(supervisor.status())
+    except Exception:  # noqa: BLE001 - 状态读失败按「没在跑」处理
+        return {}
+
+
 def _run_worker_action(action: str) -> dict[str, Any]:
     """Run a Worker lifecycle action, gating active states on Mabang login."""
 
@@ -2194,32 +2247,34 @@ def _run_worker_action(action: str) -> dict[str, Any]:
     if multi is not None:
         return _run_account_worker_action(multi, action)
     supervisor = _worker_supervisor()
-    # 「启动 / 恢复」在进程已经在跑时都是空操作。恢复分支以前还会先准备浏览器 +
-    # 探测马帮登录（几秒到几十秒）；连点「再次尝试」时 N 个请求会先后撞在同一只
-    # 浏览器上，现场表现为界面卡顿、在途页面被顶掉。已经在跑就直接返回状态。
+    current: dict[str, Any] = {}
     if action in {"start", "resume"}:
         status_fn = getattr(supervisor, "status", None)
         if callable(status_fn):
             current = status_fn()
             activity = _latest_worker_activity(supervisor)
-            if current.get("status") == "running":
+            # 心跳过期 = 进程活着但卡死：不能再回 already_running，必须走重启。
+            if current.get("status") == "running" and not current.get("stale"):
                 return {**current, **activity, "already_running": True}
+    warnings: list[str] = []
     preparation: dict[str, Any] | None = None
     if action in {"start", "resume", "restart"}:
-        preparation = _prepare_worker_browser_login()
+        # 先启动进程；浏览器/登录只做 best-effort（Worker 自己会重试并上报原因）。
+        # 以前这里登录失败就 raise，卡死的旧进程永远换不掉。
+        preparation = _best_effort_worker_browser_login()
         if not preparation.get("ok"):
-            login = preparation.get("auto_login") or {}
-            status = str(login.get("status") or "failed")
-            error = str(login.get("error") or "")
-            detail = f" - {error}" if error else ""
-            raise RuntimeError(f"马帮登录未确认：{status}{detail}")
-    operation = _restart_worker_supervisor if action == "restart" else getattr(supervisor, action)
+            warnings.append(str(preparation.get("warning") or "马帮登录未确认"))
+    if action == "restart" or (action in {"start", "resume"} and current.get("stale")):
+        operation = _restart_worker_supervisor
+    else:
+        operation = getattr(supervisor, action)
     result = operation()
     if preparation is not None:
         result = {
             **result,
             "browser_mode": preparation.get("browser_mode"),
             "auto_login": preparation.get("auto_login"),
+            **({"warnings": warnings} if warnings else {}),
         }
     return result
 
@@ -4546,7 +4601,7 @@ class ApiHandler(BaseHTTPRequestHandler):
             # 过去这条路由必然 422）。采集器只读：打开「添加水印」读目录 + 图片范围结构，
             # 绝不点任何水印选项，读完把菜单收回去。
             collect_result = run_store_watermark_collect(
-                cdp_url=str(payload.get("cdp_url") or "").strip() or "http://127.0.0.1:9223",
+                cdp_url=str(payload.get("cdp_url") or "").strip() or "http://127.0.0.1:18223",
             )
             if not collect_result.get("ok"):
                 message = str(collect_result.get("error") or "读取马帮水印目录失败")
@@ -4594,7 +4649,7 @@ class ApiHandler(BaseHTTPRequestHandler):
             if not cdp_url:
                 cdp_url = str(
                     storage.resolve_mabang_account_runtime(account_id).get("cdp_url")
-                    or "http://127.0.0.1:9223"
+                    or "http://127.0.0.1:18223"
                 )
             collect_result = run_store_promotion_collect(store_id, cdp_url=cdp_url)
             if not collect_result.get("ok"):
@@ -5351,7 +5406,7 @@ class ApiHandler(BaseHTTPRequestHandler):
                 storage.resolve_mabang_account_runtime(account_id).get("cdp_url") or ""
             )
             collect_result = run_store_watermark_collect(
-                cdp_url=account_cdp_url or "http://127.0.0.1:9223"
+                cdp_url=account_cdp_url or "http://127.0.0.1:18223"
             )
             if not collect_result.get("ok"):
                 storage.record_store_watermark_collect_failure(

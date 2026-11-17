@@ -22,7 +22,11 @@ def test_cdp_port_is_assigned_by_the_system(monkeypatch, tmp_path) -> None:
     b = storage.create_mabang_account({"name": "B", "login_account": "acct-b"})
     c = storage.create_mabang_account({"name": "C", "login_account": "acct-c"})
 
-    assert [item["cdp_port"] for item in (a, b, c)] == [9223, 9224, 9225]
+    assert [item["cdp_port"] for item in (a, b, c)] == [
+        storage.MABANG_CDP_PORT_BASE,
+        storage.MABANG_CDP_PORT_BASE + 1,
+        storage.MABANG_CDP_PORT_BASE + 2,
+    ]
     assert len({item["cdp_port"] for item in (a, b, c)}) == 3
     # 数据目录也按账号派生，天然互相隔离
     runtime_dirs = {
@@ -44,8 +48,8 @@ def test_bad_port_value_never_blocks_saving(monkeypatch, tmp_path) -> None:
         {"name": "B", "login_account": "acct-b", "cdp_port": "not-a-port"}
     )
 
-    assert a["cdp_port"] == 9223
-    assert b["cdp_port"] == 9224
+    assert a["cdp_port"] == storage.MABANG_CDP_PORT_BASE
+    assert b["cdp_port"] == storage.MABANG_CDP_PORT_BASE + 1
 
 
 def test_clearing_a_port_reassigns_one(monkeypatch, tmp_path) -> None:
@@ -57,6 +61,6 @@ def test_clearing_a_port_reassigns_one(monkeypatch, tmp_path) -> None:
 
     updated = storage.update_mabang_account(a["id"], {"cdp_port": 0})
 
-    # 清空端口不会让账号失去端口：重新分配当前最小的空闲端口（别的账号占着 9224）。
-    assert updated["cdp_port"] == 9223
-    assert updated["cdp_port"] not in {9224}
+    # 清空端口不会让账号失去端口：重新分配当前最小的空闲端口（别的账号占着 base+1）。
+    assert updated["cdp_port"] == storage.MABANG_CDP_PORT_BASE
+    assert updated["cdp_port"] not in {storage.MABANG_CDP_PORT_BASE + 1}

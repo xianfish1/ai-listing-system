@@ -985,17 +985,27 @@ function renderRuntimeSettings() {
   // 按需启动下「已停止」是正常状态（有任务会自动唤醒），不该显示成告警。
   const presentation = WORKER_STATUS_PRESENTATION[worker.status] || WORKER_STATUS_PRESENTATION.unknown;
   const expectedOff = onDemand && worker.status === "stopped" && !worker.manual_hold_at;
-  const workerPresentation = expectedOff ? { label: "已关闭（按需启动）", tone: "idle" } : presentation;
+  const expectedOffPresentation = expectedOff ? { label: "已关闭（按需启动）", tone: "idle" } : null;
+  // 进程还在但心跳停了 = 卡死：必须显眼，并给出可执行动作（重启）。
+  const stalePresentation = worker.status === "running" && worker.stale
+    ? { label: "疑似卡死（心跳超时）", tone: "failed" }
+    : null;
+  const effectiveWorkerPresentation = stalePresentation || expectedOffPresentation || presentation;
   const workerStatus = $("settings-worker-status");
   const activityPresentation = WORKER_ACTIVITY_PRESENTATION[worker.activity];
+  const pausedReason = worker.paused_reason || (worker.activity === "paused" ? worker.activity_error : "");
   const activitySuffix = activityPresentation ? ` · ${activityPresentation.label}` : "";
   const activityAt = formatWorkerActivityAt(worker.activity_at);
+  const heartbeatSuffix = Number.isFinite(Number(worker.heartbeat_age_seconds))
+    ? ` · 心跳 ${Math.round(Number(worker.heartbeat_age_seconds))}s 前${worker.stale ? "（超时）" : ""}`
+    : "";
+  const pausedSuffix = pausedReason ? ` · 暂停原因：${String(pausedReason).slice(0, 60)}` : "";
   const onDemandSuffix = onDemand
     ? ` · 按需启动${worker.idle_shutdown_minutes ? `（空闲 ${worker.idle_shutdown_minutes} 分钟自动关闭）` : "（不自动关闭）"}`
     : "";
   const holdSuffix = worker.manual_hold_at ? " · 已手动停止（不会自动唤醒，新任务或点「启动」才恢复）" : "";
-  const workerDetails = `${workerPresentation.label}${worker.pid ? `（PID ${worker.pid}）` : ""}${activitySuffix}${activityAt ? ` · 最近活动 ${activityAt}` : ""}${onDemandSuffix}${holdSuffix}${worker.last_error ? ` · ${worker.last_error}` : ""}`;
-  workerStatus.className = `worker-status worker-status-${workerPresentation.tone}`;
+  const workerDetails = `${effectiveWorkerPresentation.label}${worker.pid ? `（PID ${worker.pid}）` : ""}${activitySuffix}${pausedSuffix}${heartbeatSuffix}${activityAt ? ` · 最近活动 ${activityAt}` : ""}${onDemandSuffix}${holdSuffix}${worker.last_error ? ` · ${worker.last_error}` : ""}`;
+  workerStatus.className = `worker-status worker-status-${effectiveWorkerPresentation.tone}`;
   workerStatus.innerHTML = `<span class="worker-status-dot" aria-hidden="true"></span><span>${escapeHtml(workerDetails)}</span>`;
   // 多账号/多槽位并行：每个目标一个 Worker，各自独立的进程/日志/CDP 端口。
   const workerAccounts = $("settings-worker-accounts");
@@ -1008,7 +1018,7 @@ function renderRuntimeSettings() {
         const rowActivity = WORKER_ACTIVITY_PRESENTATION[row.activity];
         const slot = Number(row.slot || 0);
         const label = `${account?.name || row.account_id}${slot > 0 ? ` · 并行槽位 ${slot + 1}` : ""}`;
-        const details = [presentation.label, rowActivity ? rowActivity.label : "", row.pid ? `PID ${row.pid}` : "", row.manual_hold_at ? "已手动停止（不会自动唤醒）" : "", row.last_error || ""].filter(Boolean).join(" · ");
+        const details = [presentation.label, row.stale ? "疑似卡死（心跳超时）" : "", rowActivity ? rowActivity.label : "", row.paused_reason ? `暂停：${String(row.paused_reason).slice(0, 40)}` : "", row.pid ? `PID ${row.pid}` : "", row.manual_hold_at ? "已手动停止（不会自动唤醒）" : "", row.last_error || ""].filter(Boolean).join(" · ");
         return `<div class="settings-connection-row"><div><strong>${escapeHtml(label)}</strong><span>${escapeHtml(details)}</span></div><div class="settings-connection-actions"><button type="button" class="secondary" data-worker-logs-account="${escapeHtml(row.account_id || "")}" data-worker-logs-slot="${slot}">日志</button></div></div>`;
       }).join("")
       : '<p class="muted">单 Worker 模式：只有一个进程，按任务自动切换账号；新增第二个账号或把「每账号并行槽位」调到 2 就会按账号 × 槽位拆分进程并行运行。</p>';
@@ -6817,7 +6827,7 @@ function cnscConfigurationLabel(field) {
 }
 
 function cnscTemplateMissingFields(template) {
-  if (String(template?.listing_mode || "site").toLowerCase() !== "cnsc_global") return [];
+  if (!isCnscPageMode(template)) return [];
   const missing = new Set((template.missing_configuration || []).map(String).filter(Boolean));
   const targets = Array.isArray(template.target_site_stores) ? template.target_site_stores : [];
   const tiers = Array.isArray(template.price_tiers) ? template.price_tiers : [];
@@ -6873,7 +6883,7 @@ function renderStoreTemplateTable() {
     return;
   }
   for (const template of templates) {
-    const cnsc = String(template.listing_mode || "site").toLowerCase() === "cnsc_global";
+    const cnsc = isCnscPageMode(template);
     // Decision A: never block the copy checkbox. Trust the backend-authoritative
     // missing_configuration (1d) for the non-blocking badge; recompute is offline fallback.
     const cnscMissing = cnsc
@@ -6892,7 +6902,7 @@ function renderStoreTemplateTable() {
     const tr = document.createElement("tr");
     tr.innerHTML = `
       <td><input type="checkbox" data-store-template-select="${escapeHtml(template.id)}" ${state.selectedStoreTemplates.has(template.id) ? "checked" : ""} /></td>
-      <td>${escapeHtml(template.store_name || "")} ${cnsc ? '<span class="template-mode-badge">CNSC</span>' : ""}${cnscMissing.length ? `<span class="template-readiness-badge" title="${escapeHtml(cnscMissing.map(cnscConfigurationLabel).join("、"))}">待补全配置</span>` : ""}</td>
+      <td>${escapeHtml(template.store_name || "")} ${cnsc ? `<span class="template-mode-badge${isPureCnscMode(template) ? "" : " is-3pf"}">${escapeHtml(listingModeBadgeLabel(template))}</span>` : ""}${cnscMissing.length ? `<span class="template-readiness-badge" title="${escapeHtml(cnscMissing.map(cnscConfigurationLabel).join("、"))}">待补全配置</span>` : ""}</td>
       <td>${escapeHtml(template.template_name || "")}</td>
       <td>${escapeHtml(template.marketplace_category_path || "")}</td>
       <td>${escapeHtml(promotion)}</td>
@@ -6916,7 +6926,7 @@ function renderStoreTemplateCards() {
     return;
   }
   for (const template of templates) {
-    const cnsc = String(template.listing_mode || "site").toLowerCase() === "cnsc_global";
+    const cnsc = isCnscPageMode(template);
     // Decision A: non-blocking badge from backend-authoritative missing_configuration.
     const cnscMissing = cnsc
       ? (Array.isArray(template.missing_configuration) && template.missing_configuration.length
@@ -6938,7 +6948,7 @@ function renderStoreTemplateCards() {
           <div class="template-card-name">${escapeHtml(template.template_name || "未命名模板")}</div>
           ${accountLabel ? `<div class="template-card-account">账号 · ${escapeHtml(accountLabel)}</div>` : ""}
         </div>
-        <div class="template-card-badges">${cnsc ? '<span class="template-mode-badge">CNSC</span>' : ""}${cnscMissing.length ? '<span class="template-readiness-badge">待补全配置</span>' : ""}</div>
+        <div class="template-card-badges">${cnsc ? `<span class="template-mode-badge${isPureCnscMode(template) ? "" : " is-3pf"}">${escapeHtml(listingModeBadgeLabel(template))}</span>` : ""}${cnscMissing.length ? '<span class="template-readiness-badge">待补全配置</span>' : ""}</div>
       </div>
       <div class="template-card-meta">
         <span>类目 · <code>${escapeHtml(template.marketplace_category_path || "未选择")}</code></span>
@@ -7087,7 +7097,6 @@ function bucketByTime(items, stampOf, keyPrefix) {
 }
 
 function appendListingCopyRow(tbody, copy, jobs) {
-  const cnsc = isCNSCListingCopy(copy);
   // 副本可能属于另一个账号的模板：用全量索引回显（列表本身只列当前账号的模板）。
   const template = storeTemplateById(copy.template_id) || {};
   const gaps = [];
@@ -7096,7 +7105,7 @@ function appendListingCopyRow(tbody, copy, jobs) {
   // referenced filename, an uploaded asset (size_chart_asset_id), or a mabang
   // server-side template. The copy is only missing a size chart when ALL four
   // are empty.
-  if (!cnsc && (
+  if (isLocalLikeMode(copy) && (
     !copy.size_chart_image
     && !copy.size_chart_image_path
     && !copy.size_chart_asset_id
@@ -7125,7 +7134,7 @@ function appendListingCopyRow(tbody, copy, jobs) {
       <td><input type="checkbox" data-listing-copy-select="${escapeHtml(copy.id)}" ${state.selectedListingCopies.has(copy.id) ? "checked" : ""} /></td>
       <td class="listing-copy-thumb-cell">${thumbCell}</td>
       <td>${escapeHtml(copy.main_sku || copy.group_id || "")}</td>
-      <td class="listing-copy-store-cell" title="${escapeHtml(copy.store_name || "")}"><small class="listing-copy-mode-label">${cnsc ? "跨境" : "本土"}</small> ${escapeHtml(copy.store_name || "")}</td>
+      <td class="listing-copy-store-cell" title="${escapeHtml(copy.store_name || "")}"><small class="listing-copy-mode-label${isPureCnscMode(copy) ? "" : (isCnscPageMode(copy) ? " is-3pf" : " is-site")}">${escapeHtml(listingModeText(copy))}</small> ${escapeHtml(copy.store_name || "")}</td>
       <td class="listing-copy-template-cell" title="${escapeHtml(template.template_name || copy.template_id || "")}">${escapeHtml(template.template_name || copy.template_id || "")}</td>
       <td class="listing-copy-title-cell" title="${escapeHtml(copy.listing_title || "")}">${escapeHtml(copy.listing_title || "")}</td>
       <td class="listing-copy-num-cell">${escapeHtml(copy.sku_count || 0)}</td>
@@ -7488,6 +7497,16 @@ async function nudgeWorkerForJob(jobId) {
     showOperationFeedback("Worker 未运行，正在启动…", "info");
     await api("/api/worker/resume", { method: "POST", body: JSON.stringify({}) });
     showOperationFeedback("Worker 已启动，几秒后应会领取任务", "success");
+    await loadAutomationJobs();
+    return;
+  }
+
+  // Case A2 — 进程还在但心跳停了（卡死）：必须换进程，start 会被旧 Worker 的锁挡回。
+  if (w?.stale || (status === "running" && Number(w?.heartbeat_age_seconds) > 120)) {
+    const age = Math.round(Number(w?.heartbeat_age_seconds) || 0);
+    showOperationFeedback(`Worker 心跳已停 ${age} 秒（疑似卡死），正在重启…`, "info");
+    await api("/api/worker/restart", { method: "POST", body: JSON.stringify({}) });
+    showOperationFeedback("Worker 已重启。几秒后应会领取任务；如仍未领取，请检查任务缺字段或租约状态。", "success");
     await loadAutomationJobs();
     return;
   }
@@ -9208,11 +9227,18 @@ function validateStoreTemplateForm() {
     ["store-template-package-width-cm", "包裹宽度"],
     ["store-template-package-height-cm", "包裹高度"],
   ];
-  if (listingMode === "cnsc_global") {
-    required.splice(required.findIndex(([id]) => id === "store-template-store"), 1);
+  const cnscPage = isCnscPageMode(listingMode);
+  if (cnscPage) {
+    // 纯跨境 CNSC 用「全球商品店铺」代替普通店铺；跨境本土 3PF 仍要选普通店铺
+    // （其 store_name / mabang_store_id 是副本与就绪检查的身份来源）。
+    if (isPureCnscMode(listingMode)) {
+      required.splice(required.findIndex(([id]) => id === "store-template-store"), 1);
+      // 纯跨境的身份来自「全球商品店铺」；3PF 用普通店铺下拉，不再要求这一项。
+      required.push(["store-template-cnsc-store", "CNSC 店铺"]);
+    }
     required.splice(required.findIndex(([id]) => id === "store-template-normal-price"), 1);
     required.splice(required.findIndex(([id]) => id === "store-template-stock"), 1);
-    required.push(["store-template-cnsc-store", "CNSC 店铺"]);
+    required.push(["store-template-cnsc-global-standard", "standard 全球价"]);
     required.push(["store-template-cnsc-global-standard", "standard 全球价"]);
     required.push(["store-template-cnsc-global-large", "large 全球价"]);
     const targetSites = selectedCnscTargetSiteStores();
@@ -9247,7 +9273,7 @@ function validateStoreTemplateForm() {
   if ($("store-template-category-id")?.value.trim() && !$("store-template-category-profile")?.value.trim()) {
     return "已选择类目但还没有该类目的必填项规则：请在「平台类目」选择器里点「采集必填项」并确认导入，或改选已采集过规则的类目";
   }
-  if (listingMode !== "cnsc_global" && $("store-template-default-sku-enabled")?.checked) {
+  if (isLocalLikeMode(listingMode) && $("store-template-default-sku-enabled")?.checked) {
     const defaultSkuRequirements = [
       ["store-template-default-sku-color", "默认 SKU 颜色名称"],
       ["store-template-default-sku-code", "默认 SKU 编码"],
@@ -9495,13 +9521,17 @@ async function createStoreTemplate() {
   result.textContent = "正在保存店铺模板...";
   const storeSelect = $("store-template-store");
   const selectedStore = storeSelect?.selectedOptions?.[0];
-  const listingMode = $("store-template-listing-mode")?.value || "site";
+  const listingMode = normalizeListingMode($("store-template-listing-mode")?.value);
+  const cnscPage = isCnscPageMode(listingMode);
+  const localLike = isLocalLikeMode(listingMode);
   const targetSiteStores = selectedCnscTargetSiteStores();
-  const priceTiers = listingMode === "cnsc_global" ? cnscPriceTiers() : [];
+  const priceTiers = cnscPage ? cnscPriceTiers() : [];
   const cnscStoreSelect = $("store-template-cnsc-store");
   const selectedCnscStore = cnscStoreSelect?.selectedOptions?.[0];
-  const effectiveStoreId = listingMode === "cnsc_global" ? (cnscStoreSelect?.value || "") : (storeSelect?.value || "");
-  const effectiveStoreName = listingMode === "cnsc_global" ? (selectedCnscStore?.dataset.storeName || "") : (selectedStore?.dataset.storeName || "");
+  // 纯跨境 CNSC 的身份来自「全球商品店铺」；跨境本土 3PF 用普通店铺下拉。
+  const identityFromCnscStore = isPureCnscMode(listingMode);
+  const effectiveStoreId = identityFromCnscStore ? (cnscStoreSelect?.value || "") : (storeSelect?.value || "");
+  const effectiveStoreName = identityFromCnscStore ? (selectedCnscStore?.dataset.storeName || "") : (selectedStore?.dataset.storeName || "");
   const sizeChartSource = $("store-template-size-chart-source")?.value === "template" ? "template" : "upload";
   const selectedSizeChartTemplate = sizeChartSource === "template" ? selectedStoreSizeChartTemplate() : null;
   const endpoint = state.editingStoreTemplateId
@@ -9540,11 +9570,11 @@ async function createStoreTemplate() {
       description: $("store-template-description")?.value.trim() || "",
       variation_rule: $("store-template-variation-rule")?.value || "color_size",
       sku_template: $("store-template-sku-template")?.value.trim() || "{main_sku}_{color}||{size}",
-      sku_strip_parentheses: listingMode === "cnsc_global" ? true : ($("store-template-strip-parentheses")?.checked ?? true),
-      // 默认 SKU(白T恤) 是本土专属配置：跨境保存时保持空配置。
-      default_sku: listingMode === "cnsc_global" ? { enabled: false } : collectStoreTemplateDefaultSku(),
-      // 默认视频 ID（本土专属）：跨境保存时强制为空，执行器照旧每次上传。
-      default_video_id: listingMode === "cnsc_global" ? "" : ($("store-template-default-video-id")?.value.trim() || ""),
+      sku_strip_parentheses: localLike ? ($("store-template-strip-parentheses")?.checked ?? true) : true,
+      // 默认 SKU(白T恤) 是本土口径配置：跨境 3PF 与本土都要，纯跨境保持空配置。
+      default_sku: localLike ? collectStoreTemplateDefaultSku() : { enabled: false },
+      // 默认视频 ID（本土口径）：纯跨境保存时强制为空，执行器照旧每次上传。
+      default_video_id: localLike ? ($("store-template-default-video-id")?.value.trim() || "") : "",
       // 选择模板时页面上没有可引用的尺码图地址，自动化要拿这里上传的那张图插到
       // 描述末尾；没上传才回落到模板自带的预览图（采集到的模板才有）。
       size_chart_asset_id: state.sizeChartAsset?.id || selectedSizeChartTemplate?.asset_id || "",
@@ -9553,19 +9583,19 @@ async function createStoreTemplate() {
       default_size_chart_path: state.sizeChartAsset?.file_path || selectedSizeChartTemplate?.file_path || "",
       mabang_size_chart_template_id: selectedSizeChartTemplate?.template_id || "",
       mabang_size_chart_template_name: selectedSizeChartTemplate?.name || "",
-      // 产品图最后一张放尺码表（本土专属，默认开）：跨境保存时强制关闭。
-      size_chart_as_last_product_image: listingMode === "cnsc_global"
-        ? false
-        : ($("store-template-size-chart-last-image")?.checked ?? true),
+      // 产品图最后一张放尺码表（本土口径，默认开）：纯跨境保存时强制关闭。
+      size_chart_as_last_product_image: localLike
+        ? ($("store-template-size-chart-last-image")?.checked ?? true)
+        : false,
       main_image_watermark: selectedWatermark("store-template-main-watermark", "main"),
       product_image_watermark: selectedWatermark("store-template-product-watermark", "product"),
       listing_mode: listingMode,
-      cnsc_store: listingMode === "cnsc_global" ? { id: cnscStoreSelect?.value || storeSelect?.value || "", name: selectedCnscStore?.dataset.storeName || selectedStore?.dataset.storeName || "" } : {},
-      target_site_stores: listingMode === "cnsc_global" ? targetSiteStores : [],
-      site_price_order: listingMode === "cnsc_global" ? cnscSiteOrder() : [],
-      default_site_discount_percent: listingMode === "cnsc_global" ? ($("store-template-default-site-discount-percent")?.value || 40) : null,
+      cnsc_store: cnscPage ? { id: cnscStoreSelect?.value || storeSelect?.value || "", name: selectedCnscStore?.dataset.storeName || selectedStore?.dataset.storeName || "" } : {},
+      target_site_stores: cnscPage ? targetSiteStores : [],
+      site_price_order: cnscPage ? cnscSiteOrder() : [],
+      default_site_discount_percent: cnscPage ? ($("store-template-default-site-discount-percent")?.value || 40) : null,
       price_tiers: priceTiers,
-      warehouse_stock_defaults: listingMode === "cnsc_global" ? {
+      warehouse_stock_defaults: cnscPage ? {
         TH: $("store-template-warehouse-th")?.value || 0,
         CN_GZ: $("store-template-warehouse-cn-gz")?.value || 0,
         PH: $("store-template-warehouse-ph")?.value || 0,
@@ -9587,6 +9617,45 @@ function crossBorderModeEnabled() {
   return state.runtimeConfiguration?.display?.cross_border_enabled !== false;
 }
 
+// 刊登模式：site(本土) / cnsc_global(跨境 CNSC) / cnsc_3pf(跨境 3PF，本土要求)。
+// 「页面/入口」与「上款规则」是两组正交能力，所有判断必须走下面三个谓词，
+// 否则新增的第三种模式会在某个分支里被当成另一种。
+const LISTING_MODE_LABELS = Object.freeze({
+  site: "本土",
+  cnsc_global: "跨境",
+  cnsc_3pf: "跨境本土 3PF",
+});
+
+function normalizeListingMode(value) {
+  const raw = value && typeof value === "object" ? value.listing_mode : value;
+  return String(raw == null ? "" : raw).replace(/\s+/g, "").toLowerCase() || "site";
+}
+
+// 走「CNSC 待发布商品」工作台与 global 详情页（目标站点 / 站点价格表 / 三仓库存 / 自动发布）。
+function isCnscPageMode(value) {
+  const mode = normalizeListingMode(value);
+  return mode === "cnsc_global" || mode === "cnsc_3pf";
+}
+
+// 按本土要求上款（默认 SKU 白T恤 / 尺码表 / 描述末尾插图 / 默认视频 / 去括号）。
+function isLocalLikeMode(value) {
+  const mode = normalizeListingMode(value);
+  return mode === "site" || mode === "cnsc_3pf";
+}
+
+// 改动前的 CNSC 全球商品分支（单店折扣活动等）。
+function isPureCnscMode(value) {
+  return normalizeListingMode(value) === "cnsc_global";
+}
+
+function listingModeBadgeLabel(value) {
+  return normalizeListingMode(value) === "cnsc_3pf" ? "跨境本土 3PF" : "CNSC";
+}
+
+function listingModeText(value) {
+  return LISTING_MODE_LABELS[normalizeListingMode(value)] || "本土";
+}
+
 // 把跨境模式显示状态应用到所有相关界面：设置加载/保存后调用一次；各渲染函数
 // 内部也有同样的判断（多标签页/局域网多端 3 秒轮询重渲染时保持一致）。
 function applyCrossBorderUi() {
@@ -9603,6 +9672,9 @@ function applyCrossBorderUi() {
   document.querySelector(".maintenance-note--cnsc")?.toggleAttribute("hidden", !enabled);
   $("base-price-cnsc-site-order")?.toggleAttribute("hidden", !enabled);
   $("base-price-cnsc-site-order-display")?.toggleAttribute("hidden", !enabled);
+  // 页面导入的「跨境本土 (3PF)」选项属于跨境侧：关闭跨境模式时整块隐藏并复位。
+  $("mabang-page-import-mode-field")?.toggleAttribute("hidden", !enabled);
+  if (!enabled && $("mabang-page-import-listing-mode")) $("mabang-page-import-listing-mode").value = "";
   // 模板/副本列表与复制选择器按模式过滤后重渲染。
   renderStoreTemplates();
   renderStoreListingCopies();
@@ -9610,25 +9682,33 @@ function applyCrossBorderUi() {
 }
 
 function updateCnscTemplateVisibility() {
-  const global = $("store-template-listing-mode")?.value === "cnsc_global";
-  // 跨境模式关闭：刊登模式下拉隐藏 CNSC 选项。用 hidden 而不是移除，已打开的
-  // 跨境模板仍能程序化选中并正常保存，不会损坏数据。
-  $("store-template-listing-mode")?.querySelector('option[value="cnsc_global"]')?.toggleAttribute("hidden", !crossBorderModeEnabled());
-  $("cnsc-global-section")?.toggleAttribute("hidden", !global);
-  // 默认 SKU(白T恤)/SKU 去括号是本土专属：跨境店铺不发生成，直接隐藏。
-  document.querySelector(".default-sku-head")?.toggleAttribute("hidden", global);
-  $("store-template-default-sku-block")?.toggleAttribute("hidden", global);
-  $("store-template-strip-parentheses-line")?.toggleAttribute("hidden", global);
-  $("store-template-promotion")?.closest("label")?.toggleAttribute("hidden", global);
-  // 「重新采集活动」只对本土单店有效：跨境的活动目录走目标站点店铺，整块一起隐藏。
-  $("store-promotion-field")?.toggleAttribute("hidden", global);
-  $("store-template-default-video-id")?.closest("[data-template-default-video]")?.toggleAttribute("hidden", global);
-  // 「产品图最后一张放尺码表」是本土专属：跨境模板没有这条规则，直接隐藏。
-  $("store-template-size-chart-last-image-line")?.toggleAttribute("hidden", global);
-  $("store-template-normal-price")?.closest("label")?.toggleAttribute("hidden", global);
-  $("store-template-size-price-overrides")?.toggleAttribute("hidden", global);
-  $("store-template-sale-price")?.closest("label")?.toggleAttribute("hidden", global);
-  $("store-template-stock")?.closest("label")?.toggleAttribute("hidden", global);
+  const mode = normalizeListingMode($("store-template-listing-mode")?.value);
+  const cnscPage = isCnscPageMode(mode);
+  const pureCnsc = isPureCnscMode(mode);
+  // 跨境模式关闭：刊登模式下拉隐藏跨境选项（CNSC / 跨境本土 3PF）。用 hidden 而不是
+  // 移除，已打开的跨境模板仍能程序化选中并正常保存，不会损坏数据。
+  for (const value of ["cnsc_global", "cnsc_3pf"]) {
+    $("store-template-listing-mode")
+      ?.querySelector(`option[value="${value}"]`)
+      ?.toggleAttribute("hidden", !crossBorderModeEnabled());
+  }
+  $("cnsc-global-section")?.toggleAttribute("hidden", !cnscPage);
+  // 本土专属能力在跨境 3PF 下同样生效，只有纯跨境 CNSC 才隐藏。
+  document.querySelector(".default-sku-head")?.toggleAttribute("hidden", pureCnsc);
+  $("store-template-default-sku-block")?.toggleAttribute("hidden", pureCnsc);
+  $("store-template-strip-parentheses-line")?.toggleAttribute("hidden", pureCnsc);
+  // 单店折扣活动只服务本土(site)；跨境 CNSC 与 3PF 的折扣活动都在目标站点店铺里配，
+  // 这里的单店活动字段/「重新采集活动」对跨境页没有意义（点了只会报不支持），一起隐藏。
+  $("store-template-promotion")?.closest("label")?.toggleAttribute("hidden", cnscPage);
+  $("store-promotion-field")?.toggleAttribute("hidden", cnscPage);
+  $("store-template-default-video-id")?.closest("[data-template-default-video]")?.toggleAttribute("hidden", pureCnsc);
+  // 「产品图最后一张放尺码表」按本土要求生效（site / 3PF）。
+  $("store-template-size-chart-last-image-line")?.toggleAttribute("hidden", pureCnsc);
+  // 原价/售价/库存：跨境 3PF 仍按本土口径维护（模板价 + 默认 SKU），纯跨境隐藏。
+  $("store-template-normal-price")?.closest("label")?.toggleAttribute("hidden", pureCnsc);
+  $("store-template-size-price-overrides")?.toggleAttribute("hidden", pureCnsc);
+  $("store-template-sale-price")?.closest("label")?.toggleAttribute("hidden", pureCnsc);
+  $("store-template-stock")?.closest("label")?.toggleAttribute("hidden", pureCnsc);
 }
 
 const CNSC_KNOWN_SITES = ["TW", "PH", "SG", "TH", "MY", "MX", "VN", "BR"];
@@ -10105,6 +10185,8 @@ function startMabangPageImportRun() {
       conflict_action: "update",
       expected_store_id: _mabangImportExpectedStoreId,
       account_id: $("mabang-page-import-account")?.value || "",
+      // 操作员指定「按跨境本土 (3PF) 导入」；空值=自动识别（site / cnsc_global）。
+      requested_listing_mode: $("mabang-page-import-listing-mode")?.value || "",
     }),
   }).then((run) => {
     state.mabangPageImportRunId = run.id;
@@ -10229,9 +10311,11 @@ function renderMabangImportPreview(run) {
   const snapshot = run?.snapshot || {};
   const preview = $("mabang-import-preview");
   if (!preview) return;
-  const cnsc = String(snapshot.listing_mode || "site").toLowerCase() === "cnsc_global";
+  const cnsc = isCnscPageMode(snapshot);
   const mode = $("mabang-import-mode");
-  if (mode) mode.innerHTML = `<span class="template-mode-badge">${cnsc ? "已识别：CNSC 全球商品" : "已识别：站点商品"}</span>`;
+  if (mode) mode.innerHTML = `<span class="template-mode-badge${isPureCnscMode(snapshot) ? "" : (cnsc ? " is-3pf" : "")}">${escapeHtml(
+    isPureCnscMode(snapshot) ? "已识别：CNSC 全球商品" : (cnsc ? "已识别：跨境本土 3PF" : "已识别：站点商品")
+  )}</span>`;
   const targetSiteStores = Array.isArray(snapshot.target_site_stores) ? snapshot.target_site_stores : [];
   const promotionsGroup = $("mabang-import-promotions-group");
   if (promotionsGroup) promotionsGroup.hidden = cnsc && targetSiteStores.length > 0;
@@ -10406,7 +10490,7 @@ function focusFirstMissingStoreTemplateField(template) {
     "store-template-package-height-cm",
   ].map($).filter((control) => control && !String(control.value || "").trim());
   const cnscMissing = cnscTemplateMissingFields(template);
-  const cnscControl = String(template?.listing_mode || "site") === "cnsc_global"
+  const cnscControl = isCnscPageMode(template)
     ? (cnscMissing.includes("target_site_stores")
       ? $("store-template-target-sites")
       : cnscMissing.includes("site_price_matrix")
@@ -10561,6 +10645,11 @@ function renderCopyTemplatePicker(query = "") {
     if (!cnsc && !item.promotion_activity_id && !item.mabang_discount_id) missing.push("活动未配置");
     if (!cnsc && !item.stock) missing.push("库存");
     if (cnsc) missing.push(...cnscTemplateMissingFields(item).map(cnscConfigurationLabel));
+    // 跨境本土 3PF 也按本土口径要求尺码图（就绪检查同一条规则）。
+    if (isLocalLikeMode(item)
+      && !item.size_chart_asset_id
+      && !item.default_size_chart_path
+      && !item.mabang_size_chart_template_id) missing.push("尺码图");
     if (!item.weight_kg) missing.push("重量");
     const blockReason = cnsc && missing.length ? "template_needs_configuration" : "";
     // 本土复制以模板尺码为准（模板 chip 就是店铺刊登的尺码轴）；跨境仍按商品尺码
@@ -10570,7 +10659,7 @@ function renderCopyTemplatePicker(query = "") {
     const baseSizes = ((firstBase.selected_sizes && firstBase.selected_sizes.length) ? firstBase.selected_sizes : (firstBase.recognized_sizes || [])).filter(Boolean);
     const templateSizes = (item.sizes || []).filter(Boolean);
     let sizeNote = "";
-    if (cnsc) {
+    if (cnsc && isPureCnscMode(item)) {
       if (copyItems.length > 1) {
         sizeNote = `<small class="template-size-mismatch">批量复制 ${copyItems.length} 个商品，各按自身尺码生成 SKU（示例：${escapeHtml(firstBase.product_name_cn || firstBase.main_sku || "商品")}${baseSizes.length ? ` 尺码 ${escapeHtml(baseSizes.join("/"))}` : " 未配置尺码"}）。</small>`;
       } else if (baseSizes.length && templateSizes.length && baseSizes.join(",").toLowerCase() !== templateSizes.join(",").toLowerCase()) {
@@ -10589,7 +10678,7 @@ function renderCopyTemplatePicker(query = "") {
     } else {
       sizeNote = `<small class="template-size-mismatch">商品与模板均未配置尺码，将按默认尺码生成 SKU。</small>`;
     }
-    return `<label class="template-picker-item" data-block-reason="${blockReason}"><input type="checkbox" data-store-template-select="${escapeHtml(item.id)}" ${state.selectedStoreTemplates.has(item.id) ? "checked" : ""} ${missing.length ? "disabled" : ""} /><span><strong>${cnsc ? '<span class="template-mode-badge">CNSC</span> ' : ""}${escapeHtml(item.store_name)} · ${escapeHtml(item.template_name)}</strong><small>${escapeHtml(item.marketplace_category_path || "未选类目")} · ${escapeHtml(missing.join("、") || "配置完整")}</small>${sizeNote}</span></label>`;
+    return `<label class="template-picker-item" data-block-reason="${blockReason}"><input type="checkbox" data-store-template-select="${escapeHtml(item.id)}" ${state.selectedStoreTemplates.has(item.id) ? "checked" : ""} ${missing.length ? "disabled" : ""} /><span><strong>${cnsc ? `<span class="template-mode-badge${isPureCnscMode(item) ? "" : " is-3pf"}">${escapeHtml(listingModeBadgeLabel(item))}</span> ` : ""}${escapeHtml(item.store_name)} · ${escapeHtml(item.template_name)}</strong><small>${escapeHtml(item.marketplace_category_path || "未选类目")} · ${escapeHtml(missing.join("、") || "配置完整")}</small>${sizeNote}</span></label>`;
   };
   root.innerHTML = groups.size
     ? [...groups.entries()].map(([store, list]) => `
@@ -10597,7 +10686,7 @@ function renderCopyTemplatePicker(query = "") {
           <div class="template-picker-group-head">${escapeHtml(store)}<small>${list.length} 个模板</small></div>
           ${list.map(renderItem).join("")}
         </div>`).join("")
-    : `<div class="empty-state">${mode === "cnsc" ? "没有跨境（CNSC）模板" : "没有本土店铺模板"}</div>`;
+    : `<div class="empty-state">${mode === "cnsc" ? "没有跨境（CNSC / 3PF）模板" : "没有本土店铺模板"}</div>`;
 }
 
 async function uploadSizeChart(file) {
@@ -10711,7 +10800,8 @@ async function openListingCopyEditor(copyId) {
 
 function renderListingCopyEditor(copy) {
   const cnsc = isCNSCListingCopy(copy);
-  $("listing-copy-editor-meta").textContent = [cnsc ? "跨境 CNSC" : "本土店铺", copy.store_name, copy.main_sku || copy.group_id, copy.marketplace_category_path].filter(Boolean).join(" · ");
+  const modeText = cnsc ? (isPureCnscMode(copy) ? "跨境 CNSC" : "跨境本土 3PF") : "本土店铺";
+  $("listing-copy-editor-meta").textContent = [modeText, copy.store_name, copy.main_sku || copy.group_id, copy.marketplace_category_path].filter(Boolean).join(" · ");
   $("listing-copy-title").value = copy.listing_title || copy.title || "";
   $("listing-copy-description").value = copy.description || "";
   $("listing-copy-stock").value = copy.stock ?? "";
@@ -10827,7 +10917,7 @@ function renderListingCopySizeChart(copy) {
   empty.hidden = !!src;
   $("listing-copy-size-chart-file-name").textContent = src ? (copy.size_chart_image || "当前尺码图") : "支持 PNG、JPEG、WebP";
   // 「产品图最后一张放尺码表」：跨境隐藏；本土按副本快照回显（缺字段＝开）。
-  $("listing-copy-size-chart-last-image-line")?.toggleAttribute("hidden", isCNSCListingCopy(copy));
+  $("listing-copy-size-chart-last-image-line")?.toggleAttribute("hidden", isPureCnscMode(copy));
   if ($("listing-copy-size-chart-last-image")) {
     $("listing-copy-size-chart-last-image").checked = copy.size_chart_as_last_product_image !== false;
   }
@@ -10934,7 +11024,8 @@ function renderListingCopySkuTable(copy) {
 }
 
 function isCNSCListingCopy(copy) {
-  return String(copy?.listing_mode || "site").toLowerCase() === "cnsc_global";
+  // 跨境 CNSC 与跨境本土 3PF 都走 CNSC 待发布商品工作台，界面上都归「跨境」侧。
+  return isCnscPageMode(copy);
 }
 
 // Decision B: seed the copy editor's per-target discount state from the copy's
@@ -11536,7 +11627,7 @@ function renderListingCopyReadiness(copy) {
   const warningMarkup = warnings.length
     ? `<span class="readiness-warning-inline">提醒：${escapeHtml(warnings.map((field) => listingCopyReadinessLabel(field, copy)).join("；"))}</span>`
     : "";
-  const modeMarkup = `<span class="readiness-mode-label">当前模式：${escapeHtml(isCNSCListingCopy(copy) ? "跨境 CNSC" : "本土店铺")}</span>`;
+  const modeMarkup = `<span class="readiness-mode-label">当前模式：${escapeHtml(isCNSCListingCopy(copy) ? (isPureCnscMode(copy) ? "跨境 CNSC" : "跨境本土 3PF") : "本土店铺")}</span>`;
   const fillButton = templateGaps.length
     ? ` <button type="button" class="chip" data-fill-missing-attributes="${escapeHtml(copy.id || "")}">从模板补全缺失属性</button>`
     : "";
@@ -11605,8 +11696,8 @@ function collectListingCopyPayload() {
     payload.size_chart_image = copy.size_chart_image || "";
     payload.size_chart_image_path = copy.size_chart_image_path || "";
   }
-  // 产品图最后一张放尺码表：跨境恒关；本土以副本检查弹窗里的开关为准。
-  payload.size_chart_as_last_product_image = cnsc
+  // 产品图最后一张放尺码表：纯跨境恒关；本土与跨境 3PF 以副本检查弹窗里的开关为准。
+  payload.size_chart_as_last_product_image = isPureCnscMode(copy)
     ? false
     : ($("listing-copy-size-chart-last-image")?.checked ?? true);
   return payload;

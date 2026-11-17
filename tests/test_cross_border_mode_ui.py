@@ -76,7 +76,9 @@ def test_template_editor_hides_cnsc_listing_mode_option() -> None:
     source = APP.read_text(encoding="utf-8")
 
     fn = _function_source(source, "function updateCnscTemplateVisibility()")
-    assert 'option[value="cnsc_global"]' in fn, "刊登模式下拉的 CNSC 选项用 hidden 控制（不删除，保护已打开模板）"
+    # 两个跨境选项（CNSC / 跨境本土 3PF）都用 hidden 控制（不删除，保护已打开模板）。
+    assert 'for (const value of ["cnsc_global", "cnsc_3pf"])' in fn
+    assert 'option[value="${value}"]' in fn
 
 
 def test_base_maintenance_hides_cnsc_chrome() -> None:
@@ -102,3 +104,26 @@ def test_settings_save_and_render_wire_display_group() -> None:
     assert 'cross_border_enabled: $("settings-cross-border-mode")?.checked !== false' in source, "保存设置携带 display.cross_border_enabled"
     assert 'const crossBorderToggle = $("settings-cross-border-mode");' in source, "设置页回显跨境模式开关"
     assert "applyCrossBorderUi();" in source
+
+
+def test_cnsc_3pf_mode_is_wired_through_editor_and_page_import() -> None:
+    html = INDEX.read_text(encoding="utf-8")
+    source = APP.read_text(encoding="utf-8")
+
+    # 模板编辑器：第三个刊登模式 + 页面导入的显式模式选择。
+    assert '<option value="cnsc_3pf">跨境本土 (3PF)</option>' in html
+    assert 'id="mabang-page-import-listing-mode"' in html
+    assert '<option value="cnsc_3pf">跨境本土 (3PF)</option>' in html
+
+    # 模式判断统一走三个谓词，避免某个分支把 3PF 当成 site / cnsc_global。
+    assert "function isCnscPageMode(value)" in source
+    assert "function isLocalLikeMode(value)" in source
+    assert "function isPureCnscMode(value)" in source
+    assert "return isCnscPageMode(copy);" in source
+    # 导入 run 带上操作员选择的模式。
+    assert "requested_listing_mode:" in source
+    # 保存表单按「页面能力」与「上款规则」分别取谓词。
+    assert "const cnscPage = isCnscPageMode(listingMode);" in source
+    assert "const localLike = isLocalLikeMode(listingMode);" in source
+    assert "cnsc_store: cnscPage ?" in source
+    assert "default_sku: localLike ?" in source

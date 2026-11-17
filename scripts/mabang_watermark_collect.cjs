@@ -5,7 +5,7 @@
  * 背景：browser-harness 的 daemon 在这台机器的 Python 3.14 下起不来
  * （asyncio base_events.py:297 assert self._sockets is not None），于是
  * `/api/store-watermarks/collect` 一直失败、水印目录永远是空的。
- * 这个采集器改走自动化已经在用的那条路（playwright-core + CDP 9223），
+ * 这个采集器改走自动化已经在用的那条路（playwright-core + CDP 18223），
  * 它只做三件事：
  *   1) 找到 Shopee 商品编辑页（productDetailShopee）里的店铺身份；
  *   2) 读当前店铺可用的水印模板（Vue 状态优先，可见菜单里的 DOM 行兜底）；
@@ -16,7 +16,7 @@
  * 读、再把菜单收回去；读不到就报原因，绝不猜。
  *
  * 用法：
- *   node scripts/mabang_watermark_collect.cjs --cdp-url http://127.0.0.1:9223
+ *   node scripts/mabang_watermark_collect.cjs --cdp-url http://127.0.0.1:18223
  * 结果：
  *   MABANG_WATERMARK_RESULT {"ok":true,"store":{...},"templates":[...],...}
  */
@@ -24,7 +24,7 @@
 const { chromium } = require('playwright-core');
 
 const RESULT_MARKER = 'MABANG_WATERMARK_RESULT ';
-const CDP_DEFAULT = 'http://127.0.0.1:9223';
+const CDP_DEFAULT = 'http://127.0.0.1:18223';
 const CDP_CONNECT_TIMEOUT_MS = 90000;
 const MENU_TIMEOUT_MS = 6000;
 // 与 scripts/mabang_page_import_capture.js 保持一致的水印模板字段别名。

@@ -5,6 +5,8 @@ from copy import deepcopy
 from typing import Any
 from urllib.parse import urlsplit, urlunsplit
 
+from services.api.listing_modes import is_cnsc_page, normalize_listing_mode
+
 
 class MabangImportSnapshotError(ValueError):
     pass
@@ -51,7 +53,7 @@ def normalize_mabang_capture(raw: dict[str, Any]) -> dict[str, Any]:
     listing_mode, listing_mode_evidence = _normalize_listing_mode(raw)
     platform = _text(page.get("platform") or raw.get("platform") or "shopee").lower()
     country = _text(page.get("country") or raw.get("country")).upper()
-    if listing_mode == "cnsc_global" and not country:
+    if is_cnsc_page(listing_mode) and not country:
         country = "GLOBAL"
     normalized_store = {
         "id": _required_text(store.get("id"), _store_id_error(store, raw.get("capture_debug"))),
@@ -73,9 +75,9 @@ def normalize_mabang_capture(raw: dict[str, Any]) -> dict[str, Any]:
     sku_rows = raw.get("sku_rows") if isinstance(raw.get("sku_rows"), list) else []
     normalized_rows = [row for row in sku_rows if isinstance(row, dict)]
     variation = _normalize_variation(normalized_rows)
-    cnsc_rows = _normalize_cnsc_sku_rows(normalized_rows) if listing_mode == "cnsc_global" else []
-    price_tiers = _derive_cnsc_price_tiers(cnsc_rows) if listing_mode == "cnsc_global" else []
-    warehouse_stock_defaults = _derive_cnsc_warehouse_defaults(cnsc_rows) if listing_mode == "cnsc_global" else {}
+    cnsc_rows = _normalize_cnsc_sku_rows(normalized_rows) if is_cnsc_page(listing_mode) else []
+    price_tiers = _derive_cnsc_price_tiers(cnsc_rows) if is_cnsc_page(listing_mode) else []
+    warehouse_stock_defaults = _derive_cnsc_warehouse_defaults(cnsc_rows) if is_cnsc_page(listing_mode) else {}
     target_site_stores_loaded = raw.get("target_site_stores_loaded") is True
     target_site_stores = _normalize_target_site_stores(raw.get("target_site_stores")) if target_site_stores_loaded else []
     transaction_defaults = _normalize_transaction_defaults(
@@ -105,7 +107,7 @@ def normalize_mabang_capture(raw: dict[str, Any]) -> dict[str, Any]:
         warehouse_stock_defaults=warehouse_stock_defaults,
         target_site_stores=target_site_stores,
         default_site_discount_percent=40,
-    ) if listing_mode == "cnsc_global" else []
+    ) if is_cnsc_page(listing_mode) else []
 
     return {
         "schema_version": 3,
@@ -122,10 +124,10 @@ def normalize_mabang_capture(raw: dict[str, Any]) -> dict[str, Any]:
         "selected_attributes": selected_attributes,
         "missing_required_attributes": missing_required,
         "variation": variation,
-        "cnsc_store": {"id": normalized_store["id"], "name": normalized_store["name"]} if listing_mode == "cnsc_global" else {},
+        "cnsc_store": {"id": normalized_store["id"], "name": normalized_store["name"]} if is_cnsc_page(listing_mode) else {},
         "target_site_stores_loaded": target_site_stores_loaded,
         "target_site_stores": target_site_stores,
-        "default_site_discount_percent": 40 if listing_mode == "cnsc_global" else None,
+        "default_site_discount_percent": 40 if is_cnsc_page(listing_mode) else None,
         "cnsc_sku_rows": cnsc_rows,
         "price_tiers": price_tiers,
         "warehouse_stock_defaults": warehouse_stock_defaults,
@@ -233,7 +235,7 @@ def snapshot_template_payload(snapshot: dict[str, Any]) -> dict[str, Any]:
     }
     result["target_site_stores_loaded"] = snapshot.get("target_site_stores_loaded") is True
     result["target_site_stores"] = deepcopy(snapshot.get("target_site_stores") or [])
-    if listing_mode == "cnsc_global":
+    if is_cnsc_page(listing_mode):
         result.update({
             "cnsc_store": deepcopy(snapshot.get("cnsc_store") or {}),
             "default_site_discount_percent": snapshot.get("default_site_discount_percent") or 40,
@@ -277,11 +279,25 @@ def _normalize_listing_mode(raw: dict[str, Any]) -> tuple[str, dict[str, Any]]:
     # warehouse_stock_defaults 待补充提醒，不能因此把全球商品页判成本土或直接失败。
     has_cnsc_marker = _CNSC_MARKER_HEADER in matched_headers
     supplied_mode = _text(raw.get("listing_mode")).lower()
+    # 操作员在导入弹窗显式指定「跨境本土 (3PF)」时走 override：页面证据仍必须是
+    # CNSC 全球商品页，否则就是选错了页面，直接报冲突。
+    requested_mode = normalize_listing_mode(raw.get("requested_listing_mode"), default="")
     detected_mode = "cnsc_global" if global_param and has_cnsc_marker else "site"
     if global_param != has_cnsc_marker:
         raise MabangImportSnapshotError(_listing_mode_conflict_message(global_param, matched_headers, evidence))
-    if supplied_mode and supplied_mode not in {"site", "cnsc_global"}:
+    if supplied_mode and supplied_mode not in {"site", "cnsc_global", "cnsc_3pf"}:
         raise MabangImportSnapshotError("马帮页面刊登模式无效")
+    if requested_mode and requested_mode not in {"site", "cnsc_global", "cnsc_3pf"}:
+        raise MabangImportSnapshotError("马帮页面刊登模式无效")
+    # 操作员显式指定 3PF 时优先于采集侧自报的模式（采集只能识别到 CNSC 页）。
+    desired_mode = requested_mode if requested_mode == "cnsc_3pf" else (supplied_mode or requested_mode)
+    if desired_mode == "cnsc_3pf":
+        if detected_mode != "cnsc_global":
+            raise MabangImportSnapshotError(
+                "页面类型与所选「跨境本土 (3PF)」不一致：请确认当前页是 CNSC 全球商品编辑页"
+                "（地址带 global=4 且交易信息有「全球商品价格」列）"
+            )
+        return "cnsc_3pf", {"global_param": global_param, "matched_headers": matched_headers}
     if supplied_mode and supplied_mode != detected_mode:
         raise MabangImportSnapshotError("页面类型识别冲突：采集模式与页面证据不一致")
     return detected_mode, {"global_param": global_param, "matched_headers": matched_headers}
@@ -712,9 +728,9 @@ def _coverage(
     variation_status = "complete" if variation.get("colors") and variation.get("sizes") and variation.get("sku_count") else "missing"
     transaction_states = {item.get("status") for item in transaction_defaults.values()}
     transaction = "conflict" if "conflict" in transaction_states else ("complete" if transaction_states == {"complete"} else "missing")
-    promotions = "not_applicable" if listing_mode == "cnsc_global" else ("complete" if selected_promotion_id else "missing")
+    promotions = "not_applicable" if is_cnsc_page(listing_mode) else ("complete" if selected_promotion_id else "missing")
     statuses = [store_category, attributes, variation_status, transaction]
-    if listing_mode != "cnsc_global":
+    if not is_cnsc_page(listing_mode):
         statuses.append(promotions)
     return {
         "complete": all(status == "complete" for status in statuses),

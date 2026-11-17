@@ -26,6 +26,11 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from services.api import settings, storage  # noqa: E402
+from services.api.listing_modes import (  # noqa: E402
+    is_cnsc_page,
+    is_local_like,
+    normalize_listing_mode,
+)
 from services.api.subprocess_utils import no_console_window_kwargs  # noqa: E402
 
 
@@ -484,6 +489,9 @@ def build_browser_use_task_plan(
         category_attributes,
         dict(browser_inputs.get("category_profile_snapshot") or {}),
     )
+    listing_mode = normalize_listing_mode(
+        browser_inputs.get("listing_mode") or listing_copy.get("listing_mode")
+    )
 
     return {
         "ok": True,
@@ -503,7 +511,7 @@ def build_browser_use_task_plan(
         "store": {
             "name": listing_copy.get("store_name") or job.get("store_name") or browser_inputs.get("store_name") or "",
             "mabang_store_id": browser_inputs.get("mabang_store_id") or "",
-            "listing_mode": browser_inputs.get("listing_mode") or listing_copy.get("listing_mode") or "site",
+            "listing_mode": listing_mode,
             "cnsc_store": dict(browser_inputs.get("cnsc_store") or {}),
             "target_site_stores": list(browser_inputs.get("target_site_stores") or []),
             "default_site_discount_percent": browser_inputs.get("default_site_discount_percent") or 40,
@@ -554,7 +562,7 @@ def build_browser_use_task_plan(
             "mabang_discount_id": browser_inputs.get("mabang_discount_id") or "",
         },
         "cnsc": {
-            "enabled": (browser_inputs.get("listing_mode") or listing_copy.get("listing_mode") or "site") == "cnsc_global",
+            "enabled": is_cnsc_page(listing_mode),
             "price_tiers": list(browser_inputs.get("price_tiers") or []),
             "default_site_discount_percent": browser_inputs.get("default_site_discount_percent") or 40,
             "warehouse_stock_defaults": dict(browser_inputs.get("warehouse_stock_defaults") or {}),
@@ -564,7 +572,7 @@ def build_browser_use_task_plan(
             "expected_rows": int(browser_inputs.get("sku_count") or len(skus)),
             "skus": skus,
             "prices": prices,
-            "listing_mode": browser_inputs.get("listing_mode") or listing_copy.get("listing_mode") or "site",
+            "listing_mode": listing_mode,
             "warehouse_stock_defaults": dict(browser_inputs.get("warehouse_stock_defaults") or {}),
             "transaction_information": dict(browser_inputs.get("transaction_info") or {}),
         },
@@ -576,14 +584,14 @@ def build_browser_use_task_plan(
             {"type": "set_category_attributes", "label": "填写分类属性"},
             {"type": "fill_basic_info", "label": "填写标题、描述和 Parent SKU"},
             {"type": "upload_product_images", "label": "上传并排序 9 张商品图"},
-            *([] if (browser_inputs.get("listing_mode") or listing_copy.get("listing_mode") or "site") == "cnsc_global" else [{"type": "append_description_media", "label": "在商品描述末尾追加尺码表与全部产品图"}]),
+            *([{"type": "append_description_media", "label": "在商品描述末尾追加尺码表与全部产品图"}] if is_local_like(listing_mode) else []),
             {"type": "apply_main_image_watermark", "label": "应用主图水印"},
             {"type": "apply_product_image_watermark", "label": "应用产品图水印"},
             {"type": "upload_product_video", "label": "上传商品视频"},
             {"type": "configure_variants", "label": "创建 color 和 size 变种"},
             {"type": "fill_sku_grid", "label": "填写 SKU 表格"},
-            *([{"type": "fill_cnsc_site_prices_and_discounts", "label": "填写站点价格、活动和 %OFF"}] if (browser_inputs.get("listing_mode") or listing_copy.get("listing_mode") or "site") == "cnsc_global" else []),
-            *([] if (browser_inputs.get("listing_mode") or listing_copy.get("listing_mode") or "site") == "cnsc_global" else [{"type": "select_discount_activity", "label": "选择折扣活动"}]),
+            *([{"type": "fill_cnsc_site_prices_and_discounts", "label": "填写站点价格、活动和 %OFF"}] if is_cnsc_page(listing_mode) else []),
+            *([] if is_cnsc_page(listing_mode) else [{"type": "select_discount_activity", "label": "选择折扣活动"}]),
             {"type": "upload_variant_thumbnails", "label": "上传颜色缩略图"},
             *(
                 [{"type": "save_draft", "label": "保存马帮草稿，不刊登"}]
@@ -2384,7 +2392,7 @@ def collect_mabang_page_import_via_playwright(
     import_plan: dict[str, Any] | None = None,
     *,
     node_executable: str = "node",
-    cdp_url: str = "http://127.0.0.1:9223",
+    cdp_url: str = "http://127.0.0.1:18223",
     timeout_seconds: int = 240,
 ) -> dict[str, Any]:
     """采集马帮「当前商品编辑页」的快照（走 Playwright/CDP，不再依赖 browser-harness）。
@@ -2464,7 +2472,7 @@ def collect_mabang_page_import_via_playwright(
 def collect_store_watermarks_via_playwright(
     *,
     node_executable: str = "node",
-    cdp_url: str = "http://127.0.0.1:9223",
+    cdp_url: str = "http://127.0.0.1:18223",
     timeout_seconds: int = 180,
 ) -> dict[str, Any]:
     """采集马帮水印目录（走 Playwright/CDP，不再依赖 browser-harness）。
@@ -2539,7 +2547,7 @@ def collect_store_promotions_via_playwright(
     store_id: str,
     *,
     node_executable: str = "node",
-    cdp_url: str = "http://127.0.0.1:9223",
+    cdp_url: str = "http://127.0.0.1:18223",
     timeout_seconds: int = 180,
 ) -> dict[str, Any]:
     """定向重采一个本土店铺的促销活动目录（走 Playwright/CDP，只读）。
@@ -2999,7 +3007,7 @@ def run_playwright_save_draft(
     task_plan: dict[str, Any],
     *,
     node_executable: str = "node",
-    cdp_url: str = "http://127.0.0.1:9223",
+    cdp_url: str = "http://127.0.0.1:18223",
     timeout_seconds: int = 900,
     stop_before_save: bool = False,
     preserve_detail_on_failure: bool = False,

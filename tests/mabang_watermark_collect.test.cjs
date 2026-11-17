@@ -46,8 +46,8 @@ test('水印采集器：只认 Shopee 商品编辑页', () => {
   assert.equal(collector.isProductEditUrl(''), false);
 });
 
-test('水印采集器：--cdp-url 解析（默认 9223）', () => {
-  assert.deepEqual(collector.parseArgs([]), { cdpUrl: 'http://127.0.0.1:9223' });
+test('水印采集器：--cdp-url 解析（默认 18223）', () => {
+  assert.deepEqual(collector.parseArgs([]), { cdpUrl: 'http://127.0.0.1:18223' });
   assert.deepEqual(collector.parseArgs(['--cdp-url', 'http://127.0.0.1:9333']), { cdpUrl: 'http://127.0.0.1:9333' });
 });
 

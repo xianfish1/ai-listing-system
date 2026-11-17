@@ -301,11 +301,12 @@ def test_new_slots_start_only_the_new_targets(monkeypatch: pytest.MonkeyPatch) -
 
 
 def test_login_gate_failure_keeps_the_auto_login_reason(monkeypatch: pytest.MonkeyPatch) -> None:
-    """门禁失败要带上自动登录的原始原因，不能只报一个 failed。
+    """登录失败不阻止启动，但自动登录的原始原因要带回去给界面看。
 
     2026-10-12：从一个精简 PATH 的 shell 重启 API 后，自动登录返回
     ``{"status": "failed", "error": "无法启动 Node：[WinError 2] …"}``；多账号路径
     原先只把 status 拼进消息，界面显示的「马帮登录未确认：failed」完全看不出原因。
+    2026-11-17：这条路径改为「先启动进程，失败只警告」，否则 restart 会被登录门挡住。
     """
 
     account = _account("acct-a", port=9223)
@@ -322,14 +323,32 @@ def test_login_gate_failure_keeps_the_auto_login_reason(monkeypatch: pytest.Monk
             "browser_mode": "headed",
         }
 
+    started: list[int] = []
+
+    class SpySupervisor:
+        def __init__(self, slot: int) -> None:
+            self.slot = slot
+
+        def status(self) -> dict:
+            return {"status": "stopped", "pid": None, "last_error": ""}
+
+        def start(self) -> dict:
+            started.append(self.slot)
+            return {"status": "running", "pid": 99}
+
     monkeypatch.setattr(main, "_prepare_worker_browser_login", fake_prepare)
+    monkeypatch.setattr(
+        multi,
+        "_supervisors",
+        {account["id"]: SpySupervisor(0), f"{account['id']}#slot2": SpySupervisor(1)},
+    )
 
-    with pytest.raises(RuntimeError) as excinfo:
-        main._run_account_worker_action(multi, "start")
+    result = main._run_account_worker_action(multi, "start")
 
-    message = str(excinfo.value)
-    assert message.startswith("马帮登录未确认：failed")
-    assert "无法启动 Node" in message
+    assert started == [0, 1], "登录失败也必须把进程拉起来"
+    warnings = " ".join(str(row.get("warning") or "") for row in result["workers"])
+    assert warnings.startswith("马帮登录未确认：failed")
+    assert "无法启动 Node" in warnings
 
 
 def test_login_gate_failure_message_has_no_dangling_dash_without_a_reason() -> None:

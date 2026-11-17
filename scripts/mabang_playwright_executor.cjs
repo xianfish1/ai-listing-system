@@ -2,6 +2,12 @@
 
 const fs = require('fs');
 const { chromium } = require('playwright');
+const {
+  LISTING_MODE_SITE,
+  isCnscPageMode,
+  isPureCnscMode,
+  normalizeListingMode,
+} = require('./listing_modes.cjs');
 
 const TEXT = Object.freeze({
   pending: '\u5f85\u53d1\u5e03\u5546\u54c1',
@@ -488,7 +494,7 @@ function detailPageMatchesTask(detailUrl, task = {}) {
   const globalFlag = url.match(/[?&]global=([^&#]+)/i);
   const actualGlobal = globalFlag ? decodeURIComponent(globalFlag[1]).toLowerCase() : '';
   const isGlobalPage = ['1', 'true', 'yes'].includes(actualGlobal);
-  const wantsGlobal = String(task?.store?.listing_mode || '') === 'cnsc_global';
+  const wantsGlobal = isCnscPageMode(task?.store?.listing_mode);
   return isGlobalPage === wantsGlobal;
 }
 
@@ -520,7 +526,7 @@ async function openListingWorkspace(browser, task) {
   if (!(await activateTab(pendingFrame, TEXT.pending))) {
     await clickExact(pendingFrame, TEXT.pending);
   }
-  const isGlobal = String((task.store || {}).listing_mode || '') === 'cnsc_global';
+  const isGlobal = isCnscPageMode((task.store || {}).listing_mode);
   // 马帮真机现场（2026-09-27，CDP 9223，本土 HN_POD 任务 71181e90）：
   //   待发布商品 → 内层 草稿箱/定时任务/刊登中/刊登失败/刊登成功 + 「新增刊登」
   //   站点商品   → 内层 正在销售/已售完/已下架/已禁卖/疑似删除，**没有**「新增刊登」
@@ -878,7 +884,7 @@ function discountDisplayTolerance(value) {
 }
 
 function buildCNSCSitePricePlan(task) {
-  if (String(task.store?.listing_mode || '') !== 'cnsc_global') return [];
+  if (!isCnscPageMode(task.store?.listing_mode)) return [];
   const defaultPercent = Number(task.store?.default_site_discount_percent ?? task.cnsc?.default_site_discount_percent ?? 40);
   const skus = Array.isArray(task.sku_grid?.skus) ? task.sku_grid.skus : [];
   return actionableCNSCTargets(task).map((target) => {
@@ -1042,7 +1048,7 @@ async function closeCNSCSitePicker(picker) {
 }
 
 async function selectCNSCTargetSites(frame, task) {
-  if ((task.store || {}).listing_mode !== 'cnsc_global') return { skipped: true };
+  if (!isCnscPageMode((task.store || {}).listing_mode)) return { skipped: true };
   const targets = actionableCNSCTargets(task);
   if (!targets.length) throw new BlockedError('cnsc_target_sites_missing');
   const picker = await openCNSCSitePicker(frame);
@@ -1067,7 +1073,7 @@ async function selectCNSCTargetSites(frame, task) {
 }
 
 async function verifyCNSCTargetSites(frame, task) {
-  if ((task.store || {}).listing_mode !== 'cnsc_global') return { skipped: true, selected: [] };
+  if (!isCnscPageMode((task.store || {}).listing_mode)) return { skipped: true, selected: [] };
   const targets = actionableCNSCTargets(task);
   if (!targets.length) throw new BlockedError('cnsc_target_sites_missing');
   const picker = await openCNSCSitePicker(frame);
@@ -1302,7 +1308,7 @@ async function readCNSCSitePriceSnapshot(frame, table, plan) {
 }
 
 async function fillCNSCSitePricesAndDiscounts(frame, task) {
-  if (String(task.store?.listing_mode || '') !== 'cnsc_global') return { skipped: true };
+  if (!isCnscPageMode(task.store?.listing_mode)) return { skipped: true };
   const plan = buildCNSCSitePricePlan(task);
   const table = await findCNSCSitePriceTable(frame, plan);
   // Activity selection first: choosing an activity is the UI flow the real page
@@ -1331,7 +1337,7 @@ async function fillCNSCSitePricesAndDiscounts(frame, task) {
 // draft. The parity test in tests/mabang_playwright_executor.test.cjs asserts the
 // toggle label is disjoint from PUBLISH_TEXTS so it can never be treated as publish.
 async function enableCNSCAutoPublish(frame, task) {
-  if ((task.store || {}).listing_mode !== 'cnsc_global') return { skipped: true };
+  if (!isCnscPageMode((task.store || {}).listing_mode)) return { skipped: true };
   const toggle = frame.getByRole('checkbox', { name: TEXT.autoPublishToSites, exact: true });
   if (await toggle.count() !== 1) throw new BlockedError('cnsc_auto_publish_toggle_not_found');
   // Element UI hides the native input (opacity:0), so check() never sees it visible;
@@ -2506,7 +2512,7 @@ async function customValueEchoed(frame, item, labels, fieldId, target) {
 
 async function selectStore(frame, task) {
   const store = task.store || {};
-  const globalMode = String(store.listing_mode || '') === 'cnsc_global';
+  const globalMode = isCnscPageMode(store.listing_mode);
   const cnscStore = store.cnsc_store || {};
   const labels = globalMode
     ? ['CNSC店铺', '全球商品店铺', TEXT.storeName, '\u5e97\u94fa']
@@ -2824,8 +2830,8 @@ async function autoFillMissingRequiredAttributes(frame, task, page, resolvedFiel
   if (!page || !apiUrl) return resolvedFields;
   let preferredFields = resolvedFields;
   try {
-    // 本土：等类目属性定义加载完再读；跨境保持单次读取（未单独验证前不改动）。
-    const siteMode = String(task.store?.listing_mode || '') !== 'cnsc_global';
+    // 本土：等类目属性定义加载完再读；跨境（含 3PF）保持单次读取（未单独验证前不改动）。
+    const siteMode = normalizeListingMode(task.store?.listing_mode) === LISTING_MODE_SITE;
     const live = siteMode
       ? await readLiveCategoryAttributesWhenReady(frame)
       : await readLiveCategoryAttributes(frame);
@@ -2954,11 +2960,11 @@ async function setCategoryAttributes(frame, task, page) {
     // Mabang renders only the REQUIRED attributes by default; the rest sit behind the
     // 「显示所有属性」 toggle. Optional attributes that are still absent afterwards are
     // skipped rather than blocking the whole draft.
-    // 本土（site）与跨境的匹配策略分开：下面这些容错只作用于本土站点刊登，
-    // 跨境（cnsc_global）保持原样，避免影响已验证过的 CNSC 填单路径。
-    const siteMode = String(task.store?.listing_mode || '') !== 'cnsc_global';
+    // 本土（site）与跨境（cnsc_global / cnsc_3pf）的匹配策略分开：下面这些容错
+    // 只作用于本土站点刊登，跨境页保持原样，避免影响已验证过的 CNSC 填单路径。
+    const siteMode = normalizeListingMode(task.store?.listing_mode) === LISTING_MODE_SITE;
     // 本土：类目属性下拉按现场证实的交互收尾（多选面板用 Esc 收，保住待提交值）；
-    // 跨境(cnsc_global) 保持原样，改动需要单独验证。
+    // 跨境页保持原样，改动需要单独验证。
     const matchOptions = siteMode ? { loose: true, siteMultiSelectHandling: true } : {};
     let hiddenExpanded = false;
     const skipped = [];
@@ -3384,7 +3390,7 @@ async function uploadProductImages(frame, task) {
 
   const sizeChart = (task.images || {}).size_chart || {};
   const sizePath = sizeChart.source === 'template' ? '' : (sizeChart.image_path || (task.images || {}).size_chart_image_path);
-  const siteOptions = String(task.store?.listing_mode || '') === 'cnsc_global' ? {} : siteSelectOptions();
+  const siteOptions = isCnscPageMode(task.store?.listing_mode) ? {} : siteSelectOptions();
   let sizeChartMethod = 'not_requested';
   if (sizeChart.source === 'template') {
     await selectSizeChartTemplate(frame, sizeChart, siteOptions);
@@ -4505,8 +4511,8 @@ async function insertDescriptionMediaBatch(frame, context, pending, sizeChartUrl
 
 // 描述插图失败不阻断草稿（与媒体阶段一致）：降级成警告，人工补图。
 async function appendDescriptionMedia(frame, task) {
-  // 跨境 CNSC 的描述页没有这套插图入口，保持原样。
-  if (String((task.store || {}).listing_mode || '') === 'cnsc_global') return { skipped: true };
+  // 跨境 CNSC 的描述页没有这套插图入口；跨境 3PF 按本土要求尝试，失败只降级成警告。
+  if (isPureCnscMode((task.store || {}).listing_mode)) return { skipped: true };
   try {
     const result = await appendDescriptionMediaOnce(frame, task);
     // 步骤追踪只留 stage/ok，具体是哪条路（upload / upload-reinsert / already）与
@@ -5981,7 +5987,7 @@ function verifySiteSkuReadback(assignments, pageRows) {
 
 async function fillSkuGrid(frame, task) {
   const grid = task.sku_grid || {};
-  const siteMode = String(task.store?.listing_mode || '') !== 'cnsc_global';
+  const siteMode = !isCnscPageMode(task.store?.listing_mode);
   const siteAssignments = siteMode ? matchSiteSkuRows(grid.skus || [], await readSiteSkuGridRows(frame)) : [];
   const result = await frame.evaluate((input) => {
     const grid = input.grid || {};
@@ -6030,7 +6036,7 @@ async function fillSkuGrid(frame, task) {
     const pricesBySku = new Map((grid.prices || []).map((price) => [String(price.sku_code || ''), price]));
     const columnDefs = table.tableColumn || [];
     const columns = new Set(columnDefs.map((column) => column.field));
-    const globalMode = String(grid.listing_mode || '') === 'cnsc_global';
+    const globalMode = input.globalMode === true;
     const strictFieldFor = (names, titleFragments) => {
       const matches = new Set(names.filter((name) => columns.has(name)));
       for (const column of columnDefs) {
@@ -6085,8 +6091,8 @@ async function fillSkuGrid(frame, task) {
     if (typeof table.updateData === 'function') table.updateData();
     if (typeof table.recalculate === 'function') table.recalculate();
     return { ok: true, rows: rows.length };
-  }, { grid, siteAssignments });
-  if (!result.ok && String(task.store?.listing_mode || '') === 'cnsc_global') {
+  }, { grid, siteAssignments, globalMode: isCnscPageMode(grid.listing_mode || task.store?.listing_mode) });
+  if (!result.ok && isCnscPageMode(task.store?.listing_mode)) {
     return fillCNSCSkuGridFromDom(frame, task);
   }
   if (!result.ok) throw new BlockedError(result.reason, result);
@@ -6534,7 +6540,7 @@ async function validateBeforeSave(frame, task, stages) {
     'fill_logistics_info',
     'upload_variant_thumbnails',
   ];
-  if (String((task.store || {}).listing_mode || '') !== 'cnsc_global') requiredStages.push('select_discount_activity');
+  if (!isCnscPageMode((task.store || {}).listing_mode)) requiredStages.push('select_discount_activity');
   else requiredStages.push('enable_cnsc_auto_publish', 'select_cnsc_target_sites', 'fill_cnsc_site_prices_and_discounts');
   const missingStages = requiredStages.filter((stage) => !(stage in stages));
   if (missingStages.length) throw new BlockedError('required_stage_missing', { stages: missingStages });
@@ -6664,12 +6670,12 @@ async function validateBeforeSave(frame, task, stages) {
     saveText: TEXT.save,
     expectedRows: Number((task.sku_grid || {}).expected_rows || 0),
     cnsc: {
-      enabled: String((task.store || {}).listing_mode || '') === 'cnsc_global',
+      enabled: isCnscPageMode((task.store || {}).listing_mode),
       expected_sites: (task.store?.target_site_stores || []).filter((target) => String(target.site_code || '').trim().toUpperCase() !== 'SIP').length,
       skus: task.sku_grid?.skus || [],
     },
   });
-  if (String((task.store || {}).listing_mode || '') === 'cnsc_global') {
+  if (isCnscPageMode((task.store || {}).listing_mode)) {
     const snapshot = await readCNSCDomGridSnapshot(frame);
     if (snapshot.table_count !== 1) {
       audit.cnsc.missing_columns = ['sku_table'];
@@ -6762,7 +6768,7 @@ async function validateBeforeSave(frame, task, stages) {
 //     base tier's cost_price at copy time (see storage._cnsc_copy_price_tiers), and
 //     the SKU inherits that value.
 function validateCNSCTaskPayload(task) {
-  if (String((task.store || {}).listing_mode || '') !== 'cnsc_global') return { ok: true, errors: [] };
+  if (!isCnscPageMode((task.store || {}).listing_mode)) return { ok: true, errors: [] };
   const errors = [];
   const store = task.store || {};
   const cnscStore = store.cnsc_store || {};
@@ -7189,7 +7195,7 @@ async function verifySavedDraftEvidence(page, frame, saveResult, task, stages = 
       emit('stage', { stage: 'verify_saved_draft', ok: true, evidence_count: evidenceCount });
       const closure = await closeSavedDetailPage(page, frame);
       let cnscDraft = null;
-      if (String((task.store || {}).listing_mode || '') === 'cnsc_global') {
+      if (isCnscPageMode((task.store || {}).listing_mode)) {
         try {
           cnscDraft = await verifyCNSCDraftInbox(browser, task);
         } catch (error) {
@@ -7265,7 +7271,7 @@ const PRE_SAVE_STAGES = [
   ['fill_sku_grid', async (d, task) => fillSkuGrid(d.frame, task)],
   ['fill_cnsc_site_prices_and_discounts', async (d, task) => fillCNSCSitePricesAndDiscounts(d.frame, task)],
   ['fill_logistics_info', async (d, task) => fillLogisticsInfo(d.frame, task)],
-  ['select_discount_activity', async (d, task) => task.store?.listing_mode === 'cnsc_global' ? { skipped: true } : selectDiscountActivity(d.frame, task)],
+  ['select_discount_activity', async (d, task) => isCnscPageMode(task.store?.listing_mode) ? { skipped: true } : selectDiscountActivity(d.frame, task)],
   ['upload_variant_thumbnails', async (d, task) => uploadVariantThumbnails(d.frame, task)],
   // 马帮保存闸：描述图片宽度 < 700 会被拒。描述里的图都在 append_description_media
   // 之后才齐，所以这一步放在保存前、校验前，用马帮自己的「编辑图片」把宽度修成 1000，
@@ -7423,7 +7429,7 @@ async function run() {
           attempts: [{ attempt: 1, ok: true, failed_stage: null }],
         };
       }
-      if (String((task.store || {}).listing_mode || '') === 'cnsc_global') {
+      if (isCnscPageMode((task.store || {}).listing_mode)) {
         await assertCNSCDraftInboxCleanForParentSku(browser, task);
       }
       const save = await clickSaveDraftOnce(result.detail.page, result.detail.frame, task);
@@ -7517,7 +7523,7 @@ async function run() {
   // Save is intentionally NOT retried: clickSaveDraftOnce consumes the save_token
   // and a real POST /save may have reached Mabang even when Playwright reports a
   // click timeout, so a retry could silently create a duplicate draft.
-  if (String((task.store || {}).listing_mode || '') === 'cnsc_global') {
+  if (isCnscPageMode((task.store || {}).listing_mode)) {
     await assertCNSCDraftInboxCleanForParentSku(browser, task);
   }
   const save = await clickSaveDraftOnce(detail.page, detail.frame, task);

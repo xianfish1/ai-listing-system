@@ -1926,8 +1926,8 @@ test('site attributes tolerate the （Size） suffix, expand 显示所有属性 
   assert.match(source, /frame\.locator\('button\.el-button--text', \{ hasText: '显示所有属性' \}\)/);
   assert.match(source, /present = await findFormItemPresent\(frame, labels, 2000, matchOptions\);/);
 
-  //   3) 容错全部限定在本土：跨�?走原来的匹配参数�?
-  assert.match(source, /const siteMode = String\(task\.store\?\.listing_mode \|\| ''\) !== 'cnsc_global';/);
+  //   3) 容错全部限定在本土：跨境（CNSC / 3PF）走原来的匹配参数。
+  assert.match(source, /const siteMode = normalizeListingMode\(task\.store\?\.listing_mode\) === LISTING_MODE_SITE;/);
   assert.match(source, /const matchOptions = siteMode \? \{ loose: true, siteMultiSelectHandling: true \} : \{\};/);
   assert.match(source, /if \(!present && siteMode && !hiddenExpanded\) \{/);
 });
@@ -1951,8 +1951,9 @@ test('描述插图阶�?排在上传商品图之后，跨�?不参�?', () =>
   const stages = source.slice(source.indexOf('const PRE_SAVE_STAGES = ['), source.indexOf('function resolvePreSaveStartIndex'));
   assert.match(stages, /\['upload_product_images'[\s\S]*\['append_description_media'[\s\S]*\['__optional_media__'/);
 
-  // 跨�? CNSC 的描述页没有这�?入口 �?直接跳过（不点保存�?�不做任�?DOM 操作）�??
-  assert.match(source, /async function appendDescriptionMedia\(frame, task\) \{[\s\S]*?listing_mode \|\| ''\) === 'cnsc_global'\) return \{ skipped: true \};/);
+  // 纯跨境 CNSC 的描述页没有这�?入口 �?直接跳过（不点保存�?�不做任�?DOM 操作）；
+  // 跨境本土 3PF 按本土要求尝试，失败只降级成警告。
+  assert.match(source, /async function appendDescriptionMedia\(frame, task\) \{[\s\S]*?isPureCnscMode\(\(task\.store \|\| \{\}\)\.listing_mode\)\) return \{ skipped: true \};/);
 });
 
 test('尺码表图先插、引用产品图后插，且失败降级为�?�?', () => {
@@ -3292,4 +3293,45 @@ test('描述插图：光标停在正文开头时不算落到底', async () => {
     global.window = originalWindow;
     global.NodeFilter = originalFilter;
   }
+});
+
+// ---------------------------------------------------------------------------
+// 跨境本土 3PF：页面/入口按 CNSC（global 页 + 站点价格表），上款按本土
+// （描述插图、默认 SKU、尺码表末位）。判断走 listing_modes.cjs 的三个谓词。
+// ---------------------------------------------------------------------------
+test('3PF 复用 global 详情页，本土页面不匹配', () => {
+  const globalUrl = 'https://www.mabangerp.com/index.php?mod=product.productDetailShopee&global=1';
+  assert.equal(executor.detailPageMatchesTask(globalUrl, { store: { listing_mode: 'cnsc_3pf' } }), true);
+  assert.equal(executor.detailPageMatchesTask(globalUrl, { store: { listing_mode: 'cnsc_global' } }), true);
+  assert.equal(executor.detailPageMatchesTask(globalUrl, { store: { listing_mode: 'site' } }), false);
+});
+
+test('3PF 走 CNSC payload 校验（缺目标站点/价格档要报错），本土直接放行', () => {
+  assert.deepEqual(executor.validateCNSCTaskPayload({ store: { listing_mode: 'site' } }), { ok: true, errors: [] });
+
+  const result = executor.validateCNSCTaskPayload({ store: { listing_mode: 'cnsc_3pf' } });
+
+  assert.equal(result.ok, false);
+  assert.ok(result.errors.length > 0);
+});
+
+test('3PF 会执行自动发布/目标站点阶段（不再是 site 的 skip）', async () => {
+  const frame = { getByRole() { return { async count() { return 0; } }; } };
+
+  await assert.rejects(
+    () => executor.enableCNSCAutoPublish(frame, { store: { listing_mode: 'cnsc_3pf' } }),
+    /cnsc_auto_publish_toggle_not_found/,
+  );
+  assert.deepEqual(
+    await executor.enableCNSCAutoPublish(frame, { store: { listing_mode: 'site' } }),
+    { skipped: true },
+  );
+});
+
+test('3PF 仍尝试描述插图：入口缺失只降级成警告，不抛错', async () => {
+  const result = await executor.appendDescriptionMedia(undefined, { store: { listing_mode: 'cnsc_3pf' } });
+
+  assert.notDeepEqual(result, { skipped: true });
+  assert.equal(result.status, 'warning');
+  assert.ok(result.code);
 });

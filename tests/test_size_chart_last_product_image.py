@@ -246,12 +246,12 @@ def test_ui_exposes_the_switch_on_template_and_copy_editors() -> None:
     for label in ["产品图最后一张放尺码表"]:
         assert label in html
 
-    # 模板：保存时跨境强制关，回显时缺字段＝开，跨境隐藏整行。
-    assert 'size_chart_as_last_product_image: listingMode === "cnsc_global"' in script
+    # 模板：保存时纯跨境强制关（site / cnsc_3pf 按开关），回显时缺字段＝开，纯跨境隐藏整行。
+    assert 'size_chart_as_last_product_image: localLike' in script
     assert 'template.size_chart_as_last_product_image !== false' in script
-    assert '$("store-template-size-chart-last-image-line")?.toggleAttribute("hidden", global)' in script
+    assert '$("store-template-size-chart-last-image-line")?.toggleAttribute("hidden", pureCnsc)' in script
 
-    # 副本：同样保存/回显，跨境隐藏。
-    assert 'payload.size_chart_as_last_product_image = cnsc' in script
+    # 副本：同样保存/回显，纯跨境隐藏（跨境本土 3PF 仍显示）。
+    assert 'payload.size_chart_as_last_product_image = isPureCnscMode(copy)' in script
     assert 'copy.size_chart_as_last_product_image !== false' in script
-    assert '$("listing-copy-size-chart-last-image-line")?.toggleAttribute("hidden", isCNSCListingCopy(copy))' in script
+    assert '$("listing-copy-size-chart-last-image-line")?.toggleAttribute("hidden", isPureCnscMode(copy))' in script

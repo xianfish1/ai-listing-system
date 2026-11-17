@@ -145,7 +145,7 @@ async function readStdin() {
 
 async function run() {
   const input = await readStdin();
-  const browser = await chromium.connectOverCDP(input.cdp_url || 'http://127.0.0.1:9223');
+  const browser = await chromium.connectOverCDP(input.cdp_url || 'http://127.0.0.1:18223');
   try {
     const detail = await findDetail(browser);
     const result = input.mode === 'snapshot'

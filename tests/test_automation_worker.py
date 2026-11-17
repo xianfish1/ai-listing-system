@@ -850,3 +850,121 @@ def test_worker_passes_its_slot_to_login_recovery_and_page_import_probe(
     assert seen == [("login", "acct-a", 1)]
     # 槽位 Worker 用的还是启动参数给它的那只浏览器
     assert worker.cdp_url == "http://127.0.0.1:9323"
+
+
+def test_worker_writes_a_heartbeat_file(tmp_path: Path) -> None:
+    heartbeat_path = tmp_path / "worker-heartbeat.json"
+    worker = automation_worker.AutomationWorker(
+        FakeClient(claimed=False),
+        worker_id="w-heartbeat",
+        upload_root=tmp_path,
+        heartbeat_path=heartbeat_path,
+    )
+
+    worker.heartbeat.set(status="paused", paused_reason="field_not_unique")
+    worker.heartbeat.write_now()
+
+    payload = __import__("json").loads(heartbeat_path.read_text(encoding="utf-8"))
+    assert payload["status"] == "paused"
+    assert payload["paused_reason"] == "field_not_unique"
+    assert payload["worker_id"] == "w-heartbeat"
+    assert payload["pid"] > 0
+
+
+def test_lease_heartbeat_survives_transient_failures() -> None:
+    class FlakyClient:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def heartbeat(self, *args, **kwargs):
+            self.calls += 1
+            if self.calls <= 2:
+                raise RuntimeError("Automation API is unavailable: timed out")
+            return {}
+
+    client = FlakyClient()
+    lease = automation_worker.LeaseHeartbeat(
+        client,
+        job_id="job-1",
+        worker_id="w-1",
+        lease_token="t-1",
+        lease_seconds=120,
+        interval_seconds=0.01,
+        phase="playwright_save_draft",
+    )
+    lease.start()
+    import time
+
+    time.sleep(0.2)
+    lease.stop()
+
+    assert client.calls >= 3
+    assert lease.failures == 0, "瞬时失败后应该继续心跳并重置计数"
+
+
+def test_lease_heartbeat_stops_when_the_lease_is_lost() -> None:
+    class LostLeaseClient:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def heartbeat(self, *args, **kwargs):
+            self.calls += 1
+            raise RuntimeError("Automation API returned HTTP 409: lease expired")
+
+    client = LostLeaseClient()
+    lease = automation_worker.LeaseHeartbeat(
+        client,
+        job_id="job-1",
+        worker_id="w-1",
+        lease_token="t-1",
+        lease_seconds=120,
+        interval_seconds=0.01,
+        phase="playwright_save_draft",
+    )
+    lease.start()
+    import time
+
+    time.sleep(0.2)
+    lease.stop()
+
+    assert client.calls == 1, "租约确定失效后不再重试"
+    assert "HTTP 409" in lease.last_error
+
+
+def test_cdp_probe_requires_a_real_cdp_endpoint(monkeypatch: pytest.MonkeyPatch) -> None:
+    worker = automation_worker.AutomationWorker(
+        FakeClient(claimed=False), worker_id="w-cdp", upload_root=Path(".")
+    )
+
+    class Response:
+        def __init__(self, payload: bytes) -> None:
+            self.payload = payload
+
+        def read(self) -> bytes:
+            return self.payload
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args) -> None:
+            return None
+
+    monkeypatch.setattr(
+        automation_worker.urllib.request,
+        "urlopen",
+        lambda url, timeout=None: Response(b'{"Browser": "Chrome/157.0"}'),
+    )
+    assert worker._cdp_is_reachable() is True
+
+    monkeypatch.setattr(
+        automation_worker.urllib.request,
+        "urlopen",
+        lambda url, timeout=None: Response(b"{}"),
+    )
+    assert worker._cdp_is_reachable() is False, "端口上有东西但不是 CDP 服务时不能当成可用"
+
+    def refuse(url, timeout=None):
+        raise OSError("connection refused")
+
+    monkeypatch.setattr(automation_worker.urllib.request, "urlopen", refuse)
+    assert worker._cdp_is_reachable() is False

@@ -446,9 +446,9 @@ def test_readiness_labels_preserve_required_category_attribute_ids():
 def test_listing_copy_table_only_requires_size_chart_for_local_copies():
     script = APP.read_text(encoding="utf-8")
     # 行渲染 2026-09-28 起抽到 appendListingCopyRow（列表要按完成时间分桶折叠），判据跟着搬过去。
+    # 2026-11-17：尺码图按「本土口径」要求（site / cnsc_3pf），纯跨境 CNSC 不要求。
     section = script[script.index("function appendListingCopyRow"):script.index("// 已完成区的时间分组行")]
-    assert "const cnsc = isCNSCListingCopy(copy);" in section
-    assert "if (!cnsc &&" in section
+    assert "if (isLocalLikeMode(copy) && (" in section
 
 
 def test_all_task_statuses_have_chinese_labels():

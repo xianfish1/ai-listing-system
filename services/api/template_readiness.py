@@ -6,6 +6,7 @@ from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from typing import Any
 
 from services.api.category_rules import validate_attribute_values
+from services.api.listing_modes import is_cnsc_page, is_local_like
 from services.api.promotion_resolution import promotion_state
 
 
@@ -58,7 +59,8 @@ def check_store_template(
 ) -> ReadinessResult:
     errors: list[ReadinessIssue] = []
     warnings: list[ReadinessIssue] = []
-    is_cnsc = str(template.get("listing_mode") or "").strip().lower() == "cnsc_global"
+    is_cnsc = is_cnsc_page(template.get("listing_mode"))
+    local_like = is_local_like(template.get("listing_mode"))
     if not template.get("category_profile_version_id") or not category_version:
         errors.append(
             ReadinessIssue("category_rule_missing", "category_profile_version_id", "需要从马帮导入类目规则")
@@ -90,8 +92,7 @@ def check_store_template(
             )
 
     if not is_cnsc:
-        promotion_id = str(
-            template.get("promotion_activity_id")
+        promotion_id = str(            template.get("promotion_activity_id")
             or template.get("mabang_discount_id")
             or template.get("discount_id")
             or ""
@@ -137,7 +138,7 @@ def check_store_template(
                 "请选择描述生成方案",
             )
         )
-    if not is_cnsc and not str(
+    if local_like and not str(
         template.get("size_chart_asset_id")
         or template.get("default_size_chart_path")
         or template.get("mabang_size_chart_template_id")

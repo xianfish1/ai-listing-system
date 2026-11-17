@@ -11,10 +11,20 @@ import os
 import subprocess
 import sys
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Sequence
 
 from services.api.subprocess_utils import no_console_window_kwargs
+
+
+# Worker 每 10s 刷一次心跳；超过这个年龄就认为「进程还活着但主循环卡死」。
+# 阈值给足余量：执行器单次最长 480s，但心跳由独立线程写，不受执行器阻塞影响。
+WORKER_STALE_HEARTBEAT_SECONDS = 120.0
+WORKER_HEARTBEAT_FILENAME = "worker-heartbeat.json"
+# 这些暂停原因是可恢复的（浏览器/登录掉了）：看护轮可以自动重启。
+# 其它暂停（页面结构变了、字段不唯一…）重启只会重复烧任务，留给人工。
+RECOVERABLE_PAUSE_REASONS = frozenset({"needs_manual_login_or_verification"})
 
 
 RESTART_REQUIRED_KEYS = frozenset(
@@ -201,6 +211,7 @@ class WorkerSupervisor:
         self.state_path = self.runtime_dir / "worker-state.json"
         self.lock_path = self.runtime_dir / "worker.lock"
         self.log_path = self.runtime_dir / "worker.log"
+        self.heartbeat_path = self.runtime_dir / WORKER_HEARTBEAT_FILENAME
         self.command = list(command or [sys.executable, "-m", "scripts.automation_worker"])
         self.process_factory = process_factory or subprocess.Popen
         self.pid_is_running = pid_is_running or _pid_is_running
@@ -255,14 +266,75 @@ class WorkerSupervisor:
         except OSError:
             pass
 
+    def _read_heartbeat(self) -> dict[str, Any]:
+        """当前 Worker 心跳（文件缺失/坏掉都返回空 dict，不误判）。"""
+
+        if not self.heartbeat_path.is_file():
+            return {}
+        try:
+            value = json.loads(self.heartbeat_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return {}
+        if not isinstance(value, dict):
+            return {}
+        age: float | None = None
+        raw_at = str(value.get("at") or "").strip()
+        if raw_at:
+            try:
+                parsed = datetime.strptime(raw_at, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
+                age = max(0.0, time.time() - parsed.timestamp())
+            except ValueError:
+                age = None
+        return {**value, "heartbeat_age_seconds": age}
+
+    def _heartbeat_state(self) -> dict[str, Any]:
+        heartbeat = self._read_heartbeat()
+        if not heartbeat:
+            return {}
+        age = heartbeat.get("heartbeat_age_seconds")
+        stale = isinstance(age, (int, float)) and age > WORKER_STALE_HEARTBEAT_SECONDS
+        return {
+            "heartbeat_at": str(heartbeat.get("at") or ""),
+            "heartbeat_age_seconds": age,
+            "heartbeat_status": str(heartbeat.get("status") or ""),
+            "paused": str(heartbeat.get("status") or "") == "paused",
+            "paused_reason": str(heartbeat.get("paused_reason") or ""),
+            "stale": bool(stale),
+            "stale_reason": f"worker heartbeat is stale ({int(age)}s old)" if stale else "",
+        }
+
+    def _heartbeat_is_stale(self) -> bool:
+        return bool(self._heartbeat_state().get("stale"))
+
+    def _remove_heartbeat(self) -> None:
+        """新进程启动前/停止后清掉旧心跳，避免把上一轮的状态当成当前存活。"""
+
+        try:
+            self.heartbeat_path.unlink()
+        except OSError:
+            pass
+
     def _refresh_process_state(self) -> None:
         if self._process is None:
-            if self._state.get("status") == "running" and not self.pid_is_running(self._state.get("pid")):
-                pid = self._state.get("pid")
+            if self._state.get("status") != "running":
+                return
+            pid = self._state.get("pid")
+            if not self.pid_is_running(pid):
                 self._state.update(
                     status="failed",
                     pid=None,
                     last_error=f"worker process is no longer running (PID {pid or 'unknown'})",
+                )
+                self._write_state()
+                return
+            # PID 活着不代表它是我们的 Worker：Windows 会复用 PID。真正的判据是
+            # Worker 自己持有的锁；锁没拿住就绝不能领养（否则状态永远 running，
+            # 唤醒逻辑会一直跳过这个目标）。
+            if self.worker_pid_path is not None and self._live_worker_pid() is None:
+                self._state.update(
+                    status="failed",
+                    pid=None,
+                    last_error=f"worker lock is not held (PID {pid})",
                 )
                 self._write_state()
             return
@@ -279,7 +351,11 @@ class WorkerSupervisor:
 
     def status(self) -> dict[str, Any]:
         self._refresh_process_state()
-        return dict(self._state)
+        payload = dict(self._state)
+        # 心跳字段只用于展示/看护判断，不写回 state 文件（旧 Worker 没心跳文件时
+        # 这些键整体缺席，行为与改动前一致）。
+        payload.update(self._heartbeat_state())
+        return payload
 
     def hold(self, *, reason: str = "") -> dict[str, Any]:
         """记下「操作员手动停/暂停」——按需唤醒要跳过这个目标。
@@ -321,17 +397,33 @@ class WorkerSupervisor:
                 self._write_state()
             return self.status()
         persisted_pid = self._state.get("pid")
-        if self._state.get("status") == "running" and self.pid_is_running(persisted_pid):
-            self._state.update(last_error="", adopted=True, heal_suspended=False)
-            self._write_state()
-            return self.status()
         recovered_pid = self._live_worker_pid()
         if recovered_pid is not None:
-            self._state.update(status="running", pid=recovered_pid, last_error="", adopted=True, heal_suspended=False)
-            self._write_state()
-            return self.status()
+            # 锁 + PID 都指向真实 Worker。心跳过期说明主循环卡死：杀掉换新进程，
+            # 否则它会一直占着锁、永远显示 running。
+            if self._heartbeat_is_stale():
+                self._terminate_live_worker()
+                if self._live_worker_pid() is not None:
+                    self._state.update(
+                        status="failed",
+                        last_error="worker heartbeat is stale and it did not exit after restart",
+                        stale=True,
+                        stale_reason="worker heartbeat is stale",
+                    )
+                    self._write_state()
+                    return dict(self._state)
+            else:
+                self._state.update(status="running", pid=recovered_pid, last_error="", adopted=True, heal_suspended=False)
+                self._write_state()
+                return self.status()
+        elif persisted_pid and self.pid_is_running(persisted_pid):
+            # PID 活着但 Worker 锁没拿住：不是我们的进程（Windows PID 复用），
+            # 绝不能领养，清掉状态后正常新起一个。
+            self._state.update(status="stopped", pid=None, adopted=False, last_error="")
         self._lock.acquire()
         self._maybe_rotate_log()
+        # 旧心跳属于上一轮进程；不清掉会在新 Worker 写下第一份心跳前被当成 stale。
+        self._remove_heartbeat()
         try:
             self.log_path.parent.mkdir(parents=True, exist_ok=True)
             log_handle = self.log_path.open("a", encoding="utf-8")
@@ -424,6 +516,7 @@ class WorkerSupervisor:
         if self._process is not None:
             self._terminate_process()
         self._terminate_live_worker()
+        self._remove_heartbeat()
         self._state.update(status="stopped", pid=None)
         self._write_state()
         self._lock.release()
@@ -434,17 +527,22 @@ class WorkerSupervisor:
         return self.start()
 
     def auto_heal(self) -> dict[str, Any]:
-        """Restart the worker if it crashed, unless it is in a crash loop.
+        """Restart the worker if it crashed, hung, or is recoverably paused.
 
-        Only a ``failed`` worker is healed. ``stopped`` and ``paused`` are
-        deliberate operator choices and are left untouched. A rolling window
-        caps how many automatic restarts may happen, so a worker that dies
-        immediately on every launch is not restarted forever — after the cap it
-        is left ``failed`` with an explanatory ``last_error`` for a human.
+        ``failed`` and stale-heartbeat (``stale``) workers are healed. A worker
+        paused on a recoverable reason (browser/login lost) is also healed; other
+        pauses are deliberate operator state and are left untouched. ``stopped``
+        stays stopped. A rolling window caps how many automatic restarts may
+        happen, so a worker that dies immediately on every launch is not
+        restarted forever — after the cap it is left ``failed`` with an
+        explanatory ``last_error`` for a human.
         """
 
         status = self.status()
-        if status.get("status") != "failed":
+        healable = status.get("status") == "failed" or status.get("stale") is True
+        if not healable and status.get("status") == "running" and status.get("paused"):
+            healable = str(status.get("paused_reason") or "").strip() in RECOVERABLE_PAUSE_REASONS
+        if not healable:
             return status
 
         now = self._monotonic()
@@ -482,8 +580,20 @@ class WorkerSupervisor:
     def logs(self, *, tail: int | None = None) -> dict[str, Any]:
         if not self.log_path.is_file():
             return {"path": str(self.log_path), "lines": []}
-        lines = self.log_path.read_text(encoding="utf-8", errors="replace").splitlines()
-        if tail is not None and tail >= 0:
+        if tail is None:
+            lines = self.log_path.read_text(encoding="utf-8", errors="replace").splitlines()
+            return {"path": str(self.log_path), "lines": lines}
+        # 只读文件末尾 256KB：长跑 Worker 的日志会到几十 MB，读整份会让
+        # /api/worker/status 越跑越慢（UI 每个轮询都读一次）。
+        try:
+            size = self.log_path.stat().st_size
+            with self.log_path.open("rb") as handle:
+                handle.seek(max(0, size - 256 * 1024))
+                chunk = handle.read().decode("utf-8", errors="replace")
+            lines = chunk.splitlines()
+        except OSError:
+            return {"path": str(self.log_path), "lines": []}
+        if tail >= 0:
             lines = lines[-tail:]
         return {"path": str(self.log_path), "lines": lines}
 

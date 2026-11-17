@@ -4,7 +4,7 @@
 // Usage: node scripts/collect_mabang_category_catalog_cdp.cjs <storeId> [cdpUrl]
 const { chromium } = require('playwright');
 const storeId = process.argv[2];
-const cdpUrl = process.argv[3] || 'http://127.0.0.1:9223';
+const cdpUrl = process.argv[3] || 'http://127.0.0.1:18223';
 if (!storeId) { console.error('storeId required'); process.exit(2); }
 
 const BFS = (storeId) => `(async () => {

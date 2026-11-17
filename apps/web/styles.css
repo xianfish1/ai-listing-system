@@ -228,6 +228,13 @@ button.secondary {
   color: var(--indigo-ink);
 }
 
+/* 跨境本土 3PF：与纯跨境 CNSC 区分开，避免运营把两种跨境模板看混。 */
+.template-mode-badge.is-3pf {
+  border-color: var(--green);
+  background: var(--green-soft);
+  color: var(--green);
+}
+
 .template-readiness-badge {
   border: 1px solid var(--amber);
   background: var(--amber-soft);
@@ -5759,6 +5766,33 @@ button.mini {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+/* 副本列表的刊登模式标签：本土 / 跨境 CNSC / 跨境本土 3PF。 */
+.listing-copy-mode-label {
+  display: inline-block;
+  margin-right: 4px;
+  padding: 0 5px;
+  border-radius: 999px;
+  font-size: 10px;
+  font-weight: 600;
+  line-height: 16px;
+  white-space: nowrap;
+  border: 1px solid var(--indigo);
+  background: var(--indigo-soft);
+  color: var(--indigo-ink);
+}
+
+.listing-copy-mode-label.is-3pf {
+  border-color: var(--green);
+  background: var(--green-soft);
+  color: var(--green);
+}
+
+.listing-copy-mode-label.is-site {
+  border-color: var(--border);
+  background: var(--surface-muted, #f4f5f7);
+  color: var(--muted-ink, #5b6270);
 }
 
 /* 模板列通常是「店铺名 - 站点类目」长串；给更宽预算但同样单行省略，

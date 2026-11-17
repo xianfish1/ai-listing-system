@@ -5,7 +5,7 @@ const path = require('node:path');
 const { chromium } = require('playwright-core');
 
 const RESULT_MARKER = 'MABANG_PAGE_IMPORT_RESULT ';
-const DEFAULT_CDP_URL = 'http://127.0.0.1:9223';
+const DEFAULT_CDP_URL = 'http://127.0.0.1:18223';
 const CAPTURE_SOURCE = fs.readFileSync(path.join(__dirname, 'mabang_page_import_capture.js'), 'utf8');
 
 function parseArgs(argv) {

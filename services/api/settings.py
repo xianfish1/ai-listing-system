@@ -85,7 +85,7 @@ MABANG_WORKSPACE_URL = os.getenv(
     "MABANG_WORKSPACE_URL",
     "https://www.mabangerp.com/index.php?mod=main.gotoApp&v=v3&menuKey=M0010813&platform=shopee&version=1",
 ).strip()
-WORKER_CDP_URL = os.getenv("WORKER_CDP_URL", "http://127.0.0.1:9223").strip()
+WORKER_CDP_URL = os.getenv("WORKER_CDP_URL", "http://127.0.0.1:18223").strip()
 WORKER_POLL_SECONDS = float(os.getenv("WORKER_POLL_SECONDS", "3"))
 WORKER_LEASE_SECONDS = int(os.getenv("WORKER_LEASE_SECONDS", "120"))
 

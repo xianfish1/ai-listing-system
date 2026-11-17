@@ -6,7 +6,7 @@ from urllib import request
 
 import pytest
 
-from services.api import settings, storage
+from services.api import main, settings, storage
 from tests.test_api_boundaries import _start_api
 from workers.asset_scanner.scanner import scan_asset_root
 
@@ -17,6 +17,17 @@ def isolated_store(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(settings, "STORAGE_DIR", tmp_path / "storage")
     monkeypatch.setattr(settings, "EXPORT_DIR", tmp_path / "exports")
     monkeypatch.setattr(settings, "STORE_FILE", tmp_path / "store.json")
+
+
+@pytest.fixture(autouse=True)
+def _no_real_worker_wake(monkeypatch: pytest.MonkeyPatch) -> None:
+    """这个模块只验证接口/数据形状：建任务触发的后台唤醒直接置空。
+
+    后台唤醒会真启动浏览器 + Worker（现场 2026-11-17 的 pytest 残留 Chrome 就是
+    它留下的）。唤醒行为由 test_worker_on_demand / test_worker_supervisor 覆盖。
+    """
+
+    monkeypatch.setattr(main, "_wake_worker_for_created_jobs_background", lambda *args, **kwargs: None)
 
 
 def test_create_base_product_recognizes_main_sku_from_folder_name(tmp_path: Path) -> None:

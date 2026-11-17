@@ -10,12 +10,12 @@ const collector = require('../scripts/mabang_promotion_collect.cjs');
 const SOURCE = fs.readFileSync(path.join(__dirname, '../scripts/mabang_promotion_collect.cjs'), 'utf8');
 
 test('店铺活动重采：--cdp-url / --store-id / --plan 解析', () => {
-  assert.deepEqual(collector.parseArgs([]), { cdpUrl: 'http://127.0.0.1:9223', storeId: '', plan: {} });
+  assert.deepEqual(collector.parseArgs([]), { cdpUrl: 'http://127.0.0.1:18223', storeId: '', plan: {} });
   assert.deepEqual(
     collector.parseArgs(['--cdp-url', 'http://127.0.0.1:9333', '--store-id', ' 2022749877 ', '--plan', '{"platform":"shopee"}']),
     { cdpUrl: 'http://127.0.0.1:9333', storeId: '2022749877', plan: { platform: 'shopee' } },
   );
-  assert.deepEqual(collector.parseArgs(['--plan', '{oops']), { cdpUrl: 'http://127.0.0.1:9223', storeId: '', plan: {} });
+  assert.deepEqual(collector.parseArgs(['--plan', '{oops']), { cdpUrl: 'http://127.0.0.1:18223', storeId: '', plan: {} });
 });
 
 test('店铺活动重采：复用同一份页面采集器与弹窗模块', () => {

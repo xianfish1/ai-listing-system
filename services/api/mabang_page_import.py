@@ -6,6 +6,7 @@ from typing import Any
 
 from services.api.category_profile_service import create_candidate_from_capture
 from services.api import settings
+from services.api.listing_modes import is_cnsc_page, normalize_listing_mode
 from services.api.mabang_size_chart_import import import_mabang_size_chart
 from services.api.mabang_import_snapshot import (
     MabangImportSnapshotError,
@@ -36,6 +37,11 @@ def stage_page_import(
         raise MabangPageImportError("马帮页面导入已确认，不能重新采集")
     if run.get("status") not in {"pending", "collected", "collected_with_warnings"}:
         raise MabangPageImportError("马帮页面导入当前状态不能采集")
+    # 操作员在导入弹窗选的模式要一路带到快照归一化：只允许「按 3PF 导入」这种
+    # 显式 override，页面证据由 normalize 自己校验（必须是 CNSC 全球商品页）。
+    requested_mode = str(run.get("requested_listing_mode") or "").strip().lower()
+    if requested_mode and not raw_capture.get("requested_listing_mode"):
+        raw_capture = {**raw_capture, "requested_listing_mode": requested_mode}
     try:
         snapshot = normalize_mabang_capture(raw_capture)
     except MabangImportSnapshotError as exc:
@@ -119,7 +125,7 @@ def confirm_page_import(
     store = payload["store"]
     category = payload["category"]
     _upsert_store_option(staged, store, now=now, account_id=account_id)
-    if payload.get("listing_mode") == "cnsc_global":
+    if is_cnsc_page(payload.get("listing_mode")):
         for target in payload.get("target_site_stores") or []:
             target_id = str(target.get("store_id") or "").strip()
             target_name = str(target.get("store_name") or "").strip()
@@ -154,7 +160,7 @@ def confirm_page_import(
         now=now,
     )
     promotions = []
-    if payload.get("listing_mode") != "cnsc_global":
+    if not is_cnsc_page(payload.get("listing_mode")):
         catalog_loaded = snapshot.get("promotion_catalog_loaded") is True
         promotions = replace_promotion_catalog(
             staged,
@@ -312,11 +318,12 @@ def _upsert_template(
     if conflict_action not in {"update", "save_as_new"}:
         raise MabangPageImportError("模板冲突操作必须是 update 或 save_as_new")
     templates = data.setdefault("store_templates", [])
+    payload_mode = normalize_listing_mode(payload.get("listing_mode"))
     existing = next(
         (
             item
             for item in templates
-            if str(item.get("listing_mode") or "site").strip().lower() == str(payload.get("listing_mode") or "site").strip().lower()
+            if normalize_listing_mode(item.get("listing_mode")) == payload_mode
             and item.get("mabang_store_id") == store["id"]
             and item.get("mabang_category_id") == category["id"]
         ),
@@ -330,11 +337,12 @@ def _upsert_template(
         templates.append(template)
         version = 1
     existing_snapshot = deepcopy(template)
-    listing_mode = str(payload.get("listing_mode") or "site").strip().lower()
+    listing_mode = payload_mode
+    cnsc_page = is_cnsc_page(listing_mode)
     target_site_stores = deepcopy(payload.get("target_site_stores") or [])
-    if listing_mode == "cnsc_global" and payload.get("target_site_stores_loaded") is not True:
+    if cnsc_page and payload.get("target_site_stores_loaded") is not True:
         target_site_stores = deepcopy(existing_snapshot.get("target_site_stores") or [])
-    elif listing_mode == "cnsc_global":
+    elif cnsc_page:
         existing_targets = {
             (str(item.get("site_code") or "").upper(), str(item.get("store_id") or item.get("store_name") or "")): item
             for item in existing_snapshot.get("target_site_stores") or []
@@ -352,7 +360,7 @@ def _upsert_template(
                     if field in previous:
                         target[field] = deepcopy(previous[field])
     price_tiers = deepcopy(payload.get("price_tiers") or [])
-    if listing_mode == "cnsc_global":
+    if cnsc_page:
         existing_tiers = {
             str(item.get("id") or ""): item
             for item in existing_snapshot.get("price_tiers") or []
@@ -364,7 +372,7 @@ def _upsert_template(
                 tier["site_prices"] = deepcopy(previous.get("site_prices") or {})
     warehouse_stock_defaults = deepcopy(payload.get("warehouse_stock_defaults") or {})
     missing_configuration = []
-    if listing_mode == "cnsc_global":
+    if cnsc_page:
         missing_configuration = cnsc_missing_configuration(
             price_tiers=price_tiers,
             warehouse_stock_defaults=warehouse_stock_defaults,
@@ -388,16 +396,16 @@ def _upsert_template(
             "category_attributes": deepcopy(payload["attribute_values"]),
             "variation": deepcopy(payload["variation"]),
             "sizes": list(payload["sizes"]),
-            "cnsc_store": deepcopy(payload.get("cnsc_store") or {}) if listing_mode == "cnsc_global" else {},
-            "target_site_stores": target_site_stores if listing_mode == "cnsc_global" else [],
+            "cnsc_store": deepcopy(payload.get("cnsc_store") or {}) if cnsc_page else {},
+            "target_site_stores": target_site_stores if cnsc_page else [],
             "default_site_discount_percent": (
                 payload.get("default_site_discount_percent")
                 or existing_snapshot.get("default_site_discount_percent")
                 or 40
-            ) if listing_mode == "cnsc_global" else None,
-            "price_tiers": price_tiers if listing_mode == "cnsc_global" else [],
-            "warehouse_stock_defaults": warehouse_stock_defaults if listing_mode == "cnsc_global" else {},
-            "cnsc_import_sku_rows": deepcopy(payload.get("cnsc_import_sku_rows") or []) if listing_mode == "cnsc_global" else [],
+            ) if cnsc_page else None,
+            "price_tiers": price_tiers if cnsc_page else [],
+            "warehouse_stock_defaults": warehouse_stock_defaults if cnsc_page else {},
+            "cnsc_import_sku_rows": deepcopy(payload.get("cnsc_import_sku_rows") or []) if cnsc_page else [],
             "missing_configuration": missing_configuration,
             "promotion_activity_id": payload["promotion_activity_id"],
             "mabang_discount_id": payload["mabang_discount_id"],

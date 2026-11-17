@@ -95,7 +95,8 @@ def test_start_mabang_browser_uses_the_configured_local_cdp(monkeypatch: pytest.
         # 未绑定自动登录账号时只报告 no_credentials，不执行登录。
         assert payload["auto_login"] == {"status": "no_credentials", "error": ""}
         assert calls == {
-            "cdp_url": "http://127.0.0.1:9223",
+            # 未建账号时的旧路径：用设置里的默认 CDP（2026-11-17 起 18223，测试不受影响）。
+            "cdp_url": settings.WORKER_CDP_URL,
             "profile_dir": settings.STORAGE_DIR / "browser-use-profile",
             # 设置里的无头开关必须到达启动器，否则开关形同虚设。
             "headless": True,
@@ -624,7 +625,7 @@ def test_page_import_collects_from_the_run_account_and_restores_headless(
             f"{base_url}/api/mabang/accounts",
             {"name": "账号A", "login_account": "acct-a"},
         )
-        assert account["cdp_port"] == 9223
+        assert account["cdp_port"] == storage.MABANG_CDP_PORT_BASE
 
         _status, run = _request_json(
             "POST",
@@ -644,9 +645,10 @@ def test_page_import_collects_from_the_run_account_and_restores_headless(
         assert status == 201
 
         # 采集读的是这个账号自动分配的端口（不是写死的 9223 默认值）
-        assert calls["cdp"] == ["http://127.0.0.1:9223"]
+        expected_cdp = f"http://127.0.0.1:{storage.MABANG_CDP_PORT_BASE}"
+        assert calls["cdp"] == [expected_cdp]
         # 采集结束后把窗口恢复成设置里的模式（默认无头）
-        assert calls["launches"][-1] == {"cdp_url": "http://127.0.0.1:9223", "headless": True}
+        assert calls["launches"][-1] == {"cdp_url": expected_cdp, "headless": True}
     finally:
         server.shutdown()
         server.server_close()

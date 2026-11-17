@@ -101,11 +101,12 @@ def launch_mabang_browser(
         running_mode, running_profile_matches = _collection_browser_identity(
             profile_dir, port, process_query_fn=process_query_fn
         )
-        can_reuse = running_mode == requested_mode and running_profile_matches
-        if running_mode is None and not require_mode:
-            # 旧行为：模式探测不出来时乐观复用，避免每次无谓重启。
-            # 但调用方明确指定了模式时不能赌（见 docstring 的 require_mode）。
-            can_reuse = True
+        # 只有「同一个 profile」才允许复用：端口上另一只 Chrome（例如测试残留、
+        # 别的账号/别的工具）即使 CDP 能连，登录态也不属于这个 Worker。以前模式
+        # 探测不出来时会乐观复用，结果 Worker 连上了陌生浏览器、反复等登录。
+        can_reuse = running_profile_matches and (
+            running_mode is None or running_mode == requested_mode
+        )
         if reuse_running_only and running_profile_matches:
             # 同一个登录态（profile 一致）就够用：模式不同也复用，不动这只浏览器。
             can_reuse = True
@@ -119,7 +120,12 @@ def launch_mabang_browser(
                 "browser_mode": running_mode or requested_mode,
             }
         _terminate_collection_chrome(profile_dir, port, process_query_fn=process_query_fn)
-        _wait_for_cdp_shutdown(base_url, urlopen_fn, sleep_fn=sleep_fn)
+        if not _wait_for_cdp_shutdown(base_url, urlopen_fn, sleep_fn=sleep_fn):
+            # 端口还被别人占着（taskkill 失败 / 权限不足）：再起一只只会绑定失败。
+            raise MabangBrowserError(
+                f"CDP 端口 {port} 被其它浏览器占用且无法关闭，请先手动结束占用该端口的 Chrome"
+                "（例如上一次测试或上一版程序残留的浏览器）后重试"
+            )
 
     if reuse_running_only:
         # 端口上没有可复用的浏览器（页面导入窗口可能正在重启中）：这时另起一只只会
@@ -306,7 +312,7 @@ def chrome_executable_candidates() -> list[Path]:
 def _validated_local_cdp_url(cdp_url: str) -> tuple[str, int]:
     parsed = urlparse(str(cdp_url or "").strip())
     if parsed.scheme != "http" or parsed.hostname not in {"127.0.0.1", "localhost", "::1"} or not parsed.port:
-        raise MabangBrowserError("采集浏览器仅支持本机 http CDP 地址，例如 http://127.0.0.1:9223")
+        raise MabangBrowserError("采集浏览器仅支持本机 http CDP 地址，例如 http://127.0.0.1:18223")
     return f"http://{parsed.hostname}:{parsed.port}", parsed.port
 
 
@@ -528,11 +534,14 @@ def _wait_for_cdp_shutdown(
     *,
     sleep_fn: Callable[[float], None] = time.sleep,
     attempts: int = 20,
-) -> None:
+) -> bool:
+    """Wait until the port stops answering CDP; False means something still holds it."""
+
     for _ in range(max(1, attempts)):
         if not _cdp_is_available(base_url, urlopen_fn):
-            return
+            return True
         sleep_fn(0.25)
+    return False
 
 
 def _cleanup_stale_collection_chrome(

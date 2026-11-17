@@ -25,10 +25,17 @@ from scripts.hybrid_automation_executor import HybridAutomationExecutor, BROWSER
 
 
 DEFAULT_API_URL = "http://127.0.0.1:8787"
-DEFAULT_CDP_URL = "http://127.0.0.1:9223"
+DEFAULT_CDP_URL = "http://127.0.0.1:18223"
 DEFAULT_POLL_SECONDS = 3.0
 DEFAULT_LEASE_SECONDS = 120
 DEFAULT_HEARTBEAT_SECONDS = 30.0
+# 自动登录（启动浏览器 + 登录）可能跑满 60s；这条调用单独放宽，其它 API 仍用 30s。
+AUTO_LOGIN_TIMEOUT_SECONDS = 120
+# Worker 心跳文件刷新间隔：执行器单次最长 480s，心跳线程必须比它更勤快。
+WORKER_HEARTBEAT_WRITE_SECONDS = 10.0
+# 租约心跳允许的连续失败次数：一次网络抖动就停线程会让租约过期、任务被别的
+# Worker 重复领取，所以只在连续失败/租约确定失效时停。
+LEASE_HEARTBEAT_MAX_FAILURES = 3
 # 相同状态（如等待浏览器）每轮都写日志只会刷屏。日志在状态变化时即时输出，
 # 状态不变时最多每 LOG_EMIT_INTERVAL_SECONDS 秒补一行带时间戳的记录。
 LOG_EMIT_INTERVAL_SECONDS = 60.0
@@ -79,7 +86,14 @@ class AutomationApiClient:
         self.base_url = str(base_url or DEFAULT_API_URL).rstrip("/")
         self.timeout_seconds = timeout_seconds
 
-    def _request(self, method: str, path: str, payload: dict[str, Any] | None = None) -> dict[str, Any]:
+    def _request(
+        self,
+        method: str,
+        path: str,
+        payload: dict[str, Any] | None = None,
+        *,
+        timeout_seconds: int | None = None,
+    ) -> dict[str, Any]:
         body = None if payload is None else json.dumps(payload, ensure_ascii=False).encode("utf-8")
         request = urllib.request.Request(
             self.base_url + path,
@@ -88,7 +102,9 @@ class AutomationApiClient:
             headers={"Content-Type": "application/json; charset=utf-8"},
         )
         try:
-            with urllib.request.urlopen(request, timeout=self.timeout_seconds) as response:
+            with urllib.request.urlopen(
+                request, timeout=int(timeout_seconds or self.timeout_seconds)
+            ) as response:
                 decoded = json.loads(response.read().decode("utf-8"))
         except urllib.error.HTTPError as exc:
             message = exc.reason
@@ -190,7 +206,111 @@ class AutomationApiClient:
             payload["account_id"] = account_id
         if int(slot or 0) > 0:
             payload["slot"] = int(slot)
-        return self._request("POST", "/api/mabang-browser/auto-login", payload)
+        # 这条链路包含「启动 Chrome + 跑自动登录」，实测可到 60s；沿用 30s 的默认
+        # 超时会被误判成「API unavailable」，然后进入冷却反复等浏览器。
+        return self._request(
+            "POST", "/api/mabang-browser/auto-login", payload, timeout_seconds=AUTO_LOGIN_TIMEOUT_SECONDS
+        )
+
+
+class WorkerHeartbeat:
+    """Worker 自己的存活心跳（原子写 JSON，供 Supervisor / 看门狗判断是否卡死）。
+
+    Supervisor 以前只看 PID：进程活着但 `paused_reason` 卡死、或主循环卡在某个
+    阻塞调用里，状态仍然是 running，唤醒逻辑直接跳过。这个文件由独立线程每
+    ``WORKER_HEARTBEAT_WRITE_SECONDS`` 秒刷新，执行器跑满 480s 也不会看起来掉线。
+
+    写失败绝不影响 Worker：调度只看心跳文件是否新鲜，不看它的内容能否解析。
+    """
+
+    def __init__(
+        self,
+        path: Path | None,
+        *,
+        worker_id: str,
+        account_id: str = "",
+        slot: int = 0,
+    ) -> None:
+        self.path = Path(path) if path else None
+        self.worker_id = str(worker_id or "")
+        self.account_id = str(account_id or "")
+        self.slot = int(slot or 0)
+        self._lock = threading.Lock()
+        self._payload: dict[str, Any] = {
+            "pid": os.getpid(),
+            "worker_id": self.worker_id,
+            "account_id": self.account_id,
+            "slot": self.slot,
+            "status": "starting",
+            "job_id": "",
+            "phase": "",
+            "paused_reason": "",
+            "at": _heartbeat_timestamp(),
+        }
+        self._stop = threading.Event()
+        self._thread: threading.Thread | None = None
+
+    def set(
+        self,
+        *,
+        status: str | None = None,
+        job_id: str | None = None,
+        phase: str | None = None,
+        paused_reason: str | None = None,
+    ) -> None:
+        with self._lock:
+            if status is not None:
+                self._payload["status"] = str(status)
+            if job_id is not None:
+                self._payload["job_id"] = str(job_id)
+            if phase is not None:
+                self._payload["phase"] = str(phase)
+            if paused_reason is not None:
+                self._payload["paused_reason"] = str(paused_reason)
+            self._payload["account_id"] = self.account_id
+            self._payload["slot"] = self.slot
+            self._payload["at"] = _heartbeat_timestamp()
+
+    def write_now(self) -> None:
+        path = self.path
+        if path is None:
+            return
+        with self._lock:
+            payload = dict(self._payload)
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            temp = path.with_name(path.name + ".tmp")
+            temp.write_text(json.dumps(payload, ensure_ascii=True), encoding="utf-8")
+            os.replace(temp, path)
+        except OSError:
+            # 心跳写不进去只影响「卡死检测」，不能把 Worker 带崩。
+            pass
+
+    def start(self) -> None:
+        if self.path is None or self._thread is not None:
+            return
+        self.write_now()
+        self._thread = threading.Thread(target=self._run, name="worker-heartbeat", daemon=True)
+        self._thread.start()
+
+    def _run(self) -> None:
+        while not self._stop.wait(WORKER_HEARTBEAT_WRITE_SECONDS):
+            self.write_now()
+
+    def stop(self, *, remove: bool = False) -> None:
+        self._stop.set()
+        if self._thread:
+            self._thread.join(timeout=2.0)
+            self._thread = None
+        if remove and self.path is not None:
+            try:
+                self.path.unlink()
+            except OSError:
+                pass
+
+
+def _heartbeat_timestamp() -> str:
+    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
 
 
 class LeaseHeartbeat:
@@ -204,6 +324,7 @@ class LeaseHeartbeat:
         lease_seconds: int,
         interval_seconds: float,
         phase: str,
+        heartbeat: "WorkerHeartbeat | None" = None,
     ) -> None:
         self.client = client
         self.job_id = job_id
@@ -212,7 +333,9 @@ class LeaseHeartbeat:
         self.lease_seconds = lease_seconds
         self.interval_seconds = interval_seconds
         self.phase = phase
+        self.heartbeat = heartbeat
         self.last_error = ""
+        self.failures = 0
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
 
@@ -232,9 +355,20 @@ class LeaseHeartbeat:
                     self.phase,
                     self.lease_seconds,
                 )
+                self.failures = 0
             except Exception as exc:  # noqa: BLE001
                 self.last_error = str(exc)[:500]
-                self._stop.set()
+                self.failures += 1
+                # 租约确定失效（HTTP 409 / 已被回收）才停；普通网络抖动继续重试，
+                # 否则一次瞬断就让租约过期，任务会被别的 Worker 重复领取。
+                if "HTTP 409" in self.last_error or self.failures >= LEASE_HEARTBEAT_MAX_FAILURES:
+                    self._stop.set()
+                    break
+            finally:
+                # 主循环此时可能正阻塞在执行器里，心跳线程顺手刷新 Worker 心跳。
+                if self.heartbeat is not None:
+                    self.heartbeat.set(phase=self.phase)
+                    self.heartbeat.write_now()
 
     def stop(self) -> None:
         self._stop.set()
@@ -258,6 +392,7 @@ class AutomationWorker:
         max_browser_use_cost: float = 0.25,
         account_id: str = "",
         slot: int = 0,
+        heartbeat_path: Path | None = None,
     ) -> None:
         self.client = client
         self.worker_id = str(worker_id or "").strip()
@@ -283,6 +418,13 @@ class AutomationWorker:
         self.pending_completion_path = Path(pending_completion_path or self.upload_root / "pending-completion.json")
         self._pending_saved_completion = self._load_pending_saved_completion()
         self.paused_reason = ""
+        # 存活心跳：Supervisor 用它区分「进程活着」和「进程还活着但已经卡死」。
+        self.heartbeat = WorkerHeartbeat(
+            heartbeat_path,
+            worker_id=self.worker_id,
+            account_id=self.account_id,
+            slot=self.slot,
+        )
         self._last_browser_recovery_at = 0.0
         self._last_browser_recovery_result: dict[str, Any] | None = None
         self._startup_browser_recovery_done = False
@@ -383,22 +525,28 @@ class AutomationWorker:
         )
 
     def _cdp_is_reachable(self, *, timeout_seconds: float = 2.0) -> bool:
-        """Return whether the dedicated automation browser is listening on the CDP port.
+        """Return whether the dedicated automation browser is a usable CDP endpoint.
 
         The worker attaches to an already-running Chrome via ``connectOverCDP``.
-        If that browser is not running, every claimed job would fail with
-        ``connect ECONNREFUSED`` and be burned to ``failed``. Checking first lets
-        the worker stay idle without consuming jobs until the browser is back.
+        A TCP-only probe is not enough: a hung Chrome, or *another* Chrome squatting
+        on the port with a foreign profile, still accepts connections but cannot
+        drive Mabang. Probing ``/json/version`` requires a real CDP server, so a
+        bad browser gets treated as "not ready" and the API's recovery path
+        (which kills a same-port squatter and relaunches) runs.
         """
 
         parsed = urllib.parse.urlparse(self.cdp_url)
+        scheme = parsed.scheme or "http"
         host = parsed.hostname or "127.0.0.1"
-        port = parsed.port or 9223
+        port = parsed.port or 18223
         try:
-            with socket.create_connection((host, port), timeout=timeout_seconds):
-                return True
-        except OSError:
+            with urllib.request.urlopen(
+                f"{scheme}://{host}:{port}/json/version", timeout=timeout_seconds
+            ) as response:
+                payload = json.loads(response.read().decode("utf-8"))
+        except (urllib.error.URLError, TimeoutError, OSError, ValueError, json.JSONDecodeError):
             return False
+        return isinstance(payload, dict) and bool(str(payload.get("Browser") or "").strip())
 
     def _auto_login_for_current_account(self) -> dict[str, Any]:
         """自动登录当前账号；没绑定账号实体时完全走旧调用形态（单账号兼容）。"""
@@ -605,7 +753,9 @@ class AutomationWorker:
         return {**retry, "auto_login": recovery, "auto_login_retry": True}
 
     def run_once(self) -> dict[str, Any]:
+        self.heartbeat.set(status="polling", job_id="", phase="poll", paused_reason=self.paused_reason)
         if self.paused_reason:
+            self.heartbeat.set(status="paused")
             return {"ok": False, "status": "paused", "job_id": "", "error": self.paused_reason}
         if self._pending_saved_completion is not None:
             return self._retry_pending_saved_completion()
@@ -618,6 +768,7 @@ class AutomationWorker:
         # 放在登录预检之前，这一轮连浏览器都不碰。
         page_import_session = self._active_page_import_session()
         if page_import_session is not None:
+            self.heartbeat.set(status="waiting_for_page_import", phase="page_import")
             return self._waiting_for_page_import(page_import_session)
         # 每次 Worker 进程启动先主动清理浏览器窗口并打开登录页，不等到浏览器掉线
         # 才恢复。预检逻辑只针对真实 Playwright 执行器，注入的测试执行器不接触 CDP。
@@ -630,7 +781,9 @@ class AutomationWorker:
                 recovery = self._last_browser_recovery_result
             if self._recovery_login_status(recovery) not in LOGIN_RECOVERY_STATUSES:
                 if not self._cdp_is_reachable():
+                    self.heartbeat.set(status="waiting_for_browser", phase="browser_recovery")
                     return self._waiting_for_browser(recovery)
+                self.heartbeat.set(status="waiting_for_login", phase="login")
                 return self._waiting_for_login(recovery)
             self._startup_login_ready = True
         # Preflight only guards the real Playwright executor, which attaches to a
@@ -646,8 +799,10 @@ class AutomationWorker:
             if recovery is None and self._last_browser_recovery_result is not None:
                 recovery = self._last_browser_recovery_result
             if not self._cdp_is_reachable():
+                self.heartbeat.set(status="waiting_for_browser", phase="browser_recovery")
                 return self._waiting_for_browser(recovery)
             if self._recovery_login_status(recovery) not in LOGIN_RECOVERY_STATUSES:
+                self.heartbeat.set(status="waiting_for_login", phase="login")
                 return self._waiting_for_login(recovery)
             self._startup_login_ready = True
         # 领取按当前账号过滤：绝不把 A 账号的店铺任务交给登录着 B 账号的浏览器。
@@ -660,8 +815,10 @@ class AutomationWorker:
         job = claimed.get("job") or None
         lease_token = str(claimed.get("lease_token") or "")
         if not job:
+            self.heartbeat.set(status="idle", job_id="", phase="idle")
             return {"ok": True, "status": "idle", "job_id": ""}
         job_id = str(job.get("id") or "")
+        self.heartbeat.set(status="running", job_id=job_id, phase="load_payload")
         if not job_id or not lease_token:
             raise RuntimeError("Automation API returned an incomplete claim")
 
@@ -696,6 +853,7 @@ class AutomationWorker:
                 lease_seconds=self.lease_seconds,
                 interval_seconds=self.heartbeat_interval,
                 phase="playwright_save_draft",
+                heartbeat=self.heartbeat,
             )
             lease.start()
             try:
@@ -772,6 +930,7 @@ class AutomationWorker:
             )
             if final_status in {"saved", "saved_with_warnings"}:
                 self._clear_pending_saved_completion()
+            self.heartbeat.set(status=final_status, job_id=job_id, phase=final_status)
             if self.paused_reason:
                 return {"ok": False, "status": "paused", "job_id": job_id, "job": finished, "error": error}
             return {
@@ -923,6 +1082,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--lease-seconds", type=int, default=DEFAULT_LEASE_SECONDS)
     parser.add_argument("--heartbeat-seconds", type=float, default=DEFAULT_HEARTBEAT_SECONDS)
     parser.add_argument("--lock-file", default=str(PROJECT_ROOT / "data" / "automation_worker.lock"))
+    parser.add_argument(
+        "--heartbeat-file",
+        default="",
+        help="Worker 存活心跳文件（Supervisor 用来识别假 running / 卡死）；不传则不写",
+    )
     parser.add_argument("--account-id", default="", help="固定服务某一个马帮账号（并行部署时每个账号一个 Worker）")
     parser.add_argument(
         "--worker-slot",
@@ -964,31 +1128,38 @@ def main(argv: list[str] | None = None) -> int:
         pending_completion_path=(
             Path(args.pending_completion_file) if str(args.pending_completion_file or "").strip() else None
         ),
+        heartbeat_path=(
+            Path(args.heartbeat_file) if str(args.heartbeat_file or "").strip() else None
+        ),
     )
     try:
         with SingleInstanceLock(Path(args.lock_file)):
-            if args.once:
-                result = worker.run_once()
-                emit_worker_result(result)
-                return 1 if result.get("status") == "failed" else 0
-            last_result: dict[str, Any] | None = None
-            last_emit_at = 0.0
-            repeated_count = 0
-            while not stop.is_set():
-                try:
+            worker.heartbeat.start()
+            try:
+                if args.once:
                     result = worker.run_once()
-                except Exception as exc:  # noqa: BLE001
-                    result = {"ok": False, "status": "api_error", "job_id": "", "error": str(exc)[:500]}
-                now = time.monotonic()
-                if result == last_result:
-                    repeated_count += 1
-                else:
-                    repeated_count = 0
-                    last_result = result
-                if repeated_count == 0 or now - last_emit_at >= LOG_EMIT_INTERVAL_SECONDS:
-                    emit_worker_result(result, repeated=repeated_count)
-                    last_emit_at = now
-                stop.wait(max(0.1, float(args.poll_seconds)))
+                    emit_worker_result(result)
+                    return 1 if result.get("status") == "failed" else 0
+                last_result: dict[str, Any] | None = None
+                last_emit_at = 0.0
+                repeated_count = 0
+                while not stop.is_set():
+                    try:
+                        result = worker.run_once()
+                    except Exception as exc:  # noqa: BLE001
+                        result = {"ok": False, "status": "api_error", "job_id": "", "error": str(exc)[:500]}
+                    now = time.monotonic()
+                    if result == last_result:
+                        repeated_count += 1
+                    else:
+                        repeated_count = 0
+                        last_result = result
+                    if repeated_count == 0 or now - last_emit_at >= LOG_EMIT_INTERVAL_SECONDS:
+                        emit_worker_result(result, repeated=repeated_count)
+                        last_emit_at = now
+                    stop.wait(max(0.1, float(args.poll_seconds)))
+            finally:
+                worker.heartbeat.stop(remove=True)
     except RuntimeError as exc:
         emit_worker_result({"ok": False, "status": "already_running", "job_id": "", "error": str(exc)})
         return 2

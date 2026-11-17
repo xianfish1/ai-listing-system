@@ -10,12 +10,12 @@ const collector = require('../scripts/mabang_page_import_collect.cjs');
 const SOURCE = fs.readFileSync(path.join(__dirname, '../scripts/mabang_page_import_collect.cjs'), 'utf8');
 
 test('页面采集器：--cdp-url / --plan 解析（plan 坏了退回空对象）', () => {
-  assert.deepEqual(collector.parseArgs([]), { cdpUrl: 'http://127.0.0.1:9223', plan: {} });
+  assert.deepEqual(collector.parseArgs([]), { cdpUrl: 'http://127.0.0.1:18223', plan: {} });
   assert.deepEqual(
     collector.parseArgs(['--cdp-url', 'http://127.0.0.1:9333', '--plan', '{"platform":"shopee","country":"PH"}']),
     { cdpUrl: 'http://127.0.0.1:9333', plan: { platform: 'shopee', country: 'PH' } },
   );
-  assert.deepEqual(collector.parseArgs(['--plan', '{oops']), { cdpUrl: 'http://127.0.0.1:9223', plan: {} });
+  assert.deepEqual(collector.parseArgs(['--plan', '{oops']), { cdpUrl: 'http://127.0.0.1:18223', plan: {} });
 });
 
 test('页面采集器：只认 Shopee 商品编辑页', () => {

@@ -58,7 +58,7 @@ class HybridAutomationExecutor:
         *,
         enable_browser_use_fallback: bool = True,
         max_browser_use_cost: float = 0.25,
-        cdp_url: str = "http://127.0.0.1:9223",
+        cdp_url: str = "http://127.0.0.1:18223",
         playwright_executor: Any = None,
     ):
         """
@@ -164,7 +164,7 @@ def main():
 
     parser = argparse.ArgumentParser(description="混合自动化执行器测试")
     parser.add_argument("--task-plan", required=True, help="任务计划 JSON 文件路径")
-    parser.add_argument("--cdp-url", default="http://127.0.0.1:9223", help="Chrome CDP URL")
+    parser.add_argument("--cdp-url", default="http://127.0.0.1:18223", help="Chrome CDP URL")
     parser.add_argument("--no-fallback", action="store_true", help="禁用 AI 诊断")
     parser.add_argument("--max-cost", type=float, default=0.25, help="AI 诊断最大成本")
     parser.add_argument("--timeout", type=int, default=900, help="超时时间（秒）")

@@ -109,7 +109,7 @@ def test_start_mabang_browser_runs_auto_login_with_bound_credentials(monkeypatch
 
         assert payload["login_required"] is False
         assert payload["auto_login"] == {"status": "logged_in", "error": ""}
-        assert calls["cdp_url"] == "http://127.0.0.1:9223"
+        assert calls["cdp_url"] == f"http://127.0.0.1:{storage.MABANG_CDP_PORT_BASE}"
         assert calls["login_account"] == "ops@example.com"
         assert calls["login_password"] == "sup3r-secret"
     finally:

@@ -429,8 +429,14 @@ def test_collection_browser_mode_ignores_child_processes(tmp_path: Path) -> None
 def test_launch_reuses_cdp_browser_and_opens_the_mabang_page(tmp_path: Path) -> None:
     calls: list[object] = []
 
-    class NoProcesses:
-        stdout = "[]"
+    class RunningBrowser:
+        # 同一个 profile 的浏览器（无 headless 标志 → 探测为 headed）才允许复用。
+        stdout = json.dumps([
+            {
+                "ProcessId": 4242,
+                "CommandLine": f'chrome.exe --user-data-dir="{tmp_path / "profile"}" --remote-debugging-port=9223',
+            }
+        ])
         returncode = 0
 
     def fake_urlopen(request: object, timeout: float = 0) -> _Response:
@@ -452,9 +458,7 @@ def test_launch_reuses_cdp_browser_and_opens_the_mabang_page(tmp_path: Path) -> 
         urlopen_fn=fake_urlopen,
         popen_fn=lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("must not relaunch Chrome")),
         sleep_fn=lambda _seconds: None,
-        # An unknown window mode reuses the running browser, which keeps this test
-        # independent of whatever Chrome happens to run on the host.
-        process_query_fn=lambda: NoProcesses(),
+        process_query_fn=lambda: RunningBrowser(),
     )
 
     assert result == {"ok": True, "status": "running", "login_required": False, "browser_mode": "headed"}
@@ -740,7 +744,9 @@ def test_find_chrome_executable_prefers_bundled_over_system(tmp_path: Path, monk
     assert mabang_browser.find_chrome_executable() == exe
 
 
-def test_require_mode_relaunches_when_the_running_mode_is_unknown(tmp_path: Path) -> None:
+def test_require_mode_relaunches_when_the_running_mode_is_unknown(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """调用方明确要求窗口模式时，探测不出当前模式必须重启，不能乐观复用。
 
     现场症状：页面导入要求开一个可见窗口，但代码复用了正在跑的无头浏览器、
@@ -753,6 +759,9 @@ def test_require_mode_relaunches_when_the_running_mode_is_unknown(tmp_path: Path
 
     def fake_urlopen(request: object, timeout: float = 0) -> _Response:
         return _Response({"Browser": "Chrome/1"})
+
+    # 这个用例只验证「不复用、去重启」；端口是否真的腾空由 shutdown 自己的用例覆盖。
+    monkeypatch.setattr(mabang_browser, "_wait_for_cdp_shutdown", lambda *args, **kwargs: True)
 
     launched: list[list] = []
     chrome = tmp_path / "chrome.exe"
@@ -785,3 +794,31 @@ def test_require_mode_relaunches_when_the_running_mode_is_unknown(tmp_path: Path
     assert launched, "探测不到窗口模式时必须重启浏览器，而不是复用"
     assert result == {"ok": True, "status": "started", "login_required": True, "browser_mode": "headed"}
 
+
+
+def test_launch_reports_a_port_held_by_a_foreign_browser(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """端口被别的 Chrome 占着、又杀不掉时，要报明确错误而不是让新 Chrome 绑定失败。"""
+
+    class NoProcesses:
+        stdout = "[]"
+        returncode = 0
+
+    def fake_urlopen(request: object, timeout: float = 0) -> _Response:
+        return _Response({"Browser": "Chrome/1"})
+
+    monkeypatch.setattr(mabang_browser, "_terminate_collection_chrome", lambda *args, **kwargs: [])
+    monkeypatch.setattr(mabang_browser, "_wait_for_cdp_shutdown", lambda *args, **kwargs: False)
+    chrome = tmp_path / "chrome.exe"
+    chrome.write_text("", encoding="utf-8")
+
+    with pytest.raises(mabang_browser.MabangBrowserError, match="被其它浏览器占用"):
+        mabang_browser.launch_mabang_browser(
+            "http://127.0.0.1:9223",
+            profile_dir=tmp_path / "profile",
+            chrome_executable=chrome,
+            urlopen_fn=fake_urlopen,
+            popen_fn=lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("must not launch")),
+            sleep_fn=lambda _seconds: None,
+            process_query_fn=lambda: NoProcesses(),
+            attempts=1,
+        )

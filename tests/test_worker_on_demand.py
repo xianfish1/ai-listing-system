@@ -48,8 +48,10 @@ class FakeSupervisor:
         self._status = status
         self._updated_at = updated_at or _iso(datetime.now(timezone.utc))
         self._hold = ""
+        self._stale = False
         self.stops = 0
         self.starts = 0
+        self.restarts = 0
 
     def status(self) -> dict:
         return {
@@ -57,6 +59,7 @@ class FakeSupervisor:
             "pid": 4242 if self._status == "running" else None,
             "updated_at": self._updated_at,
             "manual_hold_at": self._hold,
+            "stale": self._stale,
         }
 
     def hold(self, *, reason: str = "") -> dict:
@@ -77,6 +80,14 @@ class FakeSupervisor:
         self.starts += 1
         self._status = "running"
         self._hold = ""
+        self._stale = False
+        return self.status()
+
+    def restart(self) -> dict:
+        self.restarts += 1
+        self._status = "running"
+        self._hold = ""
+        self._stale = False
         return self.status()
 
     def stop(self) -> dict:
@@ -416,3 +427,32 @@ def test_wake_starts_the_single_worker_when_a_job_is_waiting(monkeypatch: pytest
 
     assert actions == ["start"]
     assert outcome["action"] == "start"
+
+
+def test_wake_plan_restarts_a_stale_running_slot(monkeypatch: pytest.MonkeyPatch) -> None:
+    """心跳过期的 running 不是「已经在跑」：唤醒必须把它列进来并重启。"""
+
+    multi, supervisors = _multi(monkeypatch, [("acct-a", 0)])
+    supervisors["acct-a"].start()
+    supervisors["acct-a"]._stale = True
+    monkeypatch.setattr(
+        main,
+        "_worker_queue_snapshot",
+        lambda config=None: {"acct-a": {"claimable": 1, "in_flight": 0, "latest_activity_at": ""}},
+    )
+
+    assert main._worker_wake_plan(multi) == ["acct-a"]
+
+    monkeypatch.setattr(
+        main,
+        "_prepare_worker_browser_login",
+        lambda *args, **kwargs: {
+            "ok": True,
+            "auto_login": {"status": "already_logged_in"},
+            "browser_mode": "headless",
+        },
+    )
+    result = main._start_worker_targets(["acct-a"])
+
+    assert supervisors["acct-a"].restarts == 1
+    assert result["failures"] == []

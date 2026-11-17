@@ -9,7 +9,7 @@
  * `mabang_page_import_capture.js` 读活动行 → 收回弹窗。**不选任何活动、不保存。**
  *
  * 用法：
- *   node scripts/mabang_promotion_collect.cjs --cdp-url http://127.0.0.1:9223 --store-id 2022749877
+ *   node scripts/mabang_promotion_collect.cjs --cdp-url http://127.0.0.1:18223 --store-id 2022749877
  * 结果：
  *   MABANG_PAGE_IMPORT_RESULT {"ok":true,"status":"completed","store":{"id":...},"items":[...]}
  */
@@ -19,7 +19,7 @@ const path = require('node:path');
 const { chromium } = require('playwright-core');
 
 const RESULT_MARKER = 'MABANG_PAGE_IMPORT_RESULT ';
-const CDP_DEFAULT = 'http://127.0.0.1:9223';
+const CDP_DEFAULT = 'http://127.0.0.1:18223';
 const CDP_CONNECT_TIMEOUT_MS = 90000;
 const CAPTURE_PATH = path.join(__dirname, 'mabang_page_import_capture.js');
 const PROMOTION_PAGE_PATH = path.join(__dirname, 'mabang_promotion_dialog.page.js');

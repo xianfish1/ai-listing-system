@@ -135,6 +135,8 @@ def test_start_is_idempotent_and_single_instance(tmp_path: Path):
 
 
 def test_start_adopts_a_live_persisted_worker_after_api_restart(tmp_path: Path):
+    worker_pid_path = tmp_path / "automation-worker.lock"
+    worker_pid_path.write_text("047528", encoding="ascii")
     (tmp_path / "worker-state.json").write_text(
         '{"status": "running", "pid": 47528, "last_error": ""}',
         encoding="utf-8",
@@ -142,6 +144,8 @@ def test_start_adopts_a_live_persisted_worker_after_api_restart(tmp_path: Path):
     created = []
     supervisor = WorkerSupervisor(
         tmp_path,
+        worker_pid_path=worker_pid_path,
+        worker_lock_is_held=lambda path: path == worker_pid_path,
         process_factory=lambda command, **kwargs: created.append(FakeProcess(command, **kwargs)),
         pid_is_running=lambda pid: pid == 47528,
     )
@@ -151,6 +155,28 @@ def test_start_adopts_a_live_persisted_worker_after_api_restart(tmp_path: Path):
     assert state["status"] == "running"
     assert state["pid"] == 47528
     assert created == []
+
+
+def test_start_never_adopts_a_live_pid_without_the_worker_lock(tmp_path: Path):
+    """PID 活着但 Worker 锁没拿住 = Windows PID 复用，不能领养（否则永远假 running）。"""
+
+    worker_pid_path = tmp_path / "automation-worker.lock"
+    (tmp_path / "worker-state.json").write_text(
+        '{"status": "running", "pid": 47528, "last_error": ""}',
+        encoding="utf-8",
+    )
+    created = []
+    supervisor = WorkerSupervisor(
+        tmp_path,
+        worker_pid_path=worker_pid_path,
+        worker_lock_is_held=lambda path: False,
+        process_factory=lambda command, **kwargs: created.append(FakeProcess(command, **kwargs)),
+        pid_is_running=lambda pid: pid == 47528,
+    )
+
+    supervisor.start()
+
+    assert len(created) == 1, "锁没被 Worker 持有就必须新起进程"
 
 
 def test_start_recovers_a_live_worker_from_its_pid_file(tmp_path: Path):
@@ -426,7 +452,7 @@ def test_start_worker_with_login_gate_prepares_browser_before_start(monkeypatch:
     monkeypatch.setattr(
         main,
         "_prepare_worker_browser_login",
-        lambda: events.append("login") or {
+        lambda *args, **kwargs: events.append("login") or {
             "ok": True,
             "browser_mode": "headless",
             "auto_login": {"status": "logged_in", "error": ""},
@@ -441,10 +467,18 @@ def test_start_worker_with_login_gate_prepares_browser_before_start(monkeypatch:
     assert result["auto_login"]["status"] == "logged_in"
 
 
-def test_start_worker_with_login_gate_does_not_start_when_login_fails(monkeypatch: pytest.MonkeyPatch):
+def test_start_worker_starts_even_when_login_fails(monkeypatch: pytest.MonkeyPatch):
+    """登录没确认也必须先把进程拉起来：Worker 自己的预检会重试并上报原因。
+
+    2026-11-17 现场：restart 被登录门挡住，卡死的旧进程永远换不掉。
+    """
+
     started: list[bool] = []
 
     class Supervisor:
+        def status(self):
+            return {"status": "stopped", "pid": None}
+
         def start(self):
             started.append(True)
             return {"status": "running"}
@@ -452,7 +486,7 @@ def test_start_worker_with_login_gate_does_not_start_when_login_fails(monkeypatc
     monkeypatch.setattr(
         main,
         "_prepare_worker_browser_login",
-        lambda: {
+        lambda *args, **kwargs: {
             "ok": False,
             "browser_mode": "headless",
             "auto_login": {"status": "failed", "error": "login_did_not_complete_check_credentials"},
@@ -460,10 +494,11 @@ def test_start_worker_with_login_gate_does_not_start_when_login_fails(monkeypatc
     )
     monkeypatch.setattr(main, "_worker_supervisor", lambda: Supervisor())
 
-    with pytest.raises(RuntimeError, match="马帮登录未确认"):
-        main._run_worker_action("start")
+    result = main._run_worker_action("start")
 
-    assert started == []
+    assert started == [True]
+    assert result["warnings"] and "马帮登录未确认" in result["warnings"][0]
+    assert "login_did_not_complete_check_credentials" in result["warnings"][0]
 
 
 def test_start_worker_does_not_touch_browser_when_worker_is_already_active(monkeypatch: pytest.MonkeyPatch):
@@ -483,7 +518,7 @@ def test_start_worker_does_not_touch_browser_when_worker_is_already_active(monke
     monkeypatch.setattr(
         main,
         "_prepare_worker_browser_login",
-        lambda: events.append("login") or {"ok": True},
+        lambda *args, **kwargs: events.append("login") or {"ok": True},
     )
 
     result = main._run_worker_action("start")
@@ -753,3 +788,111 @@ def test_latest_worker_activity_uses_payload_time_when_log_writes_are_out_of_ord
     assert activity["activity"] == "idle"
     assert activity["activity_at"] == "2026-08-20T09:42:01Z"
 
+
+
+def _write_heartbeat(
+    tmp_path: Path,
+    *,
+    age_seconds: float = 0.0,
+    status: str = "idle",
+    paused_reason: str = "",
+) -> None:
+    import json
+    import time
+
+    at = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(time.time() - age_seconds))
+    (tmp_path / "worker-heartbeat.json").write_text(
+        json.dumps({"pid": 47528, "at": at, "status": status, "paused_reason": paused_reason}),
+        encoding="utf-8",
+    )
+
+
+def _running_supervisor(tmp_path: Path, created: list, terminated: list | None = None) -> WorkerSupervisor:
+    worker_pid_path = tmp_path / "automation-worker.lock"
+    worker_pid_path.write_text("047528", encoding="ascii")
+    held = {"value": True}
+
+    def terminate(pid: int) -> None:
+        if terminated is not None:
+            terminated.append(pid)
+        held["value"] = False
+
+    return WorkerSupervisor(
+        tmp_path,
+        worker_pid_path=worker_pid_path,
+        worker_lock_is_held=lambda path: held["value"],
+        terminate_pid=terminate,
+        process_factory=lambda command, **kwargs: created.append(FakeProcess(command, **kwargs)),
+        pid_is_running=lambda pid: pid == 47528,
+    )
+
+
+def test_status_marks_a_stale_heartbeat(tmp_path: Path) -> None:
+    (tmp_path / "worker-state.json").write_text(
+        '{"status": "running", "pid": 47528, "last_error": ""}', encoding="utf-8"
+    )
+    _write_heartbeat(tmp_path, age_seconds=600)
+    supervisor = _running_supervisor(tmp_path, [])
+
+    state = supervisor.status()
+
+    assert state["status"] == "running"
+    assert state["stale"] is True
+    assert "stale" in state["stale_reason"]
+    assert state["heartbeat_age_seconds"] >= 500
+
+
+def test_status_is_fresh_and_carries_pause_reason(tmp_path: Path) -> None:
+    (tmp_path / "worker-state.json").write_text(
+        '{"status": "running", "pid": 47528, "last_error": ""}', encoding="utf-8"
+    )
+    _write_heartbeat(tmp_path, status="paused", paused_reason="field_not_unique")
+    supervisor = _running_supervisor(tmp_path, [])
+
+    state = supervisor.status()
+
+    assert state["stale"] is False
+    assert state["paused"] is True
+    assert state["paused_reason"] == "field_not_unique"
+    assert state["heartbeat_status"] == "paused"
+
+
+def test_start_restarts_a_worker_whose_heartbeat_is_stale(tmp_path: Path) -> None:
+    (tmp_path / "worker-state.json").write_text(
+        '{"status": "running", "pid": 47528, "last_error": ""}', encoding="utf-8"
+    )
+    _write_heartbeat(tmp_path, age_seconds=600)
+    created: list = []
+    terminated: list = []
+    supervisor = _running_supervisor(tmp_path, created, terminated)
+
+    supervisor.start()
+
+    assert terminated == [47528], "卡死的旧进程必须被结束"
+    assert len(created) == 1, "结束旧进程后要起新进程"
+
+
+def test_auto_heal_covers_stale_and_recoverable_pause(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    def heal(status: dict) -> list:
+        supervisor = WorkerSupervisor(tmp_path)
+        calls: list = []
+        monkeypatch.setattr(supervisor, "status", lambda: dict(status))
+        monkeypatch.setattr(supervisor, "restart", lambda: calls.append(True) or {"status": "running"})
+        supervisor.auto_heal()
+        return calls
+
+    assert heal({"status": "running", "stale": True}) == [True]
+    assert heal({"status": "running", "paused": True, "paused_reason": "needs_manual_login_or_verification"}) == [True]
+    assert heal({"status": "running", "paused": True, "paused_reason": "field_not_unique"}) == []
+    assert heal({"status": "stopped"}) == []
+
+
+def test_logs_tail_only_returns_the_last_lines(tmp_path: Path) -> None:
+    supervisor = WorkerSupervisor(tmp_path)
+    supervisor.log_path.write_text(
+        "\n".join(f"line-{index}" for index in range(5000)) + "\n", encoding="utf-8"
+    )
+
+    lines = supervisor.logs(tail=2)["lines"]
+
+    assert lines == ["line-4998", "line-4999"]

@@ -20,6 +20,13 @@ from pathlib import Path
 from typing import Any, Callable, Iterator
 
 from services.api import settings
+from services.api.listing_modes import (
+    LISTING_MODE_SITE,
+    is_cnsc_page,
+    is_local_like,
+    is_pure_cnsc,
+    normalize_listing_mode,
+)
 from services.api.runtime_configuration import (
     merge_configuration,
     public_runtime_configuration,
@@ -2631,6 +2638,12 @@ def create_mabang_page_import(payload: dict[str, Any]) -> dict[str, Any]:
     account_id = str(payload.get("account_id") or "").strip()
     if account_id and not get_mabang_account(account_id):
         raise MabangPageImportError("所选马帮账号不存在，请重新选择")
+    # 导入模式：空=自动识别；cnsc_3pf=按跨境本土(3PF)导入（页面证据仍须是 CNSC 页）。
+    requested_listing_mode = normalize_listing_mode(
+        payload.get("requested_listing_mode"), default=""
+    )
+    if requested_listing_mode and requested_listing_mode not in {"site", "cnsc_global", "cnsc_3pf"}:
+        raise MabangPageImportError("导入模式无效：只支持自动识别 / 跨境本土 (3PF)")
     now = utc_now()
     run = {
         "id": str(uuid.uuid4()),
@@ -2646,6 +2659,7 @@ def create_mabang_page_import(payload: dict[str, Any]) -> dict[str, Any]:
         # 只有这个槽位的 Worker 需要让路，其他槽位各用各的浏览器，不受影响。
         "slot": _normalized_slot(payload.get("slot")),
         "expected_store_id": str(payload.get("expected_store_id") or "").strip(),
+        "requested_listing_mode": requested_listing_mode,
         "created_at": now,
         "updated_at": now,
     }
@@ -3167,7 +3181,7 @@ def create_store_template(payload: dict[str, Any]) -> dict[str, Any]:
     with locked_store() as (data, save):
         _validate_cnsc_store_template(template, allow_missing_activity=True)
         template["account_id"] = _resolve_store_template_account(data, template, fallback_default=True)
-        if template.get("listing_mode") == "cnsc_global":
+        if is_cnsc_page(template.get("listing_mode")):
             template["missing_configuration"] = _cnsc_configuration_problems(template)
             template["status"] = "needs_configuration" if template["missing_configuration"] else "active"
         _validate_store_template_category_binding(data, template)
@@ -3260,8 +3274,11 @@ def _copy_store_template_payload(
         "variation_rule",
         "variation",
         "sku_template",
+        # 刊登模式必须跟着走：否则跨境/3PF 模板另存后会静默退回 site。
+        "listing_mode",
         "default_sku",
         "sku_strip_parentheses",
+        "size_chart_as_last_product_image",
         "stock",
         "weight_kg",
         "package_length_cm",
@@ -3275,6 +3292,10 @@ def _copy_store_template_payload(
         "size_chart_source",
         "mabang_size_chart_template_id",
         "mabang_size_chart_template_name",
+        # CNSC 价格配置与店铺无关（站点码维度），另存时保留；店铺绑定在下面重置。
+        "site_price_order",
+        "default_site_discount_percent",
+        "price_tiers",
     )
     same_site_fields = (
         "category_profile_id",
@@ -3287,6 +3308,8 @@ def _copy_store_template_payload(
         "normal_price",
         "sale_price",
         "size_price_overrides",
+        # 默认视频 ID 属于账号的视频库，跨账号另存时不可复用。
+        "default_video_id",
     )
     copied = {field: deepcopy(source.get(field)) for field in reusable_fields}
     if same_site:
@@ -3320,12 +3343,20 @@ def _copy_store_template_payload(
         "discount_label": "",
         "main_image_watermark": {},
         "product_image_watermark": {},
+        # 店铺绑定值不能跟着另存：目标店铺要自己选 CNSC 店铺/目标站点/三仓默认。
+        "cnsc_store": {},
+        "target_site_stores": [],
+        "warehouse_stock_defaults": {},
         "status": "active" if same_site else "needs_mabang_import",
         "version": 1,
         "current_version_id": str(uuid.uuid4()),
         "created_at": now,
         "updated_at": now,
     })
+    if is_cnsc_page(copied.get("listing_mode")):
+        # 另存后的跨境/3PF 模板：重算缺失配置，别把"刚复制"当成就绪。
+        copied["missing_configuration"] = _cnsc_configuration_problems(copied)
+        copied["status"] = "needs_configuration" if copied["missing_configuration"] else "active"
     return copied
 
 
@@ -3366,7 +3397,7 @@ def duplicate_store_template(template_id: str, payload: dict[str, Any] | None = 
         copied["account_id"] = _resolve_store_template_account(
             data, copied, previous=source, fallback_default=True
         )
-        if str(copied.get("listing_mode") or "site").strip().lower() == "cnsc_global":
+        if is_cnsc_page(copied.get("listing_mode")):
             # 副本按自己的配置重算：缺配置的副本仍旧是 needs_configuration，
             # 不能因为复制就被当成已就绪。
             copied["missing_configuration"] = _cnsc_configuration_problems(copied)
@@ -3689,12 +3720,22 @@ def _decrypt_mabang_password(token: str) -> str | None:
         return None
 
 
-# 采集浏览器端口从这里开始按账号自动分配（9223、9224、9225…），操作员不需要、
+# 采集浏览器端口从这里开始按账号自动分配（18223、18224、18225…），操作员不需要、
 # 也不应该自己配：端口错了会顶掉另一个账号的登录态。
-MABANG_CDP_PORT_BASE = 9223
-# 同一个账号的并行槽位（slot）整体挪到下一个百位段：2 号槽位 = 9223+100、3 号 = +200。
-# 账号端口本身是 9223 起按账号顺延，槽位 stride 取 100 就保证「账号若干 × 槽位若干」
-# 不会互相撞端口（最多 4 槽位 ⇒ 只用到 9223~9524）。
+# 2026-11-17 起离开 9223：9222/9223 是 Chrome 远程调试最常被别的工具/残留实例占用的
+# 端口，换到 18xxx 段明显降低撞车概率；测试再用 AI_LISTING_CDP_PORT_BASE 切到 19223 段。
+def _cdp_port_base() -> int:
+    try:
+        value = int(str(os.environ.get("AI_LISTING_CDP_PORT_BASE") or "").strip() or 18223)
+    except ValueError:
+        return 18223
+    return value if 1024 <= value <= 65000 else 18223
+
+
+MABANG_CDP_PORT_BASE = _cdp_port_base()
+# 同一个账号的并行槽位（slot）整体挪到下一个百位段：2 号槽位 = 18223+100、3 号 = +200。
+# 账号端口本身是 18223 起按账号顺延，槽位 stride 取 100 就保证「账号若干 × 槽位若干」
+# 不会互相撞端口（最多 4 槽位 ⇒ 只用到 18223~18524）。
 MABANG_SLOT_PORT_STRIDE = 100
 
 
@@ -4179,7 +4220,7 @@ def _sync_default_sku_to_store_copies(
 
     跨境模板/副本一律跳过，跨境链路行为与改动前完全一致。
     """
-    if str(template.get("listing_mode") or "site").strip().lower() == "cnsc_global":
+    if not is_local_like(template.get("listing_mode")):
         return
     template_id = str(template.get("id") or "")
     if not template_id:
@@ -4188,7 +4229,7 @@ def _sync_default_sku_to_store_copies(
     for listing_copy in data.get("store_listing_copies", []):
         if str(listing_copy.get("template_id") or "") != template_id:
             continue
-        if str(listing_copy.get("listing_mode") or "site").strip().lower() == "cnsc_global":
+        if not is_local_like(listing_copy.get("listing_mode")):
             continue
         listing_copy["default_sku"] = deepcopy(template.get("default_sku") or _normalize_default_sku(None))
         listing_copy["sku_strip_parentheses"] = template.get("sku_strip_parentheses") is not False
@@ -4250,7 +4291,7 @@ def _sync_site_template_prices_to_store_copies(
     只改写"当前值仍等于旧模板算出来的价"的行：操作员在副本价格表里手工改过的
     行保持不动。默认 SKU(白T恤) 有自己的价格来源、跨境副本走价目表，两者都跳过。
     """
-    if str(template.get("listing_mode") or "site").strip().lower() == "cnsc_global":
+    if is_cnsc_page(template.get("listing_mode")):
         return
     template_id = str(template.get("id") or "")
     if not template_id:
@@ -4259,7 +4300,7 @@ def _sync_site_template_prices_to_store_copies(
     for listing_copy in data.get("store_listing_copies", []):
         if str(listing_copy.get("template_id") or "") != template_id:
             continue
-        if str(listing_copy.get("listing_mode") or "site").strip().lower() == "cnsc_global":
+        if is_cnsc_page(listing_copy.get("listing_mode")):
             continue
         copy_id = str(listing_copy.get("id") or "")
         changed = False
@@ -4392,7 +4433,7 @@ def update_store_template(template_id: str, payload: dict[str, Any]) -> dict[str
             updated["version"] = int(template.get("version") or 1) + 1
             updated["current_version_id"] = str(uuid.uuid4())
             _validate_cnsc_store_template(updated, allow_missing_activity=True)
-            if updated.get("listing_mode") == "cnsc_global":
+            if is_cnsc_page(updated.get("listing_mode")):
                 updated["missing_configuration"] = _cnsc_configuration_problems(updated)
                 updated["status"] = "needs_configuration" if updated["missing_configuration"] else "active"
             _validate_store_template_category_binding(data, updated)
@@ -4416,7 +4457,7 @@ def update_store_template(template_id: str, payload: dict[str, Any]) -> dict[str
             # 副本，否则存量副本要等到重新复制才会生效。跨境模板与跨境副本一律跳过。
             default_sku_changed = updated.get("default_sku") != previous_default_sku
             sku_rule_changed = str(updated.get("sku_template") or "") != previous_sku_template
-            if updated.get("listing_mode") != "cnsc_global" and (default_sku_changed or sku_rule_changed):
+            if is_local_like(updated.get("listing_mode")) and (default_sku_changed or sku_rule_changed):
                 _sync_default_sku_to_store_copies(
                     data,
                     updated,
@@ -4430,7 +4471,7 @@ def update_store_template(template_id: str, payload: dict[str, Any]) -> dict[str
                 or previous_price_fields["sale_price"] != updated.get("sale_price")
                 or previous_price_fields["size_price_overrides"] != _normalize_size_price_overrides(updated.get("size_price_overrides"))
             )
-            if updated.get("listing_mode") != "cnsc_global" and price_changed:
+            if normalize_listing_mode(updated.get("listing_mode")) == LISTING_MODE_SITE and price_changed:
                 _sync_site_template_prices_to_store_copies(
                     data,
                     {**previous_price_fields, "id": template_id},
@@ -5247,7 +5288,7 @@ def update_store_listing_copy(listing_copy_id: str, payload: dict[str, Any]) -> 
             # 开关只服务本土：跨境副本保存即视为关闭，免得 UI 之外的调用写进半支持的状态。
             changed["size_chart_as_last_product_image"] = bool(
                 _size_chart_last_product_image_enabled(changed)
-                and str(item.get("listing_mode") or "site") != "cnsc_global"
+                and is_local_like(item.get("listing_mode"))
             )
         item.update(changed)
         if "category_profile_snapshot" in changed:
@@ -5258,7 +5299,7 @@ def update_store_listing_copy(listing_copy_id: str, payload: dict[str, Any]) -> 
             if "stock" in update:
                 row["stock"] = _validated_non_negative_number(update.get("stock"), "SKU 库存", integer=True)
             if "warehouse_stocks" in update:
-                if item.get("listing_mode") != "cnsc_global":
+                if not is_cnsc_page(item.get("listing_mode")):
                     raise ValueError("只有 CNSC 全球商品可以覆盖多仓库存")
                 row["warehouse_stocks"] = _validated_cnsc_warehouse_stocks(update.get("warehouse_stocks"))
             row["updated_at"] = now
@@ -5288,7 +5329,7 @@ def update_store_listing_copy(listing_copy_id: str, payload: dict[str, Any]) -> 
         # After an editor tier edit, re-derive each SKU row's CNSC price fields by
         # (color,size)→tier match so the per-SKU global price / site matrix stay
         # consistent with the copy-level price_tiers (mirrors _generate_listing_skus).
-        if item.get("listing_mode") == "cnsc_global" and "price_tiers" in changed:
+        if is_cnsc_page(item.get("listing_mode")) and "price_tiers" in changed:
             tiers = item.get("price_tiers") or []
             base = next(
                 (row for row in data.get("base_products", []) if row.get("id") == item.get("base_product_id")),
@@ -5525,7 +5566,7 @@ def _copy_base_products_to_templates_in_store(
             base_created.append(listing_copy)
             # Decision A: always create the copy; surface any CNSC gaps so the user
             # finishes them in the editor. The job gate stays fail-closed later.
-            if template.get("listing_mode") == "cnsc_global":
+            if is_cnsc_page(template.get("listing_mode")):
                 sku_variants = [
                     (str(sku.get("color_code") or sku.get("color_cn") or "").strip(), str(sku.get("size") or "").strip())
                     for sku in skus
@@ -6137,7 +6178,7 @@ def _record_default_video_id_from_result(
         (item for item in data.get("store_listing_copies", []) if item.get("id") == listing_copy_id),
         None,
     )
-    if not listing_copy or str(listing_copy.get("listing_mode") or "site").strip().lower() == "cnsc_global":
+    if not listing_copy or not is_local_like(listing_copy.get("listing_mode")):
         return
     template_id = str(listing_copy.get("template_id") or "").strip()
     template = next(
@@ -6523,7 +6564,7 @@ def fill_listing_copy_missing_attributes(listing_copy_ids: list[str] | str | Non
             filled_copies.append({
                 "id": listing_copy.get("id"),
                 "group_id": listing_copy.get("group_id") or "",
-                "listing_mode": listing_copy.get("listing_mode") or "site",
+                "listing_mode": normalize_listing_mode(listing_copy.get("listing_mode")),
                 "filled_fields": missing,
             })
         if filled_copies:
@@ -8370,7 +8411,7 @@ def _cnsc_copy_price_tiers(base: dict[str, Any], template: dict[str, Any]) -> tu
     - 模板档全无绑定（uniform 形态，一价覆盖全部 SKU）→ colors 模式下的单个
       无约束档（等价旧「全覆盖统一价」，渲染时按颜色展开成行）。
     """
-    if template.get("listing_mode") != "cnsc_global":
+    if not is_cnsc_page(template.get("listing_mode")):
         return "sizes", deepcopy(template.get("price_tiers") or [])
     base_tiers = _normalize_base_price_tiers(base.get("price_tiers") or [])
     color_tiers = [tier for tier in base_tiers if (tier.get("colors") or [])]
@@ -8640,7 +8681,16 @@ def _cnsc_configuration_issues(
             for variant in selected_variants
             if isinstance(variant, (list, tuple)) and len(variant) >= 2
         }
+    # 默认 SKU(白T恤) 是模板另行追加的颜色，不在价格档里，价格由默认 SKU 自己的
+    # 售价/折扣价直接给出（见 _default_sku_rows），不参与档位覆盖校验。
+    default_sku_color = ""
+    if is_local_like(config.get("listing_mode")):
+        default_sku_config = _normalize_default_sku(config.get("default_sku"))
+        if default_sku_config.get("enabled"):
+            default_sku_color = str(default_sku_config.get("color_name") or "").strip().casefold()
     for color, size in sorted(combos):
+        if default_sku_color and str(color or "").strip().casefold() == default_sku_color:
+            continue
         matches = sum(1 for tier in tiers if _tier_matches(tier, color, size))
         if matches == 1:
             continue
@@ -8674,10 +8724,10 @@ def _validate_cnsc_store_template(template: dict[str, Any], *, allow_missing_act
     the copy step, and automation readiness all share one source of truth. When
     ``allow_missing_activity`` is set, a missing per-site discount activity is not
     a hard error (it is still reported via ``missing_configuration``)."""
-    mode = str(template.get("listing_mode") or "site").strip().lower()
-    if mode not in {"site", "cnsc_global"}:
-        raise ValueError("listing_mode must be site or cnsc_global")
-    if mode != "cnsc_global":
+    mode = normalize_listing_mode(template.get("listing_mode"))
+    if mode not in {"site", "cnsc_global", "cnsc_3pf"}:
+        raise ValueError("listing_mode must be site, cnsc_global or cnsc_3pf")
+    if not is_cnsc_page(mode):
         return
     issues = _cnsc_configuration_issues(template)
     if allow_missing_activity:
@@ -8791,7 +8841,7 @@ def _active_default_sku(template: dict[str, Any], listing_copy: dict[str, Any] |
     """生效的默认 SKU 配置；跨境模板恒为 None（跨境行为与改动前完全一致）。"""
     template = template or {}
     source = listing_copy or {}
-    if str(source.get("listing_mode") or template.get("listing_mode") or "site").strip().lower() == "cnsc_global":
+    if not is_local_like(source.get("listing_mode") or template.get("listing_mode")):
         return None
     copy_value = source.get("default_sku")
     payload = copy_value if isinstance(copy_value, dict) and copy_value else template.get("default_sku")
@@ -8801,7 +8851,7 @@ def _active_default_sku(template: dict[str, Any], listing_copy: dict[str, Any] |
 
 def _sku_parentheses_stripped(template: dict[str, Any]) -> bool:
     """本土模板默认把尺码的括号补充值从 SKU 编码里去掉；跨境恒不处理。"""
-    if str((template or {}).get("listing_mode") or "site").strip().lower() == "cnsc_global":
+    if not is_local_like((template or {}).get("listing_mode")):
         return False
     return (template or {}).get("sku_strip_parentheses") not in (False, "false", 0, "0")
 
@@ -8887,6 +8937,11 @@ def _default_sku_configuration_problems(default_sku: dict[str, Any], *, colors: 
 
 def _normalize_store_template_payload(payload: dict[str, Any], *, now: str) -> dict[str, Any]:
     profile_defaults = _profile_defaults_for_payload(payload)
+    # 刊登模式：site(本土) / cnsc_global(跨境 CNSC) / cnsc_3pf(跨境 3PF，本土要求)。
+    # 未知值必须报错，不能静默回落 site——否则跨境模板会被悄悄改成本土。
+    listing_mode = normalize_listing_mode(payload.get("listing_mode") or LISTING_MODE_SITE)
+    if listing_mode not in {"site", "cnsc_global", "cnsc_3pf"}:
+        raise ValueError("刊登模式无效：只支持 site / cnsc_global / cnsc_3pf")
     sizes = _value_or_default(payload, profile_defaults, "sizes", [])
     if isinstance(sizes, str):
         sizes = [item.strip() for item in sizes.split(",") if item.strip()]
@@ -8950,10 +9005,11 @@ def _normalize_store_template_payload(payload: dict[str, Any], *, now: str) -> d
         "default_sku": _normalize_default_sku(payload.get("default_sku")),
         "sku_strip_parentheses": payload.get("sku_strip_parentheses") not in (False, "false", 0, "0"),
         # 本土专属：产品图最后一张放尺码表（满 9 张时第 9 张被替换，不足 9 张追加到末尾；
-        # 描述末尾那批图不重复插尺码表）。跨境没有这条规则，保存时强制关闭。
+        # 描述末尾那批图不重复插尺码表）。跨境 CNSC 没有这条规则，保存时强制关闭；
+        # 跨境 3PF 按本土要求，开关照常生效。
         "size_chart_as_last_product_image": (
             _size_chart_last_product_image_enabled(payload)
-            if str(payload.get("listing_mode") or "site").strip().lower() != "cnsc_global"
+            if is_local_like(listing_mode)
             else False
         ),
         "default_size_chart_path": str(_value_or_default(payload, profile_defaults, "default_size_chart_path", "") or "").strip(),
@@ -8968,7 +9024,7 @@ def _normalize_store_template_payload(payload: dict[str, Any], *, now: str) -> d
         "mabang_size_chart_template_name": str(payload.get("mabang_size_chart_template_name") or "").strip(),
         "description_profile_version_id": str(payload.get("description_profile_version_id") or "").strip(),
         "promotion_activity_id": str(payload.get("promotion_activity_id") or mabang_discount_id).strip(),
-        "listing_mode": str(payload.get("listing_mode") or "site").strip().lower() or "site",
+        "listing_mode": listing_mode,
         "cnsc_store": deepcopy(payload.get("cnsc_store") or {}),
         "target_site_stores": _normalize_cnsc_target_sites(payload.get("target_site_stores")),
         "site_price_order": [
@@ -9259,7 +9315,7 @@ def _build_store_listing_copy(
         "template_id": template.get("id") or "",
         "store_name": template.get("store_name") or "",
         "platform": template.get("platform") or "shopee",
-        "listing_mode": template.get("listing_mode") or "site",
+        "listing_mode": normalize_listing_mode(template.get("listing_mode")),
         "country": template.get("country") or "MY",
         "currency": template.get("currency") or "MYR",
         "category": template.get("product_line") or base.get("category") or "",
@@ -9282,7 +9338,7 @@ def _build_store_listing_copy(
         "default_video_id": str(template.get("default_video_id") or "").strip(),
         # 模板的尺码 chip 顺序：本土副本尺码轴按它排（模板已删时执行器退回这份）。
         "sizes": deepcopy(template.get("sizes") or []),
-        "cnsc_binding_mode": cnsc_binding_mode if template.get("listing_mode") == "cnsc_global" else "",
+        "cnsc_binding_mode": cnsc_binding_mode if is_cnsc_page(template.get("listing_mode")) else "",
         "warehouse_stock_defaults": deepcopy(template.get("warehouse_stock_defaults") or {"TH": 0, "CN_GZ": 0, "PH": 0}),
         "group_id": base.get("group_id") or "",
         "main_sku": base.get("main_sku") or base.get("group_id") or "",
@@ -9320,7 +9376,7 @@ def _build_store_listing_copy(
         # 本土模板开关快照：自动化据此决定「产品图」区最后一张是不是尺码表。
         "size_chart_as_last_product_image": (
             False
-            if str(template.get("listing_mode") or "site") == "cnsc_global"
+            if is_pure_cnsc(template.get("listing_mode"))
             else _size_chart_last_product_image_enabled(template)
         ),
         "size_chart_snapshot": {
@@ -9410,7 +9466,7 @@ def _cnsc_sale_price(original: Any, sale: Any, discount_percent: float | None = 
 
 def _generate_listing_skus(base: dict[str, Any], template: dict[str, Any], listing_copy: dict[str, Any]) -> list[dict[str, Any]]:
     colors = [str(item or "").strip() for item in base.get("recognized_colors") or [] if str(item or "").strip()] or ["default"]
-    cnsc = listing_copy.get("listing_mode") == "cnsc_global"
+    cnsc = is_cnsc_page(listing_copy.get("listing_mode"))
     # SKU 尺码源：本土按模板尺码（模板 chip 顺序即上架顺序），模板没配尺码才回退
     # 商品勾选/识别尺码；跨境仍以商品勾选/识别尺码优先。见 _listing_sizes。
     # 跨境与本土一致：SKU 均为 颜色×尺码；价格仍按颜色档（同色不同码同价）。
@@ -9537,7 +9593,7 @@ def _listing_size_order_rank(
     """本土副本的尺码顺序秩：按模板 chip 顺序（复用 _order_sizes_by_template），
     模板里没有的尺码按原相对顺序排在后面。跨境返回 None，调用方沿用
     _size_sort_value 旧排序——跨境网格按行号填写，换序属于跨境行为变更。"""
-    if str(listing_copy.get("listing_mode") or "site") == "cnsc_global":
+    if is_cnsc_page(listing_copy.get("listing_mode")):
         return None
     unique_sizes: list[str] = []
     seen: set[str] = set()
@@ -9580,7 +9636,7 @@ def _listing_sizes(base: dict[str, Any], template: dict[str, Any]) -> list[str]:
         for item in (base.get("selected_sizes") or base.get("recognized_sizes") or [])
         if str(item or "").strip()
     ]
-    if str((template or {}).get("listing_mode") or "site") == "cnsc_global":
+    if not is_local_like((template or {}).get("listing_mode")):
         return base_sizes or template_sizes or ["default"]
     return template_sizes or base_sizes or ["default"]
 
@@ -9601,8 +9657,44 @@ def _default_sku_rows(
     if not color:
         return []
     image_name = _default_sku_image_name(default_sku, _default_sku_image_path(default_sku))
+    # 跨境 3PF：默认 SKU 的颜色也在 CNSC 网格里，行上必须有全球价与每站价格，
+    # 否则页面「全球商品价格」列留空会挡住保存。价格来源就是默认 SKU 自己的
+    # 原价/折扣价（含分尺码覆盖），不取模板原价、不套六折规则。
+    cnsc_page = is_cnsc_page(listing_copy.get("listing_mode"))
+    site_codes = [
+        str(entry.get("site_code") or "").strip().upper()
+        for entry in listing_copy.get("target_site_stores") or []
+        if str(entry.get("site_code") or "").strip()
+    ]
+    site_discounts = {
+        str(entry.get("site_code") or "").strip().upper(): float(entry.get("discount_percent") or listing_copy.get("default_site_discount_percent") or 40)
+        for entry in listing_copy.get("target_site_stores") or []
+        if str(entry.get("site_code") or "").strip()
+    }
+    default_off = float(listing_copy.get("default_site_discount_percent") or 40)
+    warehouse_stocks = (
+        _normalize_cnsc_warehouse_stocks(template.get("warehouse_stock_defaults")) if cnsc_page else {}
+    )
     rows: list[dict[str, Any]] = []
     for size in sizes:
+        override = _default_sku_size_price(default_sku, size) if cnsc_page else None
+        if override:
+            normal_price = override.get("normal_price")
+            sale_price = override.get("sale_price")
+        else:
+            normal_price = _float_or_empty(default_sku.get("normal_price"))
+            sale_price = _float_or_empty(default_sku.get("sale_price"))
+        global_price_cny: float | str = ""
+        site_price_matrix: dict[str, Any] = {}
+        if cnsc_page and normal_price not in ("", None) and float(normal_price) > 0:
+            global_price_cny = float(normal_price)
+            for site_code in site_codes:
+                site_price_matrix[site_code] = {
+                    "original_price": float(normal_price),
+                    "sale_price": _cnsc_sale_price(
+                        normal_price, sale_price, site_discounts.get(site_code, default_off)
+                    ),
+                }
         rows.append({
             "id": str(uuid.uuid4()),
             "listing_copy_id": listing_copy.get("id") or "",
@@ -9617,9 +9709,9 @@ def _default_sku_rows(
             "variant_image": image_name,
             "stock": _int_or_empty(template.get("stock")),
             "price_tier_id": "",
-            "global_price_cny": "",
-            "site_price_matrix": {},
-            "warehouse_stocks": {},
+            "global_price_cny": global_price_cny,
+            "site_price_matrix": site_price_matrix,
+            "warehouse_stocks": deepcopy(warehouse_stocks),
             "sku_source": "default_sku",
             "status": "active",
             "updated_at": now,
@@ -9748,7 +9840,7 @@ def _generate_listing_prices(
     now = utc_now()
     base_tiers = [tier for tier in (base_price_tiers or []) if isinstance(tier, dict)]
     # CNSC: only copy site prices for the template's target sites, in template order.
-    cnsc_mode = listing_copy.get("listing_mode") == "cnsc_global"
+    cnsc_mode = is_cnsc_page(listing_copy.get("listing_mode"))
     target_sites: list[str] = []
     if cnsc_mode:
         target_sites = [
@@ -9761,7 +9853,7 @@ def _generate_listing_prices(
     default_sku = _active_default_sku(template, listing_copy)
     rows = []
     for sku in skus:
-        global_mode = listing_copy.get("listing_mode") == "cnsc_global"
+        global_mode = is_cnsc_page(listing_copy.get("listing_mode"))
         is_default_sku = default_sku is not None and sku.get("sku_source") == "default_sku"
         if is_default_sku:
             # 默认 SKU(白T恤) 的售价/折扣价独立设置：不取模板原价、不套六折规则。
@@ -9804,7 +9896,7 @@ def _generate_listing_prices(
             "price_source": "base_product" if base_tier is not None else "",
             "discount_label": "" if global_mode else (template.get("discount_label") or ""),
             "discount_id": "" if global_mode else (template.get("discount_id") or ""),
-            "global_price_cny": sku.get("global_price_cny") if listing_copy.get("listing_mode") == "cnsc_global" else "",
+            "global_price_cny": sku.get("global_price_cny") if is_cnsc_page(listing_copy.get("listing_mode")) else "",
             "site_price_matrix": site_price_matrix if global_mode else {},
             "status": "active",
             "updated_at": now,
@@ -9845,7 +9937,7 @@ def _normalize_size_price_overrides(value: Any) -> dict[str, dict[str, float | s
 
 def _sync_listing_prices_from_template(prices: list[dict[str, Any]], template: dict[str, Any], *, now: str) -> None:
     discount_id = template.get("discount_id") or template.get("mabang_discount_id") or ""
-    global_mode = template.get("listing_mode") == "cnsc_global"
+    global_mode = is_cnsc_page(template.get("listing_mode"))
     for price in prices:
         price.update({
             "platform": template.get("platform") or "shopee",
@@ -9869,7 +9961,7 @@ def _check_automation_readiness(
 ) -> dict[str, Any]:
     skus = skus if skus is not None else list_listing_skus(listing_copy.get("id") or "")
     prices = prices if prices is not None else list_listing_prices(listing_copy.get("id") or "")
-    is_cnsc = str(listing_copy.get("listing_mode") or "").strip().lower() == "cnsc_global"
+    is_cnsc = is_cnsc_page(listing_copy.get("listing_mode"))
     required = {
         "listing_title": listing_copy.get("listing_title"),
         "description": listing_copy.get("description"),
@@ -9885,7 +9977,7 @@ def _check_automation_readiness(
         "package_width_cm": listing_copy.get("package_width_cm"),
         "package_height_cm": listing_copy.get("package_height_cm"),
     }
-    if not is_cnsc:
+    if is_local_like(listing_copy.get("listing_mode")):
         required["size_chart_image"] = (
             listing_copy.get("size_chart_image")
             or listing_copy.get("size_chart_image_path")
@@ -9895,15 +9987,18 @@ def _check_automation_readiness(
             or listing_copy.get("size_chart_asset_id")
             or listing_copy.get("mabang_size_chart_template_id")
         )
-        required["mabang_discount_id"] = listing_copy.get("mabang_discount_id")
+        # 单店折扣活动只服务本土(site)：跨境 CNSC / 3PF 的折扣活动在站点价格表里，
+        # 由目标站点店铺 + 每站活动承载，不要求模板这一份单店活动。
+        if normalize_listing_mode(listing_copy.get("listing_mode")) == LISTING_MODE_SITE:
+            required["mabang_discount_id"] = listing_copy.get("mabang_discount_id")
     missing = [
         key
         for key, value in required.items()
         if _is_missing_required_value(key, value)
     ]
-    if not is_cnsc:
+    if is_local_like(listing_copy.get("listing_mode")):
         # 默认 SKU(白T恤)：启用后图片/SKU/售价/折扣价必填，且颜色名不能与商品颜色
-        # 重名（重复的颜色轴值会让马帮少生成一组行）。跨境不检查。
+        # 重名（重复的颜色轴值会让马帮少生成一组行）。纯跨境 CNSC 不发生成、不检查。
         default_sku_config = _normalize_default_sku(listing_copy.get("default_sku"))
         if default_sku_config.get("enabled"):
             other_colors = [
@@ -9934,7 +10029,18 @@ def _check_automation_readiness(
         # 跨境(CNSC)的成本价以基础商品价格表为唯一来源：每个价格行必须带成本价
         # （缺失阻止自动化但仍允许保存副本）。本土(site)店铺的成本价走模板/导出
         # 自己的兜底，不要求基础商品维护里补——故此处只在 CNSC 分支检查。
-        if any(price.get("cost_price") in ("", None) for price in prices):
+        # 默认 SKU(白T恤) 的行没有 base 成本档（该颜色是模板追加的），成本价检查
+        # 只针对真实商品颜色；它们的价格已在 _default_sku_rows 里就地给出。
+        default_sku_ids = {
+            str(sku.get("id") or "")
+            for sku in skus
+            if str(sku.get("sku_source") or "") == "default_sku"
+        }
+        if any(
+            price.get("cost_price") in ("", None)
+            and str(price.get("sku_id") or "") not in default_sku_ids
+            for price in prices
+        ):
             missing.append("base_product_cost_price")
         # CNSC 没有总库存字段：只要任一 SKU 的泰国/广州/菲律宾仓有库存，
         # 库存即视为就绪，不再提醒"缺少库存"。2026-09-27 起三仓全 0 也是合法状态
@@ -10051,7 +10157,7 @@ def _cnsc_warehouse_stocks_resolvable(skus: list[dict[str, Any]], defaults: Any)
 
 def _runtime_configuration_missing(data: dict[str, Any], listing_copy: dict[str, Any], *, now: str) -> list[str]:
     missing: list[str] = []
-    is_cnsc = str(listing_copy.get("listing_mode") or "").strip().lower() == "cnsc_global"
+    is_cnsc = is_cnsc_page(listing_copy.get("listing_mode"))
     profile_id = str(listing_copy.get("category_profile_id") or "").strip()
     version_id = str(listing_copy.get("category_profile_version_id") or "").strip()
     profiles = data.get("category_profiles") or []
@@ -10137,7 +10243,7 @@ def _build_browser_inputs(
     size_chart_last_product_image = False
     size_chart_slot_skipped = ""
     if (
-        str(listing_copy.get("listing_mode") or "site") != "cnsc_global"
+        is_local_like(listing_copy.get("listing_mode"))
         and _size_chart_last_product_image_enabled(listing_copy)
     ):
         size_chart_file = str(size_chart_image_path or "").strip()
@@ -10162,7 +10268,7 @@ def _build_browser_inputs(
     sizes = _unique_sorted_sizes(skus)
     # 颜色轴顺序：本土按操作员在商品维护里排的顺序（recognized_colors）生成；跨境
     # 沿用字母序——跨境网格按行号填写，换序属于跨境行为变更，要单独验证。
-    if str(listing_copy.get("listing_mode") or "site") == "cnsc_global":
+    if is_cnsc_page(listing_copy.get("listing_mode")):
         colors = _unique_sorted_colors(skus, listing_copy)
     else:
         # 尺码轴顺序：本土按模板的尺码 chip 顺序（操作员在模板里拖动的顺序即
@@ -10222,7 +10328,7 @@ def _build_browser_inputs(
     variation_defaults = _normalize_variation(listing_copy.get("variation") or {})
     return {
         "platform": listing_copy.get("platform") or "",
-        "listing_mode": listing_copy.get("listing_mode") or "site",
+        "listing_mode": normalize_listing_mode(listing_copy.get("listing_mode")),
         "store_name": listing_copy.get("store_name") or "",
         "mabang_store_id": listing_copy.get("mabang_store_id") or "",
         "country": listing_copy.get("country") or "",
