@@ -174,6 +174,31 @@ test('current-page capture detects CNSC from hash and semantic VXE headers witho
   assert.doesNotMatch(JSON.stringify(result), /cKey|secret-token/);
 });
 
+test('CNSC page with a single stock column (no per-warehouse columns) is still CNSC and keeps global price', () => {
+  // 2026-11-17 真机：CNSC 交易信息只有 全球商品价格 + 单一「库存」，
+  // 没有泰国/广州/菲律宾仓库存列。三仓列是可选的，不能因此判冲突或丢价格。
+  const result = executeCapture({
+    href: 'https://publish.mabangerp.com/publish-ui/#/productDetailShopee?global=4',
+    columns: [
+      { field: 'col_1', title: '颜色' },
+      { field: 'col_2', title: '尺码' },
+      { field: 'col_4', title: 'SKU' },
+      { field: 'col_6', title: '全球商品价格' },
+      { field: 'col_8', title: '库存' },
+      { field: 'col_9', title: '重量(kg)' },
+      { field: 'col_10', title: '包裹尺寸(cm)' },
+      { field: 'col_18', title: '一键生成批量修改' },
+    ],
+    rows: [{ col_1: 'A', col_2: 'XS', col_4: '11991_A||XS', col_6: '19.2', col_8: '300' }],
+  });
+
+  assert.equal(result.listing_mode, 'cnsc_global');
+  assert.deepEqual(result.listing_mode_evidence.matched_headers, ['全球商品价格']);
+  assert.equal(result.sku_rows[0].global_price_cny, '19.2');
+  assert.equal(result.sku_rows[0].seller_sku, '11991_A||XS');
+  assert.deepEqual(result.sku_rows[0].warehouse_stocks, { TH: '', CN_GZ: '', PH: '' });
+});
+
 test('ordinary current-page capture remains site mode when neither CNSC signal exists', () => {
   const result = executeCapture({
     href: 'https://publish.mabangerp.com/publish-ui/#/productDetailShopee?platformId=17',

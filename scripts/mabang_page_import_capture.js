@@ -294,8 +294,9 @@
     const fields = resolveColumnFields(table);
     const sitePriceFields = resolveSitePriceFields(table);
     const separateSiteRows = readSeparateSitePriceRows(table);
-    const cnscGrid = ['全球商品价格', '泰国仓库存', '广州仓库存', '菲律宾仓库存']
-      .every((label) => Boolean(fieldForLabel(fields, label)));
+    // 「全球商品价格」是 CNSC 专属列，有它就按 CNSC 行解析。三仓库存列是可选列
+    // （有的店铺/页面只有单一「库存」），缺了也要读全球价/SKU/站点价，否则价格全丢。
+    const cnscGrid = Boolean(fieldForLabel(fields, '全球商品价格'));
     return (table?.tableData || []).filter((row) => row && typeof row === 'object').map((row, rowIndex) => {
       const rendered = renderedRowValues(table, rowIndex);
       const base = {
@@ -361,6 +362,11 @@
     const matchedHeaders = requiredHeaders.filter((header) => (
       [...seenHeaders].some((label) => headerLabelMatches(label, header))
     ));
+    // 判定 CNSC 只看「全球商品价格」这一列（CNSC 专属）+ URL 的 global=4。
+    // 三仓库存列在真机是可选的：有的店铺/页面只有单一「库存」（2026-11-17 实录：
+    // Color/Size/SKU/全球商品价格/库存/重量/包裹尺寸），按四列全有才认会直接判冲突。
+    // 缺三仓列由后端记为 warehouse_stock_defaults 待补充，不阻断采集。
+    const hasCnscMarker = matchedHeaders.includes('全球商品价格');
     const fallbackHref = `${clean(location.origin)}${clean(location.pathname)}`;
     const locationUrl = new URL(clean(location.href) || fallbackHref, clean(location.origin) || undefined);
     let hashParams = new URL(location.origin).searchParams;
@@ -372,7 +378,7 @@
     }
     const globalParam = locationUrl.searchParams.get('global') === '4' || hashParams.get('global') === '4';
     return {
-      listing_mode: globalParam && matchedHeaders.length === requiredHeaders.length ? 'cnsc_global' : 'site',
+      listing_mode: globalParam && hasCnscMarker ? 'cnsc_global' : 'site',
       listing_mode_evidence: {
         global_param: globalParam,
         matched_headers: matchedHeaders,

@@ -46,7 +46,8 @@ const PROMOTION_LABELS = [
 // 证据自相矛盾时短暂重采几次，别让「页面没加载完」直接变成采集失败。
 const LISTING_MODE_RETRY_LIMIT = 4;
 const LISTING_MODE_RETRY_DELAY_MS = 1200;
-const CNSC_HEADER_COUNT = 4;
+// CNSC 专属列：有它就够判 CNSC，三仓库存列是可选列。
+const CNSC_MARKER_HEADER = '\u5168\u7403\u5546\u54c1\u4ef7\u683c';
 
 function parseArgs(argv) {
   const args = { cdpUrl: CDP_DEFAULT, plan: {} };
@@ -167,23 +168,26 @@ function promotionValidityMissing(capture) {
 }
 
 /**
- * 采集证据是否自相矛盾：URL 说是 CNSC（global=4）但没读到 4 个 CNSC 表头，或反过来。
+ * 采集证据是否自相矛盾：URL 说是 CNSC（global=4）但没读到「全球商品价格」列，或反过来。
  *
- * 这多半是交易信息表格还没渲染完（真机首采常见），所以在采集脚本里重采而不是直接失败；
- * 重采用尽后仍矛盾，后端会带着「已读到哪些表头」报错，方便定位。
+ * 三仓库存列在真机是可选的，不算矛盾。矛盾多半是交易信息表格还没渲染完（真机首采常见），
+ * 所以在这里重采而不是直接失败；重采用尽后仍矛盾，后端会带着「已读到哪些表头」报错。
  */
 function listingModeConflict(capture) {
   if (!capture || typeof capture !== 'object') return false;
   const evidence = capture.listing_mode_evidence;
   if (!evidence || typeof evidence !== 'object') return false;
   const globalParam = evidence.global_param === true;
-  const matched = Array.isArray(evidence.matched_headers) ? evidence.matched_headers.length : 0;
-  return globalParam !== (matched >= CNSC_HEADER_COUNT);
+  const matched = Array.isArray(evidence.matched_headers) ? evidence.matched_headers : [];
+  const hasMarker = matched.some((header) => String(header).includes(CNSC_MARKER_HEADER));
+  return globalParam !== hasMarker;
 }
 
 function readPromotionPageSource() {
   return fs.readFileSync(PROMOTION_PAGE_PATH, 'utf8');
-}function runPromotionPage(frame, phase) {
+}
+
+function runPromotionPage(frame, phase) {
   const source = readPromotionPageSource();
   return frame.evaluate(
     ([pageSource, options]) => (0, eval)(`(${pageSource})`)(options),

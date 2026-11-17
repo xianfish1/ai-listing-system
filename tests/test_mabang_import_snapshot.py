@@ -267,7 +267,7 @@ def test_collapse_uniform_sku_value_does_not_choose_a_first_row() -> None:
     }
 
 
-def test_cnsc_snapshot_requires_both_global_parameter_and_all_cnsc_headers() -> None:
+def test_cnsc_snapshot_requires_global_parameter_and_the_global_price_header() -> None:
     capture = _cnsc_fixture()
     snapshot = normalize_mabang_capture(capture)
 
@@ -277,12 +277,23 @@ def test_cnsc_snapshot_requires_both_global_parameter_and_all_cnsc_headers() -> 
     assert snapshot["page"]["url"] == "https://publish.mabangerp.com/publish-ui/"
     assert "cKey" not in json.dumps(snapshot)
 
-    capture["listing_mode_evidence"]["matched_headers"].remove("菲律宾仓库存")
-    capture["listing_mode_evidence"]["seen_headers"] = ["颜色", "尺码", "全球商品价格(CNY)"]
+    # 三仓库存列在真机是可选的：缺了仍是 CNSC，只记 warehouse_stock_defaults 待补充。
+    without_warehouses = _cnsc_fixture()
+    without_warehouses["listing_mode_evidence"]["matched_headers"] = ["全球商品价格"]
+    for row in without_warehouses["sku_rows"]:
+        row["warehouse_stocks"] = {"TH": "", "CN_GZ": "", "PH": ""}
+    partial = normalize_mabang_capture(without_warehouses)
+    assert partial["listing_mode"] == "cnsc_global"
+    assert partial["warehouse_stock_defaults"] == {}
+    assert "warehouse_stock_defaults" in partial["missing_configuration"]
+
+    # CNSC 的判据是「全球商品价格」列；缺它就报冲突，并把读到的表头带进提示。
+    capture["listing_mode_evidence"]["matched_headers"].remove("全球商品价格")
+    capture["listing_mode_evidence"]["seen_headers"] = ["Color", "Size", "SKU", "库存"]
     with pytest.raises(MabangImportSnapshotError, match="页面类型识别冲突") as error:
         normalize_mabang_capture(capture)
-    assert "缺少表头：菲律宾仓库存" in str(error.value)
-    assert "全球商品价格(CNY)" in str(error.value)
+    assert "没有「全球商品价格」列" in str(error.value)
+    assert "Color" in str(error.value)
 
 
 def test_cnsc_headers_match_with_units_and_extra_whitespace() -> None:

@@ -23,6 +23,8 @@ _PRICE_FIELDS = (
     "sale_price",
 )
 
+_CNSC_MARKER_HEADER = "全球商品价格"
+
 _CNSC_REQUIRED_HEADERS = (
     "全球商品价格",
     "泰国仓库存",
@@ -270,10 +272,13 @@ def _normalize_listing_mode(raw: dict[str, Any]) -> tuple[str, dict[str, Any]]:
         for header in _CNSC_REQUIRED_HEADERS
         if any(_header_label_matches(supplied, header) for supplied in supplied_headers)
     ]
-    has_cnsc_headers = len(matched_headers) == len(_CNSC_REQUIRED_HEADERS)
+    # CNSC 判据只看「全球商品价格」（CNSC 专属列）：泰国/广州/菲律宾仓库存列在真机是
+    # 可选的，有的店铺/页面只有单一「库存」（2026-11-17 实录）。缺三仓列交给
+    # warehouse_stock_defaults 待补充提醒，不能因此把全球商品页判成本土或直接失败。
+    has_cnsc_marker = _CNSC_MARKER_HEADER in matched_headers
     supplied_mode = _text(raw.get("listing_mode")).lower()
-    detected_mode = "cnsc_global" if global_param and has_cnsc_headers else "site"
-    if global_param != has_cnsc_headers:
+    detected_mode = "cnsc_global" if global_param and has_cnsc_marker else "site"
+    if global_param != has_cnsc_marker:
         raise MabangImportSnapshotError(_listing_mode_conflict_message(global_param, matched_headers, evidence))
     if supplied_mode and supplied_mode not in {"site", "cnsc_global"}:
         raise MabangImportSnapshotError("马帮页面刊登模式无效")
@@ -288,8 +293,7 @@ def _listing_mode_conflict_message(
     evidence: dict[str, Any],
 ) -> str:
     if global_param:
-        missing = [header for header in _CNSC_REQUIRED_HEADERS if header not in matched_headers]
-        detail = f"缺少表头：{'、'.join(missing)}" if missing else "交易信息表头没读到"
+        detail = f"交易信息里没有「{_CNSC_MARKER_HEADER}」列"
         seen = _string_list(evidence.get("seen_headers"))[:8]
         if seen:
             detail = f"{detail}；已读到：{'、'.join(seen)}"

@@ -106,6 +106,10 @@ test('页面采集器：页面类型证据矛盾时重采（表格晚渲染）�
   assert.equal(collector.listingModeConflict({
     listing_mode_evidence: { global_param: true, matched_headers: cnscHeaders },
   }), false);
+  // 真机 CNSC 页可能只有单一「库存」列：有「全球商品价格」就不算矛盾。
+  assert.equal(collector.listingModeConflict({
+    listing_mode_evidence: { global_param: true, matched_headers: ['全球商品价格'] },
+  }), false);
   assert.equal(collector.listingModeConflict({
     listing_mode_evidence: { global_param: false, matched_headers: [] },
   }), false);
