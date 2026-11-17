@@ -4783,7 +4783,16 @@ def create_base_product_from_folder(payload: dict[str, Any]) -> dict[str, Any] |
 
     root_path = Path(payload.get("root_path") or payload.get("asset_root") or "").expanduser()
     category = str(payload.get("category") or payload.get("product_line") or "").strip()
-    result = scan_asset_root(root_path, category_override=category, mode="recursive")
+    # 透明图（前胸/后背/袖口透明图、透明底…）只用于生产打样，导入商品时默认不登记为素材，
+    # 也不进商品图/颜色图/识别。操作员手动上传的商品图走 add_base_product_product_image，
+    # 不经过这里，不受影响。确实要导透明图时显式传 include_transparent_artwork=true。
+    include_transparent = bool(payload.get("include_transparent_artwork"))
+    result = scan_asset_root(
+        root_path,
+        category_override=category,
+        mode="recursive",
+        skip_transparent_artwork=not include_transparent,
+    )
     assets = [dict(asset) for asset in result.get("assets") or [] if isinstance(asset, dict)]
     if not assets:
         return None

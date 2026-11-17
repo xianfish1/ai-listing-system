@@ -70,6 +70,44 @@ test('rejects selections without supported product media', () => {
   );
 });
 
+test('skips transparent artwork files before uploading', () => {
+  const plan = batch.planLocalFolderImport([
+    file('AL0004/A白色.jpg', 3),
+    file('AL0004/主图.jpg', 4),
+    file('AL0004/前胸透明图.png', 5),
+    file('AL0004/袖口透明图_验收失败_第1次.png', 6),
+    file('AL0004/transparent-print.png', 7),
+    file('AL0004/前印花.jpg', 8),
+  ], SUPPORTED);
+
+  assert.equal(plan.mode, 'single');
+  assert.deepEqual(plan.groups[0].manifest, [
+    { path: 'A白色.jpg', size_bytes: 3 },
+    { path: '主图.jpg', size_bytes: 4 },
+    { path: '前印花.jpg', size_bytes: 8 },
+  ]);
+  assert.equal(plan.transparentFileCount, 3);
+  assert.equal(plan.filteredFileCount, 3);
+});
+
+test('rejects a folder that contains only transparent artwork', () => {
+  assert.throws(
+    () => batch.planLocalFolderImport([
+      file('AL0005/前胸透明图.png'),
+      file('AL0005/后背透明图.png'),
+    ], SUPPORTED),
+    /只有透明图（2 张）/,
+  );
+});
+
+test('transparent artwork name matching follows the backend markers', () => {
+  assert.equal(batch.isTransparentArtworkName('前胸透明图白色.png'), true);
+  assert.equal(batch.isTransparentArtworkName('后背透明图 (2).png'), true);
+  assert.equal(batch.isTransparentArtworkName('transparent-print.png'), true);
+  assert.equal(batch.isTransparentArtworkName('前印花.png'), false);
+  assert.equal(batch.isTransparentArtworkName('A白色.png'), false);
+});
+
 function tick() {
   return new Promise((resolve) => setImmediate(resolve));
 }

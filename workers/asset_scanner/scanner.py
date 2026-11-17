@@ -109,6 +109,10 @@ SOURCE_IMAGE_MARKERS = ("source", "源图", "源文件")
 # 文件名里的颜色词指的是印花色而不是衣服颜色（``后印花 (黑色衣服).png`` 的
 # "黑色"），所以这类文件的 sku_option 也清空，不参与颜色识别。
 PRINT_ARTWORK_MARKERS = ("印花", "透明图", "print")
+# 透明图（前胸透明图 / 后背透明图 / 袖口透明图 / 透明底…）：只用于生产打样。
+# 导入商品时默认不导入（操作员手动上传的图不受影响），所以单独一组标记，
+# 比 PRINT_ARTWORK_MARKERS 更宽——名字里带「透明」的都算，不必凑成「透明图」。
+TRANSPARENT_ARTWORK_MARKERS = ("透明", "transparent")
 # 商品照例外：AI 生图工具把整批商品照命名为「T恤印花改图任务」及编号版本
 # （``T恤印花改图任务 (1).png``…）。名字里带「印花」但它们是衣服商品照，
 # 不是前/后印花或透明图那样的生产素材，不能因为关键词被排除出商品图和颜色识别。
@@ -123,10 +127,34 @@ def _is_product_photo_with_print_in_name(stem: str) -> bool:
     return bool(PRODUCT_PHOTO_PRINT_NAME_PATTERN.match(str(stem or "").strip()))
 
 
-def scan_asset_root(root: str | Path, category_override: str = "", max_files: int = 3000, mode: str = "auto") -> dict[str, Any]:
+def is_transparent_artwork_name(value: str) -> bool:
+    """文件名是不是透明图（前胸透明图 / 后背透明图 / 袖口透明图 / 透明底…）。
+
+    透明印花层只用于生产打样，导入商品时默认不导入（见 docs/POD_ASSET_RULES.md）。
+    判定只看文件名：中文按子串（``前胸透明图白色.png``），英文按整段
+    （``transparent-print.png``），和印刷图标记同一套匹配规则。"""
+    stem = Path(str(value or "")).name
+    stem = Path(stem).stem if Path(stem).suffix else stem
+    return _matches_filename_marker(stem, TRANSPARENT_ARTWORK_MARKERS)
+
+
+def scan_asset_root(
+    root: str | Path,
+    category_override: str = "",
+    max_files: int = 3000,
+    mode: str = "auto",
+    *,
+    skip_transparent_artwork: bool = False,
+) -> dict[str, Any]:
     root_path = Path(root).expanduser()
     if not root_path.exists():
-        return {"root": str(root_path), "assets": [], "count": 0, "errors": [f"Root not found: {root_path}"]}
+        return {
+            "root": str(root_path),
+            "assets": [],
+            "count": 0,
+            "errors": [f"Root not found: {root_path}"],
+            "skipped_transparent_count": 0,
+        }
     if mode not in {"auto", "groups", "recursive"}:
         mode = "auto"
 
@@ -134,6 +162,7 @@ def scan_asset_root(root: str | Path, category_override: str = "", max_files: in
     errors: list[str] = []
     default_group_id = _detect_default_group_id(root_path)
     scanned_files = 0
+    skipped_transparent = 0
     if mode == "groups" or (mode == "auto" and not default_group_id):
         group_dirs = _find_group_dirs(root_path, limit=200)
         if group_dirs:
@@ -141,6 +170,9 @@ def scan_asset_root(root: str | Path, category_override: str = "", max_files: in
                 group_id = _detect_default_group_id(group_dir)
                 for file_path in _iter_limited_files(group_dir, max_depth=2):
                     if file_path.suffix.lower() not in IMAGE_EXTENSIONS | VIDEO_EXTENSIONS | SOURCE_EXTENSIONS:
+                        continue
+                    if skip_transparent_artwork and is_transparent_artwork_name(file_path.name):
+                        skipped_transparent += 1
                         continue
                     try:
                         assets.append(_asset_from_path(root_path, file_path, group_id, category_override))
@@ -155,7 +187,14 @@ def scan_asset_root(root: str | Path, category_override: str = "", max_files: in
             _apply_unnamed_variant_set_policy(assets)
             assets.sort(key=lambda item: (item["category"], item["group_id"], item["brand"], item["asset_type"], item["file_name"]))
             summary = summarize_assets(assets)
-            return {"root": str(root_path), "assets": assets, "count": len(assets), "summary": summary, "errors": errors}
+            return {
+                "root": str(root_path),
+                "assets": assets,
+                "count": len(assets),
+                "summary": summary,
+                "errors": errors,
+                "skipped_transparent_count": skipped_transparent,
+            }
 
     for file_path in root_path.rglob("*"):
         if not file_path.is_file():
@@ -163,6 +202,9 @@ def scan_asset_root(root: str | Path, category_override: str = "", max_files: in
         if file_path.name.startswith("."):
             continue
         if file_path.suffix.lower() not in IMAGE_EXTENSIONS | VIDEO_EXTENSIONS | SOURCE_EXTENSIONS:
+            continue
+        if skip_transparent_artwork and is_transparent_artwork_name(file_path.name):
+            skipped_transparent += 1
             continue
         try:
             assets.append(_asset_from_path(root_path, file_path, default_group_id, category_override))
@@ -178,7 +220,14 @@ def scan_asset_root(root: str | Path, category_override: str = "", max_files: in
         _apply_unnamed_variant_set_policy(group_assets)
     assets.sort(key=lambda item: (item["category"], item["group_id"], item["brand"], item["asset_type"], item["file_name"]))
     summary = summarize_assets(assets)
-    return {"root": str(root_path), "assets": assets, "count": len(assets), "summary": summary, "errors": errors}
+    return {
+        "root": str(root_path),
+        "assets": assets,
+        "count": len(assets),
+        "summary": summary,
+        "errors": errors,
+        "skipped_transparent_count": skipped_transparent,
+    }
 
 
 def _assets_by_group(assets: list[dict[str, Any]]) -> dict[str, list[dict[str, Any]]]:

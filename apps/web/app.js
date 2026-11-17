@@ -4531,6 +4531,26 @@ function clearBaseProductSelection() {
   renderBaseProductBatchBar();
 }
 
+// 店铺模板勾选（模板列表页 + 「复制到店铺模板」弹窗共用同一集合）切页时也清掉。
+// 以前故意不清是怕抹掉弹窗里的勾选——但弹窗是模态的，开着时点不了侧栏导航，
+// 所以 showView 触发时弹窗必然已关，跟着清掉即可（2026-11-08 现场反馈）。
+function clearStoreTemplateSelection() {
+  if (!state.selectedStoreTemplates.size) return;
+  state.selectedStoreTemplates.clear();
+  document.querySelectorAll("[data-store-template-select]").forEach((input) => {
+    input.checked = false;
+  });
+}
+
+// 刊登副本勾选同理：勾选属于它所在的那一页，切页不带走。
+function clearListingCopySelection() {
+  if (!state.selectedListingCopies.size) return;
+  state.selectedListingCopies.clear();
+  document.querySelectorAll("[data-listing-copy-select]").forEach((input) => {
+    input.checked = false;
+  });
+}
+
 // 换分类 / 换时间窗 = 换一批可见商品，勾选一律重来（2026-11-05 现场反馈）。
 // 以前勾选留着：切到别的分类后，看不见的卡片还挂在「已选 N 个」里，
 // 点「批量删除 / 重新识别」会作用到当前列表里根本没有显示的商品。
@@ -8936,6 +8956,7 @@ async function importDroppedFolders(dataTransfer) {
   // 跳过的目录和「会覆盖已有商品」的风险一起说清楚，避免操作员以为全都进去了。
   let queued = 0;
   let fileCount = 0;
+  let transparentCount = 0;
   const duplicates = dedupedBatches.dropped.map((batch) => ({ folderName: batch?.name || "", reason: "nested" }));
   const conflicts = [];
   const sameSkuHints = [];
@@ -8943,6 +8964,7 @@ async function importDroppedFolders(dataTransfer) {
     const result = await createBaseProductFromLocalFiles(batch.files, { quiet: true });
     queued += Number(result?.added || 0);
     fileCount += Number(result?.fileCount || 0);
+    transparentCount += Number(result?.plan?.transparentFileCount || 0);
     duplicates.push(...(result?.duplicates || []));
     for (const name of result?.conflicts || []) if (!conflicts.includes(name)) conflicts.push(name);
     if (result?.sameSkuHint && !sameSkuHints.includes(result.sameSkuHint)) sameSkuHints.push(result.sameSkuHint);
@@ -8953,7 +8975,10 @@ async function importDroppedFolders(dataTransfer) {
     showOperationFeedback(`没有新商品加入队列：${duplicateHint || "没有可导入的图片 / 视频 / 源文件"}`, "info");
     return;
   }
-  showOperationFeedback(`已把 ${queued} 个文件夹加入导入队列（共 ${fileCount} 个文件）。${duplicateHint}${riskHint}`, "info");
+  showOperationFeedback(
+    `已把 ${queued} 个文件夹加入导入队列（共 ${fileCount} 个文件${transparentCount ? `，跳过透明图 ${transparentCount} 张` : ""}）。${duplicateHint}${riskHint}`,
+    "info",
+  );
 }
 
 // webkitGetAsEntry 的目录条目递归（层级：根目录名/子目录/文件，与 webkitdirectory 一致）。
@@ -9127,6 +9152,9 @@ async function createBaseProductFromLocalFiles(allFiles, options = {}) {
   );
   const validFileCount = groups.reduce((total, group) => total + group.files.length, 0);
   const ignoredFileCount = plan.ignoredRootFileCount + plan.filteredFileCount;
+  // 透明图（前胸/后背/袖口透明图、透明底…）导入时自动跳过：只用于生产打样，
+  // 不进商品图/颜色图。跳过的张数单独说清楚，免得操作员以为文件丢了。
+  const transparentHint = plan.transparentFileCount ? `，其中透明图 ${plan.transparentFileCount} 张已跳过` : "";
   const duplicateHint = localImportDuplicateHint(duplicates);
   const conflictNames = localImportLibraryConflicts(groups);
   const conflictHint = localImportConflictHint(conflictNames);
@@ -9140,7 +9168,7 @@ async function createBaseProductFromLocalFiles(allFiles, options = {}) {
     } else {
       const waitingHint = waiting ? `当前队列还有 ${waiting} 个商品在导入，新目录会排在它们之后。` : "";
       showOperationFeedback(
-        `已加入 ${groups.length} 个商品文件夹（${validFileCount} 个有效文件，忽略 ${ignoredFileCount} 个）。${waitingHint}${duplicateHint}${conflictHint}${sameSkuHint}`,
+        `已加入 ${groups.length} 个商品文件夹（${validFileCount} 个有效文件，忽略 ${ignoredFileCount} 个${transparentHint}）。${waitingHint}${duplicateHint}${conflictHint}${sameSkuHint}`,
         "info",
       );
     }
@@ -11891,7 +11919,12 @@ function showView(id, navKey = "") {
   }
   // 勾选同样属于它所在的页面：离开「商品维护」就清掉，回来时不会带着上次的
   // 勾选去点「批量删除 / 重新识别」（和上面的提示条同一条规则）。
-  if (id !== "product-maintenance") clearBaseProductSelection();
+  // 店铺模板 / 刊登副本的勾选（含「复制到店铺模板」弹窗共用的模板集合）同理清掉。
+  if (id !== "product-maintenance") {
+    clearBaseProductSelection();
+    clearStoreTemplateSelection();
+    clearListingCopySelection();
+  }
   // Refresh the datasets each view actually depends on so switching in shows
   // the current state (not what was cached from the last bootstrap). API cost
   // is small — endpoints return in ~3ms thanks to the load_store mtime cache.

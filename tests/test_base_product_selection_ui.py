@@ -16,7 +16,17 @@ def test_switching_view_clears_base_product_selection() -> None:
 
     assert "function clearBaseProductSelection()" in script
     # showView 里离开「商品维护」就清（和提示条同一条规则）。
-    assert 'if (id !== "product-maintenance") clearBaseProductSelection();' in script
+    assert 'if (id !== "product-maintenance") {' in script
+    assert "clearBaseProductSelection();" in script
+    # 店铺模板 / 刊登副本勾选（含「复制到店铺模板」弹窗共用的模板集合）切页也清。
+    assert "function clearStoreTemplateSelection()" in script
+    assert "function clearListingCopySelection()" in script
+    assert "clearStoreTemplateSelection();" in script
+    assert "clearListingCopySelection();" in script
+    assert 'state.selectedStoreTemplates.clear();' in script
+    assert 'state.selectedListingCopies.clear();' in script
+    assert 'document.querySelectorAll("[data-store-template-select]")' in script
+    assert 'document.querySelectorAll("[data-listing-copy-select]")' in script
     assert "state.selectedBaseProducts.clear();" in script
     assert 'state.selectedBaseProductId = "";' in script
     # 直接复位已渲染的勾选框/卡片高亮，不为了清勾选重画整张列表。
@@ -52,5 +62,5 @@ def test_copying_to_templates_clears_the_selection() -> None:
 
 def test_index_ships_the_selection_clear_asset() -> None:
     html = INDEX.read_text(encoding="utf-8")
-    assert "base-selection-clear-on-nav-v1" in html
+    assert "base-selection-clear-on-nav-v2" in html
     assert html.count("base-selection-clear-on-filter-v1") == 1  # 本轮只改 app.js

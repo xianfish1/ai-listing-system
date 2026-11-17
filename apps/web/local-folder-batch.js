@@ -16,20 +16,38 @@
     return dot >= 0 ? value.slice(dot).toLowerCase() : '';
   }
 
+  // 透明图（前胸/后背/袖口透明图、透明底…）只用于生产打样，导入商品时不导入。
+  // 判定和后端 scanner.is_transparent_artwork_name 一致：中文按子串，英文按整段。
+  // 操作员在商品维护里手动上传的商品图不经过这里，不受影响。
+  function isTransparentArtworkName(name) {
+    const value = String(name || '');
+    if (value.includes('透明')) return true;
+    return (value.toLowerCase().match(/[a-z0-9]+/g) || []).includes('transparent');
+  }
+
   function planLocalFolderImport(files, supportedExtensions) {
     const sourceFiles = Array.from(files || []);
     const supported = supportedExtensions instanceof Set
       ? supportedExtensions
       : new Set(Array.from(supportedExtensions || []));
+    let transparentFileCount = 0;
     const accepted = sourceFiles.flatMap((file) => {
       const path = normalizedPath(file);
       const parts = path.split('/').filter(Boolean);
       if (!parts.length || parts.some((part) => part.startsWith('.'))) return [];
       if (!supported.has(extension(file?.name || parts[parts.length - 1]))) return [];
+      if (isTransparentArtworkName(file?.name || parts[parts.length - 1])) {
+        transparentFileCount += 1;
+        return [];
+      }
       return [{ file, parts }];
     });
 
-    if (!accepted.length) throw new Error('所选文件夹没有可上传的图片、视频或源文件');
+    if (!accepted.length) throw new Error(
+      transparentFileCount
+        ? `所选文件夹只有透明图（${transparentFileCount} 张），已跳过；需要时请在商品维护里手动上传`
+        : '所选文件夹没有可上传的图片、视频或源文件',
+    );
 
     const firstParts = accepted[0].parts;
     const rootName = firstParts.length > 1 ? firstParts[0] : '本地商品';
@@ -64,6 +82,7 @@
         groups,
         ignoredRootFileCount: rootFileCount,
         filteredFileCount: sourceFiles.length - accepted.length,
+        transparentFileCount,
       };
     }
 
@@ -82,6 +101,7 @@
       }],
       ignoredRootFileCount: 0,
       filteredFileCount: sourceFiles.length - accepted.length,
+      transparentFileCount,
     };
   }
 
@@ -346,6 +366,7 @@
 
   return {
     planLocalFolderImport,
+    isTransparentArtworkName,
     splitDuplicateLocalImportGroups,
     dropContainedLocalImportBatches,
     folderSkuToken,
