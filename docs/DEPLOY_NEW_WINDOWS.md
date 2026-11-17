@@ -1,7 +1,7 @@
 # 新 Windows 电脑部署指南
 
 本部署包是「开箱即用」形态：代码、马帮采集用的 Chrome（`vendor\chrome`）、导出模板
-（`storage\samples\mabang-template.xlsx`）、启动脚本全部在内。照着下面 6 步走即可。
+（`storage\samples\mabang-template.xlsx`）、启动脚本全部在内。照着下面 7 步走即可。
 
 ## 0. 前置条件
 
@@ -9,7 +9,7 @@
 |---|---|---|
 | Windows | 10 / 11 x64 | |
 | Python | 3.11 – 3.14 | 安装时勾选 **Add python.exe to PATH** |
-| Node.js | ≥ 18 LTS | 仅供自动化执行器用（CDP 连接，不下载浏览器） |
+| Node.js | ≥ 18 LTS | 没有也没关系：第 2 步的初始化脚本会自动下载安装（需要管理员） |
 | Chrome | **不需要单独装** | 包内自带 `vendor\chrome` |
 | NAS | 可达 `\\Juns\产品编辑部` | 导出模板与素材默认从这里取；不可达也能跑，只是模板要另配 |
 
@@ -30,7 +30,21 @@ python -m pip install -r requirements.txt
 
 `requirements.txt` 只有 openpyxl / pytest / cryptography / Pillow 四项（PostgreSQL 驱动可选）。
 
-## 3. 安装 Node 依赖
+## 3. 初始化系统 Node（没有就自动装）
+
+```powershell
+cd C:\ai-listing-system
+python scripts\install_node.py
+```
+
+- 已装 Node（PATH 或标准安装位置）→ 打印版本直接跳过；没有则从
+  npmmirror 国内镜像下载官方 MSI 并静默安装（**需要管理员权限**，用「以管理员身份
+  运行」的 PowerShell 执行本命令）。
+- 想换下载源：`$env:NODEJS_MIRROR = "https://nodejs.org/dist"` 切官方源。
+- 已装但装的是旧版不影响：本脚本只保证「有可用的 node」，不负责升级。
+- 后续 `npm install`（第 4 步）依赖这一步，没有 node 时会直接失败。
+
+## 4. 安装 Node 依赖
 
 ```powershell
 cd C:\ai-listing-system
@@ -40,7 +54,7 @@ npm install
 只装 `playwright` 这一个包（执行器通过 CDP 连包内 Chrome，**不要**执行
 `npx playwright install`，那是给无头浏览器下载用的，这里用不到）。
 
-## 4. 配置 .env
+## 5. 配置 .env
 
 ```powershell
 copy .env.example .env
@@ -49,7 +63,7 @@ copy .env.example .env
 默认就是生产配置（API_PORT=8788，8787 在 Windows 是被排除的端口段），一般不用改。
 需要局域网访问时**不要**写死 `API_HOST`，启动后在设置页开「允许局域网设备访问」。
 
-## 5. 启动
+## 6. 启动
 
 双击：
 
@@ -63,7 +77,7 @@ start-api-silent.vbs
 `wscript.exe "C:\ai-listing-system\start-api-silent.vbs"`（务必勾选「只在用户登录时运行」，
 不要用 S4U/不登录就跑——那会把 API 拉进会话 0，界面相关功能会静默失效）。
 
-## 6. 验证
+## 7. 验证
 
 浏览器打开：
 

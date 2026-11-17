@@ -9,7 +9,7 @@
 |---|---|---|
 | macOS | 12 及以上（Apple Silicon / Intel 均可） | |
 | Python | 3.11 – 3.14 | 建议 `brew install python@3.12`；需要文件夹选择框时另装 `python-tk` |
-| Node.js | ≥ 18 LTS | 仅供自动化执行器用（CDP 连接） |
+| Node.js | ≥ 18 LTS | 没有也没关系：`start-api.sh` 启动时会自动下载安装（需要 sudo） |
 | Chrome | 建议安装 Google Chrome | 放在 `/Applications` 即可；也可用 `CHROME_EXECUTABLE` 指定 |
 | ffprobe | 可选 | `brew install ffmpeg`；缺少时只是少视频元数据 |
 
@@ -29,10 +29,12 @@ cd ~/ai-listing-system
 
 ```bash
 python3 -m pip install -r requirements.txt
+python3 scripts/install_node.py   # 没装 Node 时自动下载官方 pkg 安装（需要 sudo；已装则秒过）
 npm install
 ```
 
 `requirements.txt` 只有 openpyxl / pytest / cryptography / Pillow（PostgreSQL 驱动可选）。
+Node 初始化默认走 npmmirror 国内镜像，`NODEJS_MIRROR=https://nodejs.org/dist` 可切官方源。
 执行器通过 CDP 连外部 Chrome，不需要 `npx playwright install`。
 
 ## 3. 配置 .env

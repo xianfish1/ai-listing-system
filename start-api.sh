@@ -10,5 +10,8 @@
 set -euo pipefail
 cd "$(dirname "$0")"
 
+# 部署初始化兜底：系统没有 node 时自动下载安装（已装则幂等秒过）。
+"${PYTHON:-python3}" scripts/install_node.py
+
 export API_PORT="${API_PORT:-8788}"
 exec "${PYTHON:-python3}" -m services.api.main

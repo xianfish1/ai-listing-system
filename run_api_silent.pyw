@@ -31,4 +31,17 @@ from services.api.log_files import open_rotating_log  # noqa: E402 - ROOT 必须
 sys.stdout = open_rotating_log(LOG_DIR / "api.out.log")
 sys.stderr = open_rotating_log(LOG_DIR / "api.err.log")
 
+# 部署初始化兜底：系统没有 node 时尝试自动下载安装。这里是静默双击入口（无控制台），
+# 安装失败不能拦住 API 启动——装不上就维持旧行为，让 worker 报 node 相关错误。
+try:
+    from scripts.install_node import ensure_node, find_existing_node
+
+    if not find_existing_node():
+        print("[install-node] 未检测到系统 Node，尝试自动安装…")
+        ensure_node("v22.21.1", dry_run=False)
+except SystemExit as error:  # ensure_node 的中文报错（缺管理员等）
+    print(f"[install-node] {error}")
+except Exception as error:  # noqa: BLE001 - 兜底失败不影响 API 启动
+    print(f"[install-node] Node 初始化兜底失败：{error}")
+
 runpy.run_module("services.api.main", run_name="__main__")
