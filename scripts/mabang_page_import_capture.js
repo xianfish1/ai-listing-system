@@ -916,6 +916,9 @@
     capture_debug: {
       detail_vm: Boolean(detailVm),
       store_category_ref: Boolean(storeCategory),
+      // 采集前的 CNSC 展开结果（店铺选择器 / 每站折扣活动），失败时用来定位。
+      cnsc_prepare: (typeof window !== 'undefined' && window.__AI_LISTING_CNSC_IMPORT_STATE__
+        && window.__AI_LISTING_CNSC_IMPORT_STATE__.prepare_debug) || null,
     },
   };
 }

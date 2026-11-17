@@ -96,6 +96,22 @@ test('页面采集器：选中活动没有有效期时也要重采（首采只�
   }), false);
 });
 
+test('页面采集器：CNSC 先展开店铺选择器与每站折扣活动，采完清理页面状态', () => {
+  // 店铺列表要点开 .shop-box、活动行要点开表头 .change-discount 才会渲染；
+  // 不展开就采，正是「店铺促销活动 / 店铺选中的」采不到的原因。
+  assert.match(SOURCE, /mabang_page_import_prepare\.page\.js/);
+  assert.match(SOURCE, /const isCnscPage = \/\[\?&#\]global=4/);
+  assert.match(SOURCE, /await prepareImportState\(target\.frame\)/);
+  assert.match(SOURCE, /await clearPreparedState\(target\.frame\)/);
+  assert.match(SOURCE, /cnsc_prepare: cnscPrepare/);
+  const prepareSource = fs.readFileSync(path.join(__dirname, '../scripts/mabang_page_import_prepare.page.js'), 'utf8');
+  assert.match(prepareSource, /#shops-wap/);
+  assert.match(prepareSource, /\.change-discount/);
+  assert.match(prepareSource, /__AI_LISTING_CNSC_IMPORT_STATE__/);
+  // 只展开读取：不点「确定」、不选任何活动。
+  assert.doesNotMatch(prepareSource, /clickForText\([^)]*\u786e\u5b9a/);
+});
+
 test('页面采集器：页面类型证据矛盾时重采（表格晚渲染），不是直接失败', () => {
   const cnscHeaders = ['全球商品价格', '泰国仓库存', '广州仓库存', '菲律宾仓库存'];
   const conflict = {

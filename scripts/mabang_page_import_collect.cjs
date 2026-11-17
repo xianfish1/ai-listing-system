@@ -30,6 +30,8 @@ const RESULT_MARKER = 'MABANG_PAGE_IMPORT_RESULT ';
 const CDP_DEFAULT = 'http://127.0.0.1:9223';
 const CDP_CONNECT_TIMEOUT_MS = 90000;
 const CAPTURE_PATH = path.join(__dirname, 'mabang_page_import_capture.js');
+// CNSC 的店铺选择器 / 每站折扣活动默认藏在交互后面：采集前先展开读出（只展开，不选）。
+const PREPARE_PAGE_PATH = path.join(__dirname, 'mabang_page_import_prepare.page.js');
 // 弹窗开关逻辑只有一份：页面导入（这里）和「单独重采店铺活动」共用它。
 const PROMOTION_PAGE_PATH = path.join(__dirname, 'mabang_promotion_dialog.page.js');
 const ADD_WATERMARK_TEXT = '\u6dfb\u52a0\u6c34\u5370';
@@ -187,6 +189,34 @@ function readPromotionPageSource() {
   return fs.readFileSync(PROMOTION_PAGE_PATH, 'utf8');
 }
 
+/**
+ * 展开 CNSC 的店铺选择器与每站折扣活动，把结果写进页面的
+ * `__AI_LISTING_CNSC_IMPORT_STATE__` 供采集器读取（只展开，不选、不保存）。
+ *
+ * 这些数据默认不渲染：店铺列表要点开 `.shop-box`，活动行要点开表头里的
+ * `.change-discount`。不展开时采集只能拿到空列表，正是「店铺促销活动/店铺选中的
+ * 没采集下来」的原因。逻辑与旧执行器共用同一份页面模块。
+ */
+async function prepareImportState(frame) {
+  const source = fs.readFileSync(PREPARE_PAGE_PATH, 'utf8');
+  return frame.evaluate(
+    (pageSource) => (0, eval)(`(${pageSource})`)({}),
+    source,
+  );
+}
+
+/** 采集完清掉页面上的临时状态，别让下一次（或同页其它操作）读到旧数据。 */
+async function clearPreparedState(frame) {
+  await frame.evaluate(() => {
+    try {
+      delete window.__AI_LISTING_CNSC_IMPORT_STATE__;
+    } catch (_error) {
+      window.__AI_LISTING_CNSC_IMPORT_STATE__ = undefined;
+    }
+    return true;
+  }).catch(() => false);
+}
+
 function runPromotionPage(frame, phase) {
   const source = readPromotionPageSource();
   return frame.evaluate(
@@ -227,6 +257,17 @@ async function collectPageImport({ cdpUrl = CDP_DEFAULT, plan = {} } = {}) {
       };
     }
     const target = targets[targets.length - 1];
+    // CNSC 的店铺选择器与每站折扣活动默认不渲染：先展开读出，再采快照。
+    // 本土页没有这些交互（也只对 global=4 执行），行为不变。
+    const isCnscPage = /[?&#]global=4(?:&|#|$)/.test(String(target.url || ''));
+    let cnscPrepare = { attempted: false };
+    if (isCnscPage) {
+      try {
+        cnscPrepare = { attempted: true, ...(await prepareImportState(target.frame)) };
+      } catch (error) {
+        cnscPrepare = { attempted: true, error: String((error && error.message) || error).slice(0, 200) };
+      }
+    }
     const menu = await openWatermarkMenu(target.frame).catch((error) => ({ opened: false, method: `error:${String(error).slice(0, 60)}` }));
     const readCapture = () =>
       target.frame.evaluate(
@@ -287,6 +328,7 @@ async function collectPageImport({ cdpUrl = CDP_DEFAULT, plan = {} } = {}) {
       failure = String((error && error.message) || error);
     } finally {
       if (menu && menu.opened && menu.method !== 'already_open') await closeWatermarkMenu(target.frame);
+      if (isCnscPage) await clearPreparedState(target.frame);
     }
     if (failure) {
       return { ok: false, status: 'failed', error: `页面采集失败：${failure.slice(0, 300)}` };
@@ -304,6 +346,7 @@ async function collectPageImport({ cdpUrl = CDP_DEFAULT, plan = {} } = {}) {
       page_url: target.url,
       product_pages: targets.map((item) => item.url),
       watermark_menu: menu,
+      cnsc_prepare: cnscPrepare,
       listing_mode_retries: listingModeRetries,
       promotion_dialog: promotionDialog,
     };
