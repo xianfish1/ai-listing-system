@@ -121,11 +121,15 @@ def launch_mabang_browser(
             }
         _terminate_collection_chrome(profile_dir, port, process_query_fn=process_query_fn)
         if not _wait_for_cdp_shutdown(base_url, urlopen_fn, sleep_fn=sleep_fn):
-            # 端口还被别人占着（taskkill 失败 / 权限不足）：再起一只只会绑定失败。
-            raise MabangBrowserError(
-                f"CDP 端口 {port} 被其它浏览器占用且无法关闭，请先手动结束占用该端口的 Chrome"
-                "（例如上一次测试或上一版程序残留的浏览器）后重试"
-            )
+            # 前面按 profile/端口命令行匹配不到时（例如别的工具/上一版程序留的 Chrome，
+            # 命令行里没有 --remote-debugging-port），按端口找到占用者再杀一次 chrome.exe。
+            killed = _kill_port_owner_if_chrome(port)
+            if not killed or not _wait_for_cdp_shutdown(base_url, urlopen_fn, sleep_fn=sleep_fn):
+                # 端口还被别人占着（taskkill 失败 / 权限不足 / 不是 Chrome）：再起一只只会绑定失败。
+                raise MabangBrowserError(
+                    f"CDP 端口 {port} 被其它浏览器占用且无法关闭{_cdp_port_owner_hint(port)}，"
+                    "请先手动结束占用该端口的 Chrome（例如上一次测试或上一版程序残留的浏览器）后重试"
+                )
 
     if reuse_running_only:
         # 端口上没有可复用的浏览器（页面导入窗口可能正在重启中）：这时另起一只只会
@@ -327,19 +331,22 @@ def _process_exit_code(process: Any) -> int | None:
 
 
 def _run_windows_process_query() -> subprocess.CompletedProcess[str]:
-    """Return Chrome process ids and command lines from Windows WMI."""
+    """Return Chrome process ids and command lines from Windows WMI.
+
+    必须显式把 PowerShell 的输出编码钉成 UTF-8：默认按控制台代码页（简体中文机器
+    是 cp936）输出，而 subprocess 用 text=True 按 UTF-8 解码——当 Chrome 命令行里
+    带中文路径（本仓库路径/采集 profile 目录常见）时解码直接抛 UnicodeDecodeError，
+    被调用方吞掉后变成「一个 Chrome 都查不到」。接着就会把 API 自己刚启动的采集
+    Chrome 当成陌生浏览器：CDP 连得上、却匹配不到 profile/端口，taskkill 又是空
+    列表 → 抛「CDP 端口被其它浏览器占用且无法关闭」，Worker 永远卡在
+    waiting_for_login。
+    """
 
     powershell = shutil.which("powershell.exe") or shutil.which("powershell") or "powershell.exe"
-    # PowerShell 默认按控制台代码页（简体中文系统是 cp936）写 stdout，而 Worker 的
-    # Chrome 命令行里带着项目路径（本仓库目录名就是中文）。Python 端按 UTF-8 解码时
-    # 会抛 UnicodeDecodeError，`capture_output` 的读线程直接崩掉 → stdout 为空 →
-    # 这一函数「查不到任何 Chrome」：明明是自己启动的采集浏览器，却被当成占着 CDP
-    # 端口的陌生浏览器，taskkill 拿不到 PID，端口一直不退，最终自动登录永远 422、
-    # Worker 永远 waiting_for_login。这里显式把 PowerShell 的输出编码钉成 UTF-8，
-    # 并让解码容忍脏字节（宁可少一条命令行，也不能让整个查询失败）。
     command = (
         "$ErrorActionPreference='Stop'; "
-        "[Console]::OutputEncoding=[System.Text.UTF8Encoding]::new($false); "
+        "[Console]::OutputEncoding = [System.Text.Encoding]::UTF8; "
+        "$OutputEncoding = [System.Text.Encoding]::UTF8; "
         "Get-CimInstance Win32_Process -Filter \"Name = 'chrome.exe'\" "
         "| Select-Object ProcessId,CommandLine | ConvertTo-Json -Compress"
     )
@@ -347,9 +354,10 @@ def _run_windows_process_query() -> subprocess.CompletedProcess[str]:
         [powershell, "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", command],
         check=False,
         capture_output=True,
+        text=True,
         encoding="utf-8",
         errors="replace",
-        timeout=5,
+        timeout=8,
         **no_console_window_kwargs(),
     )
 
@@ -535,6 +543,75 @@ def _terminate_collection_chrome(
     for pid in process_ids:
         _kill_process_tree(pid)
     return process_ids
+
+
+def _cdp_port_owner(port: int) -> tuple[str, str]:
+    """Best-effort「谁占着这个端口」→ (pid, 进程名)。"""
+
+    if os.name != "nt":
+        return "", ""
+    try:
+        completed = subprocess.run(
+            ["netstat", "-ano", "-p", "tcp"],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=8,
+            check=False,
+            **no_console_window_kwargs(),
+        )
+    except (OSError, subprocess.SubprocessError):
+        return "", ""
+    owner_pid = ""
+    for line in (completed.stdout or "").splitlines():
+        parts = line.split()
+        if len(parts) < 5 or "LISTENING" not in parts[-2].upper():
+            continue
+        if not parts[1].endswith(f":{port}"):
+            continue
+        owner_pid = parts[-1]
+        break
+    if not owner_pid or not owner_pid.isdigit():
+        return "", ""
+    name = ""
+    try:
+        tasklist = subprocess.run(
+            ["tasklist", "/FI", f"PID eq {owner_pid}", "/FO", "CSV", "/NH"],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=8,
+            check=False,
+            **no_console_window_kwargs(),
+        )
+        match = re.match(r'"([^"]+)"', (tasklist.stdout or "").strip())
+        if match:
+            name = match.group(1)
+    except (OSError, subprocess.SubprocessError):
+        pass
+    return owner_pid, name
+
+
+def _cdp_port_owner_hint(port: int) -> str:
+    pid, name = _cdp_port_owner(port)
+    if not pid:
+        return ""
+    return f"（占用进程 PID={pid}{f'，{name}' if name else ''}）"
+
+
+def _kill_port_owner_if_chrome(port: int) -> bool:
+    """收尾兜底：端口被一只 Chrome 占着（命令行里没有本账号 profile/端口时前面匹配不到）。
+
+    只杀 chrome.exe，绝不碰其它程序；杀完返回 True，调用方再等端口释放。
+    """
+
+    pid, name = _cdp_port_owner(port)
+    if not pid or name.strip().lower() != "chrome.exe":
+        return False
+    _kill_process_tree(int(pid))
+    return True
 
 
 def _wait_for_cdp_shutdown(

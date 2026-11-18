@@ -416,7 +416,7 @@ def test_save_as_template_clears_store_bound_values_same_site() -> None:
     assert storage.get_item("store_templates", "template-source") == source
 
 
-def test_save_as_template_clears_site_bound_values_cross_site() -> None:
+def test_save_as_template_keeps_category_but_clears_site_bound_values_cross_site() -> None:
     _save_copy_targets()
 
     copied = storage.copy_store_template(
@@ -427,8 +427,10 @@ def test_save_as_template_clears_site_bound_values_cross_site() -> None:
     source = _source_store_template()
     assert copied["country"] == "SG"
     assert copied["currency"] == "SGD"
-    assert copied["mabang_category_id"] == ""
-    assert copied["marketplace_category_path"] == ""
+    # 类目本身是平台级的（同一路径在 PH/TW/SG/TH/MY/MX/VN/BR 的 category_id 相同）：
+    # 跨站另存要把 path/id 带过去，别让操作员重选；只清站点绑定的方案/属性和价格。
+    assert copied["mabang_category_id"] == source["mabang_category_id"]
+    assert copied["marketplace_category_path"] == source["marketplace_category_path"]
     assert copied["category_profile_id"] == ""
     assert copied["category_profile_version_id"] == ""
     assert copied["attribute_values"] == {}

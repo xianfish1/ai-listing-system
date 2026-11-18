@@ -9,7 +9,7 @@
     <link rel="preload" href="/fonts/inter-400-latin.woff2" as="font" type="font/woff2" crossorigin />
     <link rel="preload" href="/fonts/inter-500-latin.woff2" as="font" type="font/woff2" crossorigin />
     <link rel="stylesheet" href="/fonts.css?v=self-hosted-v1" />
-    <link rel="stylesheet" href="/styles.css?v=update-reminder-v2&feature=store-promotion-recollect-v1&feature=category-cascader-v1&feature=desc-profile-base-detail-v2&feature=base-product-multiselect-v1&feature=base-product-stage-v1&feature=local-import-queue-v1&feature=nas-import-queue-retry-v1&feature=copy-editor-errors-v1&feature=job-generation-feedback-v1&feature=fill-missing-attributes-v1&feature=multi-select-custom-value-v1&feature=copy-template-mode-cards-v1&feature=jobs-time-buckets-v1&feature=jobs-collapsed-by-default-v1&feature=ai-color-connection-v1&feature=size-chart-local-image-v1&feature=refresh-position-v1&feature=refresh-inline-v1&feature=jobs-sku-thumb-v1&feature=size-chart-last-image-v1&feature=switch-line-v1&feature=watermark-redesign-v1&feature=mabang-account-list-v1&feature=worker-per-account-v1&feature=mabang-account-ui-v4&feature=import-headed-window-v1&feature=base-color-follow-images-v1&feature=store-template-account-v1&feature=base-product-rerecognize-v1&feature=github-updates-v1&feature=category-cascader-v1&feature=skills-management-v1&feature=title-workbench-v1&feature=base-batch-cost-v1&feature=retry-title-skill-v1&feature=variant-image-thumb-picker-v2&feature=title-ai-suggest-v2&feature=update-reminder-v2&feature=base-product-audience-v1&feature=cnsc-3pf-mode-v1" />
+    <link rel="stylesheet" href="/styles.css?v=update-reminder-v2&feature=store-promotion-recollect-v1&feature=category-cascader-v1&feature=desc-profile-base-detail-v2&feature=base-product-multiselect-v1&feature=base-product-stage-v1&feature=local-import-queue-v1&feature=nas-import-queue-retry-v1&feature=copy-editor-errors-v1&feature=job-generation-feedback-v1&feature=fill-missing-attributes-v1&feature=multi-select-custom-value-v1&feature=copy-template-mode-cards-v1&feature=jobs-time-buckets-v1&feature=jobs-collapsed-by-default-v1&feature=ai-color-connection-v1&feature=size-chart-local-image-v1&feature=refresh-position-v1&feature=refresh-inline-v1&feature=jobs-sku-thumb-v1&feature=size-chart-last-image-v1&feature=switch-line-v1&feature=watermark-redesign-v1&feature=mabang-account-list-v1&feature=worker-per-account-v1&feature=mabang-account-ui-v4&feature=import-headed-window-v1&feature=base-color-follow-images-v1&feature=store-template-account-v1&feature=base-product-rerecognize-v1&feature=github-updates-v1&feature=category-cascader-v1&feature=skills-management-v1&feature=title-workbench-v1&feature=base-batch-cost-v1&feature=retry-title-skill-v1&feature=variant-image-thumb-picker-v2&feature=title-ai-suggest-v2&feature=update-reminder-v2&feature=base-product-audience-v1&feature=cnsc-3pf-mode-v1&feature=excel-import-v2" />
     <link rel="stylesheet" href="/title-workbench.css?v=2" />
   </head>
   <body>
@@ -178,6 +178,7 @@
               <div class="actions compact">
                 <button id="create-base-product-btn">从 NAS 创建</button>
                 <button id="create-local-base-product-btn" class="secondary" type="button">＋ 添加文件夹</button>
+                <button id="excel-import-btn" class="secondary" type="button">从 Excel 导入</button>
                 <button id="local-import-queue-show" class="chip" type="button" hidden>显示导入队列</button>
                 <button id="base-title-queue-show" class="chip" type="button" hidden>显示标题队列</button>
                 <button id="copy-to-store-templates-btn">复制到店铺模板</button>
@@ -330,7 +331,7 @@
             </section>
 
             <section class="store-template-section" data-template-section="template-category">
-              <div class="template-section-head"><h3>类目与活动</h3><p>类目必填属性和促销活动均与当前店铺绑定。</p></div>
+              <div class="template-section-head"><h3>类目与活动</h3><p>类目跨店铺保留（切换店铺只会按新站点重绑类目方案）；促销活动按店铺选择。</p></div>
               <div class="template-section-grid">
                 <div class="marketplace-category-picker wide">
                   <label>平台类目</label>
@@ -657,6 +658,45 @@
             <a id="open-mabang-new-product-link" class="button-link secondary" target="_blank" rel="noopener noreferrer">服务器 Chrome 打开</a>
             <button id="collect-mabang-page-import-btn" type="button" disabled>采集当前页</button>
             <button id="confirm-mabang-page-import-btn" type="button" disabled>确认导入</button>
+          </div>
+        </dialog>
+        <dialog id="excel-import-dialog" class="workflow-dialog">
+          <div class="panel-head"><h2>从 Excel 导入商品</h2><button type="button" data-close-dialog="excel-import-dialog" aria-label="关闭">×</button></div>
+          <p class="muted">支持马帮「导出在线商品」的 .xlsx。导入只创建基础商品：标题、图片、颜色来自 Excel，价格、描述、属性、尺码、尺码表沿用店铺模板；主 SKU 已存在的会跳过。</p>
+          <div class="excel-import-file-row">
+            <input id="excel-import-file" type="file" accept=".xlsx" />
+            <span id="excel-import-file-name" class="muted"></span>
+          </div>
+          <p id="excel-import-status" class="muted"></p>
+          <div id="excel-import-preview" hidden>
+            <p id="excel-import-summary" class="excel-import-summary"></p>
+            <div class="excel-import-table-wrap">
+              <table class="excel-import-table">
+                <thead>
+                  <tr>
+                    <th><input type="checkbox" id="excel-import-select-all" aria-label="全选" /></th>
+                    <th>主 SKU</th>
+                    <th>标题</th>
+                    <th>颜色</th>
+                    <th>尺寸</th>
+                    <th>图片</th>
+                    <th>源店铺</th>
+                    <th>状态</th>
+                  </tr>
+                </thead>
+                <tbody id="excel-import-rows"></tbody>
+              </table>
+            </div>
+            <ul id="excel-import-warnings" class="excel-import-warnings" hidden></ul>
+          </div>
+          <div id="excel-import-progress" hidden>
+            <p id="excel-import-progress-summary" class="excel-import-summary"></p>
+            <ol id="excel-import-progress-list" class="excel-import-progress-list"></ol>
+          </div>
+          <div class="actions">
+            <button id="excel-import-start-btn" type="button" disabled>开始导入</button>
+            <button id="excel-import-retry-btn" type="button" class="secondary" hidden>重试失败项</button>
+            <button type="button" class="secondary" data-close-dialog="excel-import-dialog">关闭</button>
           </div>
         </dialog>
         <section id="automation" class="view">
@@ -1544,7 +1584,8 @@
     </dialog>
 
     <script src="/local-folder-batch.js?v=local-import-transparent-skip-v1"></script>
-    <script src="/app.js?v=update-reminder-v2&feature=store-promotion-recollect-v1&feature=desc-profile-base-detail-v2&feature=base-product-multiselect-v1&feature=description-media-v1&feature=local-folder-batch-v1&feature=local-import-queue-v1&feature=import-scoped-assets-v1&feature=product-image-upload-v2&feature=category-custom-option-v1&feature=base-product-stage-v1&feature=desc-required-spec-rows-v1&feature=field-not-editable-v1&feature=job-requeue-in-place-v1&feature=retry-no-detail-dialog-v1&feature=description-tail-insert-v1&feature=loader-retry-v1&feature=template-sale-price-editable-v1&feature=size-chart-template-label-v1&feature=size-chart-local-image-v1&feature=size-chip-drag-order-v1&feature=size-price-editable-v1&feature=copy-list-new-only-v1&feature=automation-live-steps-v3&feature=local-import-queue-v1&feature=base-product-time-all-v1&feature=jobs-sku-thumb-v1&feature=size-chart-last-image-v1&feature=watermark-redesign-v1&feature=mabang-account-list-v1&feature=worker-per-account-v1&feature=mabang-account-ui-v4&feature=import-headed-window-v1&feature=base-color-follow-images-v1&feature=page-import-worker-standby-v2&feature=store-template-duplicate-v1&feature=store-template-account-v1&feature=hide-fill-missing-batch-v1&feature=base-product-rerecognize-v1&feature=category-quick-template-values-v1&feature=github-updates-v1&feature=cross-border-mode-v1&feature=stale-select-text-fallback-v1&feature=cnsc-price-section-hide-v1&feature=color-quick-pick-v1&feature=color-quick-select-all-v1&feature=color-dropdown-live-refresh-v1&feature=skills-management-v1&feature=title-workbench-v1&feature=quick-template-reliable-v1&feature=base-common-sizes-v1&feature=base-batch-cost-v1&feature=retry-title-skill-v1&feature=variant-image-thumb-picker-v2&feature=description-image-width-log-v1&feature=description-image-width-fix-v1&feature=local-import-duplicate-guard-v1&feature=base-save-queue-v1&feature=base-selection-clear-on-nav-v2&feature=copy-batch-delete-v1&feature=copy-image-asset-root-v1&feature=title-ai-suggest-v2&feature=title-audience-detect-v1&feature=update-reminder-v2&feature=media-step-status-v1&feature=base-product-audience-v1&feature=base-selection-clear-on-filter-v1&feature=base-product-filter-axes-v1&feature=local-import-transparent-skip-v1&feature=cnsc-3pf-mode-v1&feature=worker-heartbeat-v1&feature=cnsc-3pf-template-pricing-v3&feature=cnsc-3pf-import-preview-v1&feature=cdp-port-18223-v1&feature=page-import-cancel-v1"></script>
+    <script src="/excel-import.js?v=excel-import-v2"></script>
+    <script src="/app.js?v=update-reminder-v2&feature=store-promotion-recollect-v1&feature=desc-profile-base-detail-v2&feature=base-product-multiselect-v1&feature=description-media-v1&feature=local-folder-batch-v1&feature=local-import-queue-v1&feature=import-scoped-assets-v1&feature=product-image-upload-v2&feature=category-custom-option-v1&feature=base-product-stage-v1&feature=desc-required-spec-rows-v1&feature=field-not-editable-v1&feature=job-requeue-in-place-v1&feature=retry-no-detail-dialog-v1&feature=description-tail-insert-v1&feature=loader-retry-v1&feature=template-sale-price-editable-v1&feature=size-chart-template-label-v1&feature=size-chart-local-image-v1&feature=size-chip-drag-order-v1&feature=size-price-editable-v1&feature=copy-list-new-only-v1&feature=automation-live-steps-v3&feature=local-import-queue-v1&feature=base-product-time-all-v1&feature=jobs-sku-thumb-v1&feature=size-chart-last-image-v1&feature=watermark-redesign-v1&feature=mabang-account-list-v1&feature=worker-per-account-v1&feature=mabang-account-ui-v4&feature=import-headed-window-v1&feature=base-color-follow-images-v1&feature=page-import-worker-standby-v2&feature=store-template-duplicate-v1&feature=store-template-account-v1&feature=hide-fill-missing-batch-v1&feature=base-product-rerecognize-v1&feature=category-quick-template-values-v1&feature=github-updates-v1&feature=cross-border-mode-v1&feature=stale-select-text-fallback-v1&feature=cnsc-price-section-hide-v1&feature=color-quick-pick-v1&feature=color-quick-select-all-v1&feature=color-dropdown-live-refresh-v1&feature=skills-management-v1&feature=title-workbench-v1&feature=quick-template-reliable-v1&feature=base-common-sizes-v1&feature=base-batch-cost-v1&feature=retry-title-skill-v1&feature=variant-image-thumb-picker-v2&feature=description-image-width-log-v1&feature=description-image-width-fix-v1&feature=local-import-duplicate-guard-v1&feature=base-save-queue-v1&feature=base-selection-clear-on-nav-v2&feature=copy-batch-delete-v1&feature=copy-image-asset-root-v1&feature=title-ai-suggest-v2&feature=title-audience-detect-v1&feature=update-reminder-v2&feature=media-step-status-v1&feature=base-product-audience-v1&feature=base-selection-clear-on-filter-v1&feature=base-product-filter-axes-v1&feature=local-import-transparent-skip-v1&feature=cnsc-3pf-mode-v1&feature=worker-heartbeat-v1&feature=cnsc-3pf-template-pricing-v3&feature=cnsc-3pf-import-preview-v1&feature=excel-import-v2&feature=store-template-category-persist-v1&feature=size-chart-template-keep-v1"></script>
     <script src="/title-workbench.js?v=7-children-20261102"></script>
   </body>
 </html>

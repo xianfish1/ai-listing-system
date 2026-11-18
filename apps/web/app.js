@@ -2389,19 +2389,35 @@ async function recollectStorePromotions() {
   }
   if (button?.disabled) return;
   const keep = $("store-template-promotion")?.value || "";
+  const accountId = currentStoreTemplateAccountId();
+  const collect = () => api("/api/store-promotions/collect", {
+    method: "POST",
+    body: JSON.stringify({
+      store_id: storeId,
+      account_id: accountId || undefined,
+    }),
+  });
   if (button) {
     button.disabled = true;
     button.textContent = "采集中…";
   }
   if (status) status.textContent = "正在读取马帮「选择折扣活动」列表…";
   try {
-    const result = await api("/api/store-promotions/collect", {
-      method: "POST",
-      body: JSON.stringify({
-        store_id: storeId,
-        account_id: currentStoreTemplateAccountId() || undefined,
-      }),
-    });
+    let result;
+    try {
+      result = await collect();
+    } catch (error) {
+      // 采集浏览器是按需启动的：空闲会自动关，点了采集却连不上是常态。
+      // 这里先把该账号的浏览器拉起来再重试一次；拉起来后若没开商品编辑页，
+      // 会得到「请打开该店铺的商品编辑页」这句更可执行的提示。
+      if (!/连不上马帮采集浏览器/.test(String(error?.message || error))) throw error;
+      if (status) status.textContent = "采集浏览器没在运行，正在启动后再试…";
+      await api("/api/mabang-browser/start", {
+        method: "POST",
+        body: JSON.stringify({ account_id: accountId || undefined }),
+      }).catch(() => null);
+      result = await collect();
+    }
     await loadStorePromotions(keep);
     renderStorePromotionStatus(result.status, { justCollected: true });
   } catch (error) {
@@ -2941,18 +2957,27 @@ function renderStoreTemplateSizeChartPreview() {
   if (empty) empty.hidden = Boolean(url);
 }
 
-function renderSizeChartTemplateOptions() {
+function renderSizeChartTemplateOptions({ keepValue = "", keepName = "" } = {}) {
   const select = $("store-template-size-chart-template");
   if (!select) return;
-  const current = select.value || "";
+  const current = String(keepValue || select.value || "");
   const options = new Map();
+  const names = new Map();
   for (const item of state.storeSizeChartTemplates) {
     if (!item.template_id) continue;
     const availability = item.preview_url || item.asset_id ? "" : "（仅马帮模板）";
     options.set(item.template_id, `马帮尺码图 / ${item.name || item.template_id}${availability}`);
+    names.set(item.template_id, item.name || "");
+  }
+  // 店铺尺码图模板目录可能没采全/已过期（现场 HN_POD 儿童模板引用的「21#儿童纯棉」
+  // 就不在目录里）。编辑已有模板时把原值作为一项保留下来：否则 select.value 落成空，
+  // 一保存就把「尺码图」静默抹掉，复制到店铺模板那张卡片会被判缺尺码图而禁用。
+  if (keepValue && !options.has(keepValue)) {
+    options.set(keepValue, `马帮尺码图 / ${keepName || keepValue}（目录未采集）`);
+    names.set(keepValue, keepName || "");
   }
   select.innerHTML = '<option value="">选择已有尺码图</option>' + [...options.entries()].map(([value, label]) =>
-    `<option value="${escapeHtml(value)}">${escapeHtml(label)}</option>`
+    `<option value="${escapeHtml(value)}" data-name="${escapeHtml(names.get(value) || "")}">${escapeHtml(label)}</option>`
   ).join("");
   if ([...select.options].some((option) => option.value === current)) select.value = current;
   renderStoreTemplateSizeChartPreview();
@@ -3026,6 +3051,36 @@ async function loadBaseProducts() {
   state.baseProducts = data.items || [];
   renderBaseProducts();
 }
+
+// Excel 导入完成后由 excel-import.js 调用：商品和素材一起刷新。只刷商品列表时
+// state.assets 还是旧的，卡片会渲染成"没有图"；如果当前筛选把刚导入的商品挡在
+// 外面（例如停在某个类目/阶段），清回默认筛选再渲染，否则操作员会以为导入没反应。
+async function refreshBaseProductsAfterImport(mainSkus = []) {
+  await Promise.all([loadBaseProducts(), loadAssets()]);
+  const wanted = new Set(
+    (mainSkus || []).map((value) => String(value || "").trim().toUpperCase()).filter(Boolean),
+  );
+  const imported = wanted.size
+    ? state.baseProducts.filter((product) => wanted.has(String(product.main_sku || "").trim().toUpperCase()))
+    : [];
+  if (imported.length && !imported.some(matchesBaseProductFilters)) {
+    state.baseProductTimeFilter = "today";
+    state.baseProductStageFilter = "";
+    state.baseProductAudienceFilter = "";
+    state.baseProductCategoryFilter = "";
+    renderBaseProducts();
+  }
+  const first = imported[0];
+  if (first) {
+    const checkbox = document.querySelector(`[data-base-product-select="${CSS.escape(String(first.id || ""))}"]`);
+    const card = checkbox instanceof HTMLElement ? checkbox.closest(".product-card") : null;
+    card?.scrollIntoView({ block: "center", behavior: "smooth" });
+    card?.classList.add("product-card--imported");
+    window.setTimeout(() => card?.classList.remove("product-card--imported"), 4000);
+  }
+  return imported.length;
+}
+window.refreshBaseProductsAfterImport = refreshBaseProductsAfterImport;
 
 async function loadStoreTemplates() {
   await ensureStoreTemplateAccountsLoaded();
@@ -3396,6 +3451,57 @@ function clearMarketplaceCategorySelection({ clearSearch = false } = {}) {
   renderStoreTemplateCategoryFields([], {});
   if ($("store-template-category-summary")) $("store-template-category-summary").textContent = "";
   renderMarketplaceCategoryBreadcrumbs();
+}
+
+// 切店铺后把类目接回去：类目 path/id 是平台级资产（同一路径各站点 category_id 相同），
+// 不跟着店铺走；只有「类目方案」（必填属性/选项）按 platform+country 分版本。
+// 所以按新店铺作用域重新绑定方案，绑不上就保留类目并提示待补 —— 不再把操作员选好的类目清掉。
+function restoreStoreTemplateCategoryForStore(previous = {}) {
+  const categoryId = String(previous.id || "").trim();
+  const categoryPath = String(previous.path || "").trim();
+  if (!categoryId && !categoryPath) {
+    clearMarketplaceCategorySelection({ clearSearch: true });
+    return { kept: false, profile: null };
+  }
+  const scope = marketplaceCategoryScope();
+  if ($("store-template-category-id")) $("store-template-category-id").value = categoryId;
+  if ($("store-template-category-path")) $("store-template-category-path").value = categoryPath;
+  if ($("store-template-category-search")) $("store-template-category-search").value = categoryPath;
+  state.selectedMarketplaceCategory = {
+    platform: scope.platform,
+    country: scope.country,
+    store_id: scope.storeId,
+    category_id: categoryId,
+    path: categoryPath,
+    name: String(previous.name || ""),
+  };
+  // 目录按店铺重载：旧店铺的层级缓存作废，但已选中的类目保留。
+  state.marketplaceCategories = [];
+  state.marketplaceCategoryPath = [];
+  state.marketplaceCategoryMode = "browse";
+  invalidateMarketplaceCategoryRequests();
+  if ($("store-template-category-results")) $("store-template-category-results").hidden = true;
+  renderMarketplaceCategoryBreadcrumbs();
+  const profile = categoryProfileForMarketplaceCategory(categoryId, scope);
+  const profileSelect = $("store-template-category-profile");
+  if (profileSelect) profileSelect.value = profile ? (profile.profile_id || profile.id || "") : "";
+  if (profile) {
+    const version = profile.published_version || {};
+    const attrs = profile.required_attributes || profile.category_attributes || {};
+    const fields = (version.fields || []).length ? version.fields : legacyCategoryFields(attrs);
+    renderStoreTemplateCategoryFields(fields, profile.attribute_values || attrs);
+  } else {
+    state.categoryProfileVersions = [];
+    renderCategoryProfileVersions();
+    renderStoreTemplateCategoryFields([], {});
+  }
+  const summary = $("store-template-category-summary");
+  if (summary) {
+    summary.textContent = profile
+      ? `${categoryPath || categoryId} · 已按新店铺站点重新绑定类目方案`
+      : `${categoryPath || categoryId} · 新店铺站点还没有该类目的方案，请先采集当前页或建方案再保存`;
+  }
+  return { kept: true, profile };
 }
 
 function marketplaceCategoryScopeReady(scope, results, status) {
@@ -9291,9 +9397,9 @@ function validateStoreTemplateForm() {
   }
   if (!selectedTemplateSizes().length) return "请至少选择一个尺码";
   // 选了类目但还没绑定必填规则：服务端会报 "requires an active category profile"，
-  // 这里提前用中文说清怎么解（采集必填项或改选已采集的类目）。
+  // 这里提前用中文说清怎么解（页面采集会补方案与必填项）。
   if ($("store-template-category-id")?.value.trim() && !$("store-template-category-profile")?.value.trim()) {
-    return "已选择类目但还没有该类目的必填项规则：请在「平台类目」选择器里点「采集必填项」并确认导入，或改选已采集过规则的类目";
+    return "已选类目但当前店铺/站点还没有该类目的必填项规则：请在该店铺打开马帮商品编辑页做一次「采集当前页」（会自动补齐类目方案与必填项），或在「平台类目」里点「采集必填项」并确认导入；也可以改选已有规则的类目";
   }
   if (isLocalLikeMode(listingMode) && $("store-template-default-sku-enabled")?.checked) {
     const defaultSkuRequirements = [
@@ -9557,6 +9663,22 @@ async function createStoreTemplate() {
   const effectiveStoreName = identityFromCnscStore ? (selectedCnscStore?.dataset.storeName || "") : (selectedStore?.dataset.storeName || "");
   const sizeChartSource = $("store-template-size-chart-source")?.value === "template" ? "template" : "upload";
   const selectedSizeChartTemplate = sizeChartSource === "template" ? selectedStoreSizeChartTemplate() : null;
+  // 目录里没有当前选中的那张尺码图模板（店铺尺码图目录没采全/过期）时，select 里仍然
+  // 保留着它的 id 与名称——保存要照原值写回，不能因为"目录里查不到"就把尺码图清空。
+  const sizeChartTemplateSelect = $("store-template-size-chart-template");
+  const sizeChartTemplateValue = sizeChartSource === "template" ? (sizeChartTemplateSelect?.value || "") : "";
+  const sizeChartTemplateName = sizeChartSource === "template"
+    ? (selectedSizeChartTemplate?.name || sizeChartTemplateSelect?.selectedOptions?.[0]?.dataset?.name || "")
+    : "";
+  const sizeChartOriginalTemplate = state.editingStoreTemplateId
+    ? storeTemplateById(state.editingStoreTemplateId)
+    : null;
+  const originalSizeChart = (
+    sizeChartSource === "template"
+    && sizeChartOriginalTemplate
+    && sizeChartTemplateValue
+    && sizeChartTemplateValue === String(sizeChartOriginalTemplate.mabang_size_chart_template_id || "")
+  ) ? sizeChartOriginalTemplate : null;
   const endpoint = state.editingStoreTemplateId
     ? `/api/store-templates/${encodeURIComponent(state.editingStoreTemplateId)}`
     : "/api/store-templates";
@@ -9600,11 +9722,13 @@ async function createStoreTemplate() {
       default_video_id: localLike ? ($("store-template-default-video-id")?.value.trim() || "") : "",
       // 选择模板时页面上没有可引用的尺码图地址，自动化要拿这里上传的那张图插到
       // 描述末尾；没上传才回落到模板自带的预览图（采集到的模板才有）。
-      size_chart_asset_id: state.sizeChartAsset?.id || selectedSizeChartTemplate?.asset_id || "",
-      size_chart_preview_url: state.sizeChartAsset?.preview_url || selectedSizeChartTemplate?.preview_url || "",
+      // 目录里查不到那张尺码图模板时沿用正在编辑的模板原值，别把资产一起清空。
+      size_chart_asset_id: state.sizeChartAsset?.id || selectedSizeChartTemplate?.asset_id || originalSizeChart?.size_chart_asset_id || "",
+      size_chart_preview_url: state.sizeChartAsset?.preview_url || selectedSizeChartTemplate?.preview_url || originalSizeChart?.size_chart_preview_url || "",
       size_chart_source: sizeChartSource,
-      default_size_chart_path: state.sizeChartAsset?.file_path || selectedSizeChartTemplate?.file_path || "",
-      mabang_size_chart_template_id: selectedSizeChartTemplate?.template_id || "",
+      default_size_chart_path: state.sizeChartAsset?.file_path || selectedSizeChartTemplate?.file_path || originalSizeChart?.default_size_chart_path || "",
+      mabang_size_chart_template_id: selectedSizeChartTemplate?.template_id || sizeChartTemplateValue || "",
+      mabang_size_chart_template_name: selectedSizeChartTemplate?.name || sizeChartTemplateName || "",
       mabang_size_chart_template_name: selectedSizeChartTemplate?.name || "",
       // 产品图最后一张放尺码表（本土口径，默认开）：纯跨境保存时强制关闭。
       size_chart_as_last_product_image: localLike
@@ -9945,7 +10069,7 @@ function openSaveAsStoreTemplateDialog() {
   renderMabangStoreOptions();
   $("save-as-store-template-store").value = "";
   $("save-as-store-template-name").value = `${source.template_name || "店铺模板"} - 副本`;
-  $("save-as-store-template-summary").textContent = "切换店铺后将清空促销活动和水印；跨站点还会清空类目、价格和必填属性。";
+  $("save-as-store-template-summary").textContent = "切换店铺后会清空促销活动和水印；跨站点会保留类目，但会清空价格和必填属性（到目标店铺采集当前页即可补回类目方案）。";
   $("save-as-store-template-result").textContent = "";
   $("save-as-store-template-dialog")?.showModal();
 }
@@ -10056,8 +10180,14 @@ async function openStoreTemplateEditor(templateId) {
     preview_url: template.size_chart_preview_url || `/api/uploads/size-chart/${encodeURIComponent(template.size_chart_asset_id)}`,
   } : null;
   renderSizeChartSource(template.size_chart_source || "upload");
-  renderSizeChartTemplateOptions();
-  $("store-template-size-chart-template").value = template.mabang_size_chart_template_id || "";
+  // 目录里没有模板引用的那张尺码图时也要把原值留住（否则保存会把它抹掉）。
+  renderSizeChartTemplateOptions({
+    keepValue: template.mabang_size_chart_template_id || "",
+    keepName: template.mabang_size_chart_template_name || "",
+  });
+  if ($("store-template-size-chart-template")) {
+    $("store-template-size-chart-template").value = template.mabang_size_chart_template_id || "";
+  }
   renderStoreTemplateSizeChartPreview();
   // 已保存的水印选择：ID 和名称一起回显（目录没加载时也能照原样保存回去）。
   setWatermarkChoiceValue("main", template.main_image_watermark?.template_id || "", template.main_image_watermark?.name || "");
@@ -10730,6 +10860,8 @@ function renderCopyTemplatePicker(query = "") {
       && !item.mabang_size_chart_template_id) missing.push("尺码图");
     if (!item.weight_kg) missing.push("重量");
     const blockReason = cnsc && missing.length ? "template_needs_configuration" : "";
+    // 缺字段的模板卡片是禁用的：把原因写进 title，否则操作员只看到选不上、不知道为什么。
+    const blockTitle = missing.length ? `缺 ${missing.join("、")}：先到店铺模板里补上再复制` : "";
     // 本土复制以模板尺码为准（模板 chip 就是店铺刊登的尺码轴）；跨境仍按商品尺码
     // （勾选 → 识别 → 模板）。多商品复制时本土共用一个模板尺码轴。
     const copyItems = baseProductsToCopy();
@@ -10756,7 +10888,7 @@ function renderCopyTemplatePicker(query = "") {
     } else {
       sizeNote = `<small class="template-size-mismatch">商品与模板均未配置尺码，将按默认尺码生成 SKU。</small>`;
     }
-    return `<label class="template-picker-item" data-block-reason="${blockReason}"><input type="checkbox" data-store-template-select="${escapeHtml(item.id)}" ${state.selectedStoreTemplates.has(item.id) ? "checked" : ""} ${missing.length ? "disabled" : ""} /><span><strong>${cnsc ? `<span class="template-mode-badge${isPureCnscMode(item) ? "" : " is-3pf"}">${escapeHtml(listingModeBadgeLabel(item))}</span> ` : ""}${escapeHtml(item.store_name)} · ${escapeHtml(item.template_name)}</strong><small>${escapeHtml(item.marketplace_category_path || "未选类目")} · ${escapeHtml(missing.join("、") || "配置完整")}</small>${sizeNote}</span></label>`;
+    return `<label class="template-picker-item" data-block-reason="${blockReason}" title="${escapeHtml(blockTitle)}"><input type="checkbox" data-store-template-select="${escapeHtml(item.id)}" ${state.selectedStoreTemplates.has(item.id) ? "checked" : ""} ${missing.length ? "disabled" : ""} /><span><strong>${cnsc ? `<span class="template-mode-badge${isPureCnscMode(item) ? "" : " is-3pf"}">${escapeHtml(listingModeBadgeLabel(item))}</span> ` : ""}${escapeHtml(item.store_name)} · ${escapeHtml(item.template_name)}</strong><small>${escapeHtml(item.marketplace_category_path || "未选类目")} · ${escapeHtml(missing.join("、") || "配置完整")}</small>${sizeNote}</span></label>`;
   };
   root.innerHTML = groups.size
     ? [...groups.entries()].map(([store, list]) => `
@@ -13134,6 +13266,9 @@ document.addEventListener("click", async (event) => {
   if (target.id === "mabang-page-import-btn") {
     openMabangPageImportDialog();
   }
+  if (target.id === "excel-import-btn") {
+    window.ExcelImport?.open();
+  }
   if (target.id === "category-dialog-import-from-mabang-btn") {
     // From the empty-state inside the category picker, close the picker and open the
     // mabang page import flow — the same one that lives at the top of the templates view.
@@ -13740,7 +13875,13 @@ document.addEventListener("change", (event) => {
     return;
   }
   if (target instanceof HTMLSelectElement && target.id === "store-template-store") {
-    // 切换店铺：清空旧目录和旧选择后再加载新店铺目录。
+    // 切换店铺：水印/活动/尺码表这些店铺绑定项要重载；类目不清空 —— 类目 id 是平台级的，
+    // 只有类目方案按站点分版本，按新店铺重新绑定（绑不上就保留类目 + 提示待补方案）。
+    const previousCategory = {
+      id: $("store-template-category-id")?.value || "",
+      path: $("store-template-category-path")?.value || "",
+      name: state.selectedMarketplaceCategory?.name || "",
+    };
     state.storeWatermarks = [];
     state.watermarkCatalogStatus = null;
     state.watermarkCatalogStoreId = "";
@@ -13749,7 +13890,7 @@ document.addEventListener("change", (event) => {
     renderWatermarkPicker("main");
     renderWatermarkPicker("product");
     renderWatermarkCatalogStatus();
-    clearMarketplaceCategorySelection({ clearSearch: true });
+    restoreStoreTemplateCategoryForStore(previousCategory);
     renderStoreTemplateDescriptionProfileOptions();
     loadStorePromotions().catch((err) => { $("store-template-result").textContent = err.message; });
     loadStoreWatermarks().catch((err) => { $("store-template-result").textContent = err.message; });

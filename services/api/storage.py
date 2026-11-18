@@ -3372,15 +3372,23 @@ def _copy_store_template_payload(
         "default_video_id",
     )
     copied = {field: deepcopy(source.get(field)) for field in reusable_fields}
+    # 类目本身是平台级的：同一个类目路径（Men Clothes > Tops > T-Shirts）在
+    # PH/TW/SG/TH/MY/MX/VN/BR 的 category_id 都是 100244（marketplace_categories 实测），
+    # 所以另存到别的站点时把 path/id 一起带过去，操作员不用重新选类目。
+    # 真正按站点变的是「类目方案」：必填属性/选项与价格/币种跟站点绑，跨站点一律清空，
+    # 状态标 needs_mabang_import —— 到目标店铺采集当前页时会重新绑定方案与属性值。
+    category_identity = {
+        "product_line": deepcopy(source.get("product_line")),
+        "marketplace_category_path": str(source.get("marketplace_category_path") or "").strip(),
+        "mabang_category_id": str(source.get("mabang_category_id") or "").strip(),
+    }
     if same_site:
         copied.update({field: deepcopy(source.get(field)) for field in same_site_fields})
     else:
+        copied.update(category_identity)
         copied.update({
             "category_profile_id": "",
             "category_profile_version_id": "",
-            "product_line": "",
-            "marketplace_category_path": "",
-            "mabang_category_id": "",
             "category_attributes": {},
             "attribute_values": {},
             "normal_price": "",
@@ -3857,6 +3865,8 @@ def _migrate_legacy_cdp_ports(data: dict[str, Any]) -> bool:
                     group[key] = migrated
                     changed = True
     return changed
+
+
 # 同一个账号的并行槽位（slot）整体挪到下一个百位段：2 号槽位 = 18223+100、3 号 = +200。
 # 账号端口本身是 18223 起按账号顺延，槽位 stride 取 100 就保证「账号若干 × 槽位若干」
 # 不会互相撞端口（最多 4 槽位 ⇒ 只用到 18223~18524）。
@@ -5071,6 +5081,164 @@ def create_base_product_from_folder(payload: dict[str, Any]) -> dict[str, Any] |
     return base_product
 
 
+def existing_base_product_identifiers() -> set[str]:
+    """Casefolded main SKUs / group ids already in the store.
+
+    Used by the Excel import preview to flag existing products before any
+    download work starts.
+    """
+    with _LOCK:
+        data = load_store()
+        values: set[str] = set()
+        for item in data.get("base_products") or []:
+            for key in ("main_sku", "group_id"):
+                text = str(item.get(key) or "").strip().casefold()
+                if text:
+                    values.add(text)
+        return values
+
+
+def create_base_product_from_excel(payload: dict[str, Any]) -> dict[str, Any]:
+    """Create a base product from files already downloaded by the Excel import.
+
+    ``payload``: ``main_sku``, ``title``, ``asset_root``, ``gallery`` (ordered
+    file names), ``variant_images`` (color -> file name), ``colors`` (ordered),
+    optional ``source_batch_id`` / ``source_meta``.
+
+    Only title + images + colors are taken from the source export. Price,
+    description, attributes and sizes stay template-owned, so they are not
+    written here. An existing main SKU is reported as ``skipped`` instead of
+    being overwritten.
+    """
+    main_sku = str(payload.get("main_sku") or "").strip()
+    if not main_sku:
+        raise ValueError("main_sku is required")
+    raw_root = str(payload.get("asset_root") or "").strip()
+    if not raw_root:
+        raise ValueError("asset_root is required")
+    root = Path(raw_root).expanduser()
+    title = str(payload.get("title") or "").strip() or main_sku
+    gallery_names = [
+        str(name or "").strip()
+        for name in payload.get("gallery") or []
+        if str(name or "").strip()
+    ][:9]
+    raw_variant_map = payload.get("variant_images") if isinstance(payload.get("variant_images"), dict) else {}
+    colors: list[str] = []
+    seen_colors: set[str] = set()
+    for raw_color in payload.get("colors") or []:
+        color = str(raw_color or "").strip()
+        if color and color.casefold() not in seen_colors:
+            seen_colors.add(color.casefold())
+            colors.append(color)
+
+    group_id = main_sku
+    normalized = group_id.casefold()
+    with locked_store(split_keys=("base_products", "assets")) as (data, save):
+        for item in data.get("base_products") or []:
+            for key in ("main_sku", "group_id"):
+                if str(item.get(key) or "").strip().casefold() == normalized:
+                    return {
+                        "status": "skipped",
+                        "reason": "exists",
+                        "main_sku": main_sku,
+                        "product_id": item.get("id"),
+                    }
+
+        now = utc_now()
+        assets: list[dict[str, Any]] = []
+        taken_names: set[str] = set()
+        product_images: list[str] = []
+
+        def _register(file_name: str, asset_type: str, color: str = "") -> str:
+            path = (root / file_name).resolve()
+            if not path.is_file():
+                raise ValueError(f"素材文件不存在：{path}")
+            file_name = path.name
+            name_key = file_name.casefold()
+            if name_key in taken_names:
+                # Colour images may reuse a gallery photo (or another colour's
+                # image): keep the colour -> file mapping, skip the duplicate
+                # asset record.
+                return file_name if asset_type == "variant" else ""
+            taken_names.add(name_key)
+            width, height = _asset_image_dimensions(path)
+            asset = {
+                "id": str(uuid.uuid4()),
+                "category": "",
+                "group_id": group_id,
+                "brand": "",
+                "sku_option": color,
+                "asset_type": asset_type,
+                "group_root": str(root),
+                "file_path": str(path),
+                "file_name": file_name,
+                "file_hash": hashlib.sha256(path.read_bytes()).hexdigest(),
+                "width": width,
+                "height": height,
+                "size_bytes": path.stat().st_size,
+                "status": "ready",
+                "origin": EXCEL_IMPORT_ORIGIN,
+                "created_at": now,
+            }
+            assets.append(asset)
+            return file_name
+
+        for file_name in gallery_names:
+            registered = _register(file_name, "main")
+            if registered:
+                product_images.append(registered)
+
+        variant_image_map: dict[str, str] = {}
+        for color in colors:
+            raw_name = str(raw_variant_map.get(color) or "").strip()
+            if not raw_name:
+                continue
+            registered = _register(raw_name, "variant", color)
+            if registered:
+                variant_image_map[color] = registered
+
+        recognized_colors = [color for color in colors if color in variant_image_map]
+        status = "base_ready" if product_images and recognized_colors else "needs_check"
+        base_product = {
+            "id": str(uuid.uuid4()),
+            "listing_kind": "base_product",
+            "category": "",
+            "product_category": "",
+            "attribute_values": {},
+            "group_id": group_id,
+            "main_sku": main_sku,
+            "product_name_cn": title,
+            "base_name": title,
+            "listing_title": title,
+            "asset_root": str(root),
+            "main_image": product_images[0] if product_images else "",
+            "product_images": product_images,
+            "size_chart_image": "",
+            "video": {},
+            "recognized_colors": recognized_colors,
+            # Template-first: the store template owns the size axis.
+            "recognized_sizes": [],
+            "selected_sizes": [],
+            "variant_image_map": variant_image_map,
+            "color_order_follows_images": True,
+            "variant_count": len(variant_image_map),
+            "price_tiers": [],
+            "status": status,
+            "source": "excel_import",
+            "source_batch_id": str(payload.get("source_batch_id") or ""),
+            "source_meta": deepcopy(payload.get("source_meta") or {}),
+            "created_at": now,
+            "updated_at": now,
+        }
+        data.setdefault("assets", [])
+        data.setdefault("base_products", [])
+        data["assets"] = [*(data.get("assets") or []), *assets]
+        data["base_products"] = [*(data.get("base_products") or []), base_product]
+        save(data)
+        return {"status": "created", "product": deepcopy(base_product), "asset_count": len(assets)}
+
+
 def _editable_snapshot(value: Any) -> str:
     return json.dumps(value, sort_keys=True, ensure_ascii=False, default=str)
 
@@ -5202,6 +5370,7 @@ def save_base_product_video(base_product_id: str, payload: dict[str, Any]) -> di
 
 
 MANUAL_UPLOAD_ORIGIN = "manual_upload"
+EXCEL_IMPORT_ORIGIN = "excel_import"
 
 
 def add_base_product_product_image(base_product_id: str, payload: dict[str, Any]) -> dict[str, Any] | None:

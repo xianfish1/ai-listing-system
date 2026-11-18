@@ -187,14 +187,15 @@ test('CNSC warehouse stocks resolve per warehouse: SKU value -> copy default -> 
     ],
   };
   assert.deepEqual(executor.expectedCNSCDomRows(grid), [
-    { sku: 'A||M', global_price: undefined, TH: 0, CN_GZ: 300, PH: 0 },
-    { sku: 'B||M', global_price: undefined, TH: 300, CN_GZ: 300, PH: 0 },
-    { sku: 'C||M', global_price: undefined, TH: 300, CN_GZ: 0, PH: 0 },
-    { sku: 'D||M', global_price: undefined, TH: 300, CN_GZ: 0, PH: 0 },
+    // 3PF 的单「库存」列 = 三仓之和（stock 字段是 3PF 单一库存列一起加的）。
+    { sku: 'A||M', stock: 300, global_price: undefined, TH: 0, CN_GZ: 300, PH: 0 },
+    { sku: 'B||M', stock: 600, global_price: undefined, TH: 300, CN_GZ: 300, PH: 0 },
+    { sku: 'C||M', stock: 300, global_price: undefined, TH: 300, CN_GZ: 0, PH: 0 },
+    { sku: 'D||M', stock: 300, global_price: undefined, TH: 300, CN_GZ: 0, PH: 0 },
   ]);
   // �?��级默认也没有时兜�?0，绝不留空�??
   assert.deepEqual(executor.expectedCNSCDomRows({ skus: [{ sku_code: 'E||M' }] }), [
-    { sku: 'E||M', global_price: undefined, TH: 0, CN_GZ: 0, PH: 0 },
+    { sku: 'E||M', stock: 0, global_price: undefined, TH: 0, CN_GZ: 0, PH: 0 },
   ]);
   // 解析器�?脏�?�兜�?0 不抛错；真�?的脏数据�?validateCNSCTaskPayload 在填表前拦截�?
   assert.equal(executor.resolveCNSCWarehouseStock({ warehouse_stocks: { TH: -1 } }, {}, 'TH'), 0);
@@ -1105,7 +1106,8 @@ test('�?��现场属�?��?取等到类�?��性定义加载完再�
   assert.match(source, /const live = siteMode\s*\n?\s*\? await readLiveCategoryAttributesWhenReady\(frame\)/);
   assert.match(source, /: await readLiveCategoryAttributes\(frame\)/);
   // �?�� matchOptions 带上多�?�收面板策略
-  assert.match(source, /siteMode \? \{ loose: true, siteMultiSelectHandling: true \} : \{\}/);
+  // 本土 matchOptions 带上多选收面板策略；3PF 另外打开标签前缀锚定（cnsc_global 保持 {}）
+  assert.match(source, /const matchOptions = siteMode\s*\n\s*\? \{ loose: true, siteMultiSelectHandling: true \}\s*\n\s*: \(threePfMode \? \{ anchorLabels: true \} : \{\}\);/);
 });
 
 test('CNSC site price readback pairs activity headers by page site order, not plan index', () => {
@@ -1837,7 +1839,9 @@ test('enum attribute with a value outside its options uses the Mabang "�?��
   assert.match(source, /\.el-select__tags-text/);
   assert.match(source, /\.el-select__selected-item/);
   // 属�?�填写阶段接�?select �?��上（而不�?��成文�??打字）�??
-  assert.match(source, /selectElementOptionOrCustom\(\s*\n\s*frame,\s*\n\s*await waitForFormItemForLabels\(frame, labels[^)]*\),/);
+  // 属性填写阶段接入 select 通道（而不是当成文本框打字）：表单项已在循环里解析好，
+  // 直接复用 present/item，不再按标签重扫。
+  assert.match(source, /return await selectElementOptionOrCustom\(frame, item, labels, values, matchOptions\);/);
 });
 
 test('an already open Mabang dropdown is never toggled shut before the custom option flow', () => {
@@ -1919,17 +1923,21 @@ test('site attributes tolerate the （Size） suffix, expand 显示所有属性 
   assert.equal(typeof executor.expandHiddenCategoryAttributes, 'function');
 
   const source = fs.readFileSync(path.join(__dirname, '../scripts/mabang_playwright_executor.cjs'), 'utf8');
-  // 回�??仍存�?���?loose 时先过一遍前�?锚定�?
-  assert.match(source, /const candidates = options\.loose === true \? await prefixAnchoredItems\(visible, label, options\) : visible;/);
+  // 回退仍存在：loose / anchorLabels 时先过一遍前缀锚定，锚不到再按原策略退回
+  assert.match(source, /if \(options\.loose !== true && options\.anchorLabels !== true\) return visible;/);
+  assert.match(source, /return anchored\.length \? anchored : \(options\.loose === true \? anchored : visible\);/);
   assert.match(source, /if \(text\.startsWith\(wanted\)\) anchored\.push\(item\);/);
   // 展开�?��按钮文�?点，且在展开后再查一次�??
-  assert.match(source, /frame\.locator\('button\.el-button--text', \{ hasText: '显示所有属性' \}\)/);
-  assert.match(source, /present = await findFormItemPresent\(frame, labels, 2000, matchOptions\);/);
+  // 展开用「显示所有属性」按钮文案点，且在展开后再查一次表单
+  assert.match(source, /const selector = options\.broad === true/);
+  assert.match(source, /frame\.locator\(selector, \{ hasText: '显示所有属性' \}\)/);
+  // 展开后再查一次表单（现在是计时包装后的调用，形式变了、语义不变）
+  assert.match(source, /present = await timeIt\('presence_ms', \(\) => findFormItemPresent\(frame, labels, 2000, matchOptions\)\);/);
 
-  //   3) 容错全部限定在本土：跨境（CNSC / 3PF）走原来的匹配参数。
+  //   3) 容错按流程分档：本土（site）loose、3PF anchorLabels，cnsc_global 走原来的匹配参数。
   assert.match(source, /const siteMode = normalizeListingMode\(task\.store\?\.listing_mode\) === LISTING_MODE_SITE;/);
-  assert.match(source, /const matchOptions = siteMode \? \{ loose: true, siteMultiSelectHandling: true \} : \{\};/);
-  assert.match(source, /if \(!present && siteMode && !hiddenExpanded\) \{/);
+  assert.match(source, /const matchOptions = siteMode\s*\n\s*\? \{ loose: true, siteMultiSelectHandling: true \}\s*\n\s*: \(threePfMode \? \{ anchorLabels: true \} : \{\}\);/);
+  assert.match(source, /if \(!present && \(siteMode \|\| threePfMode\) && !hiddenExpanded\) \{/);
 });
 
 // ---------------------------------------------------------------------------
@@ -2361,33 +2369,27 @@ test('描述编辑器缺失时�?��警告，不抛错（草稿照样保存�
     first() { return labelLocator; },
     async innerText() { return '商品描述:'; },
   };
-  const items = { async count() { return 1; }, nth() { return item; } };
+  const items = { async count() { return 1; }, nth() { return item; }, filter() { return items; } };
   const frame = {
     locator() { return items; },
+    // 描述插图会先探平台（descriptionPlatform → frame.evaluate 读 navigator）；
+    // 这里给个非 Mac 的替身，让流程照常走到"编辑器拿不到 id"那一步。
+    async evaluate() { return { platform: 'Win32', userAgent: 'Windows' }; },
   };
-  const events = [];
-  const originalWrite = process.stdout.write.bind(process.stdout);
-  // emit 的事件流默认可以用 MABANG_EXECUTOR_SILENT=1 关掉（跑测试时 TAP 不被污染）；
-  // 这个用例正是要截事件，所以临时把它打开。
+  // 只认返回结果：不再劫持 process.stdout.write 截事件——node:test 自己也用
+  // stdout.write 归集每个用例的报告，把绑定过的旧 write 还原回去会让后续报告全部丢失
+  // （实测：整套 150 项只报出 119 项，且文件级判失败）。
   const originalSilent = process.env.MABANG_EXECUTOR_SILENT;
-  process.env.MABANG_EXECUTOR_SILENT = '0';
-  process.stdout.write = (chunk) => { events.push(String(chunk)); return true; };
+  process.env.MABANG_EXECUTOR_SILENT = '1';
   let result;
   try {
     result = await executor.appendDescriptionMedia(frame, { store: { listing_mode: 'site' } });
   } finally {
-    process.stdout.write = originalWrite;
     if (originalSilent === undefined) delete process.env.MABANG_EXECUTOR_SILENT;
     else process.env.MABANG_EXECUTOR_SILENT = originalSilent;
   }
   assert.equal(result.status, 'warning');
   assert.equal(result.code, 'description_editor_id_missing');
-  const emitted = events
-    .filter((line) => line.startsWith('MABANG_PLAYWRIGHT_EVENT '))
-    .map((line) => JSON.parse(line.replace('MABANG_PLAYWRIGHT_EVENT ', '')));
-  assert.equal(emitted.length, 1);
-  assert.equal(emitted[0].stage, 'append_description_media');
-  assert.equal(emitted[0].status, 'warning');
 });
 
 test('跨�?任务直接跳过描述插图，不碰页�?', async () => {
@@ -2403,7 +2405,7 @@ test('存成 text 的类目属性按页面控件决定填法，条件下拉不�
 
   // 文本分支不再直接 setField，改走按控件判断�?selectElementOptionOrCustom�?
   assert.doesNotMatch(source, /results\[field\.field_id\] = await setField\(frame, labels, value, matchOptions\)/);
-  assert.match(source, /results\[field\.field_id\] = await selectElementOptionOrCustom\(\s*\n\s*frame,\s*\n\s*present,/);
+  assert.match(source, /results\[field\.field_id\] = await applyAttributeSafely\(field, labels, present, optionLabels\);/);
   // 控件类型�?�� DOM：有 .el-select 或输入�? readonly 都算下拉，档案里�?type 不作数�??
   assert.match(source, /async function isSelectControl\(item\)/);
   assert.match(source, /item\.locator\('\.el-select'\)\.count\(\)/);
@@ -3375,4 +3377,116 @@ test('3PF DOM 网格计划：页面没有三仓列也能通过', () => {
   assert.equal(plan.ok, true);
   assert.equal(plan.columns.global_price, 'col_3');
   assert.equal(plan.columns.TH, undefined);
+});
+
+test('变种图上传按"src 变服务端地址"判完成，不再每色死等 2 秒', () => {
+  const source = fs.readFileSync(path.join(__dirname, '../scripts/mabang_playwright_executor.cjs'), 'utf8');
+  const fn = source.slice(
+    source.indexOf('async function uploadVariantThumbnails('),
+    source.indexOf('async function validateBeforeSave('),
+  );
+  // 旧的固定等待必须消失，改成有上限有地板的完成信号等待
+  assert.doesNotMatch(fn, /await sleep\(2000\)/);
+  assert.match(fn, /const THUMBNAIL_SETTLE_CEILING_MS = 2000;/);
+  assert.match(fn, /const THUMBNAIL_SETTLE_FLOOR_MS = 500;/);
+  assert.match(fn, /remote: \/\^https\?:\/i\.test\(src\)/);
+  assert.match(fn, /await waitForThumbnailSettle\(groupIndex, color\)/);
+  // 每张图留一条 settle 计时，跑几单就能看出快路径命中率
+  assert.match(fn, /phase: 'thumbnail_settle'/);
+  // 顺序约束还在：一张传完再喂下一张
+  assert.match(fn, /for \(const \[color, upload\] of pending\)/);
+});
+
+test('变体轴只解析一次区块，加值用一次 evaluate 读全量并批量回读校验', () => {
+  const source = fs.readFileSync(path.join(__dirname, '../scripts/mabang_playwright_executor.cjs'), 'utf8');
+  assert.match(source, /async function axisValueTexts\(block\)/);
+  assert.match(source, /async function addAxisValueInBlock\(block, axis, value\)/);
+  const fn = source.slice(
+    source.indexOf('async function configureVariants('),
+    source.indexOf('// Uncheck "分sku设置件重尺"'),
+  );
+  assert.match(fn, /const colorBlock = await ensureVariantAxis\(card, 'color'\);/);
+  assert.match(fn, /const sizeBlock = await ensureVariantAxis\(card, 'size'\);/);
+  assert.match(fn, /await addAxisValueInBlock\(colorBlock, 'color', color\)/);
+  assert.match(fn, /await addAxisValueInBlock\(sizeBlock, 'size', size\)/);
+  // 批量回读：缺值点名报错，不再只靠 SKU 行数兜底
+  assert.match(fn, /const missingColors = await missingAxisValues\(colorBlock, colors\);/);
+  assert.match(fn, /phase: 'variant_axes'/);
+  assert.match(fn, /throw new BlockedError\('variant_axis_value_not_added', \{/);
+});
+
+test('属性阶段有耗时拆分，自选值仍然强制走 UI 添加（不许退回只写模型）', () => {
+  const source = fs.readFileSync(path.join(__dirname, '../scripts/mabang_playwright_executor.cjs'), 'utf8');
+  assert.match(source, /const attributeTimings = \{ started_at: Date\.now\(\), presence_ms: 0, custom_ui_ms: 0 \};/);
+  assert.match(source, /present = await timeIt\('presence_ms', \(\) => findFormItemPresent/);
+  assert.match(source, /await timeIt\('custom_ui_ms', \(\) => applyCustomValueThroughUi\(/);
+  assert.match(source, /phase: 'attribute_stage_breakdown'/);
+  // 现场教训：自选值只写页面模型 → 草稿里是空的。这条捷径不允许回来。
+  assert.match(source, /const viaUi = await timeIt\('custom_ui_ms'/);
+  assert.doesNotMatch(source, /results\[field\.field_id\] = \{ value: \(applied\.labels \|\| \[\]\)\.join\(', '\), method: 'custom'/);
+});
+
+test('变体轴取值判据：容忍删除图标，但不把 M 当成 M2', () => {
+  assert.equal(executor.axisValuePresent(['M', '×'], 'M'), true);
+  assert.equal(executor.axisValuePresent(['M×'], 'M'), true);
+  assert.equal(executor.axisValuePresent(['M ✕'], 'M'), true);
+  assert.equal(executor.axisValuePresent(['M2'], 'M'), false);
+  assert.equal(executor.axisValuePresent(['XL'], 'L'), false);
+  assert.equal(executor.axisValuePresent(['深蓝色×'], '深蓝色'), true);
+  assert.equal(executor.axisValuePresent([], 'M'), false);
+  assert.equal(executor.axisValuePresent(['M'], ''), false);
+});
+
+test('保存后关页优先吃 close 事件，不再等满 8 秒', async () => {
+  let probeCalls = 0;
+  const page = {
+    isClosed: () => false,
+    // 真 Playwright 的 Page 会派发 close 事件；这里 30ms 后派发。
+    waitForEvent: () => new Promise((resolve) => setTimeout(() => resolve(), 30)),
+  };
+  const startedAt = Date.now();
+  const closed = await executor.waitForSavedDetailPageToClose(page, {
+    timeoutMs: 2000,
+    intervalMs: 50,
+    stableRequired: 3,
+    closureProbe: async () => { probeCalls += 1; return false; },
+  });
+  assert.equal(closed, true);
+  assert.ok(Date.now() - startedAt < 1000, 'close 事件一到就要返回，不能等 probe 稳定 3 次');
+  assert.ok(probeCalls <= 3, '事件路径下不该反复跑跨 frame 的 probe');
+});
+
+test('收尾等待默认上限降到 2.5 秒（原来 8 秒），超时交给 page.close 兜底', () => {
+  const source = fs.readFileSync(path.join(__dirname, '../scripts/mabang_playwright_executor.cjs'), 'utf8');
+  const fn = source.slice(
+    source.indexOf('async function waitForSavedDetailPageToClose('),
+    source.indexOf('async function closeSavedDetailPage('),
+  );
+  assert.match(fn, /const timeoutMs = Number\(options\.timeoutMs \|\| 2500\);/);
+  assert.match(fn, /page\.waitForEvent\('close', \{ timeout: timeoutMs \}\)/);
+  assert.match(fn, /await Promise\.race\(\[eventWait, new Promise\(\(resolve\) => setTimeout\(resolve, intervalMs\)\)\]\);/);
+});
+
+test('保存校验一轮只读一次整页文本：证据与拒绝文案合并成 readSaveSignals', () => {
+  const source = fs.readFileSync(path.join(__dirname, '../scripts/mabang_playwright_executor.cjs'), 'utf8');
+  assert.match(source, /async function readSaveSignals\(frame\)/);
+  const fn = source.slice(
+    source.indexOf('async function verifySavedDraftEvidence('),
+    source.indexOf('// Ordered list of pre-save stages'),
+  );
+  assert.match(fn, /const signals = await readSaveSignals\(frame\);/);
+  // 循环里不许再单独扫一遍拒绝文案 / 再读一遍 body innerText
+  assert.doesNotMatch(fn, /await readSaveRejectionTexts\(frame\)/);
+  assert.doesNotMatch(fn, /const text = String\(document\.body && document\.body\.innerText/);
+});
+
+test('视频上传不再固定睡 1 秒，改成等上传弹窗从布局消失', () => {
+  const source = fs.readFileSync(path.join(__dirname, '../scripts/mabang_playwright_executor.cjs'), 'utf8');
+  const fn = source.slice(
+    source.indexOf('async function uploadProductVideo('),
+    source.indexOf('async function runOptionalMediaStages('),
+  );
+  assert.doesNotMatch(fn, /await sleep\(1000\);/);
+  assert.match(fn, /const uploadDialogGoneAt = Date\.now\(\) \+ 1000;/);
+  assert.match(fn, /getComputedStyle\(ud\)\.display === 'none'/);
 });

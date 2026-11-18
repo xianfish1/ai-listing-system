@@ -1,53 +1,13 @@
 from __future__ import annotations
 
 import base64
-import ipaddress
-import socket
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
 from urllib.request import Request, urlopen
 
 from services.api.size_chart_uploads import MAX_UPLOAD_BYTES, save_size_chart
-
-
-_BLOCKED_HOSTNAMES = {"localhost", "localhost.localdomain"}
-
-
-def _is_private_or_local_host(hostname: str) -> bool:
-    """Reject local/private destinations while allowing arbitrary public CDNs.
-
-    DNS lookup failures are left to ``urlopen`` so an otherwise valid public
-    hostname can still be handled by the caller's resolver/proxy.
-    """
-    host = hostname.rstrip(".").lower()
-    if not host or host in _BLOCKED_HOSTNAMES or host.endswith(".localhost") or host.endswith(".local"):
-        return True
-    try:
-        address = ipaddress.ip_address(host)
-    except ValueError:
-        address = None
-    if address is not None:
-        return bool(
-            address.is_private
-            or address.is_loopback
-            or address.is_link_local
-            or address.is_reserved
-            or address.is_unspecified
-            or address.is_multicast
-        )
-    try:
-        resolved = socket.getaddrinfo(host, None, type=socket.SOCK_STREAM)
-    except OSError:
-        return False
-    return any(
-        ipaddress.ip_address(item[4][0]).is_private
-        or ipaddress.ip_address(item[4][0]).is_loopback
-        or ipaddress.ip_address(item[4][0]).is_link_local
-        or ipaddress.ip_address(item[4][0]).is_reserved
-        or ipaddress.ip_address(item[4][0]).is_unspecified
-        for item in resolved
-    )
+from services.api.url_guard import is_private_or_local_host as _is_private_or_local_host
 
 
 def import_mabang_size_chart(url: str, storage_dir: Path) -> dict[str, Any]:

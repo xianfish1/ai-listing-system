@@ -235,9 +235,10 @@ def test_store_template_has_explicit_size_chart_sources_and_two_watermark_roles(
     # 选择模板时表单页上没有可引用的尺码图地址（表单项里只有「上传图片 / 选择模板 / 同步」），
     # 自动化靠店铺模板里一并上传的那张图插到描述末尾：上传的图优先于模板自带预览图，
     # 并且两种模式都留着「选择图片」入口（2026-09-23）。
-    assert 'size_chart_asset_id: state.sizeChartAsset?.id || selectedSizeChartTemplate?.asset_id || ""' in script
-    assert 'size_chart_preview_url: state.sizeChartAsset?.preview_url || selectedSizeChartTemplate?.preview_url || ""' in script
-    assert 'default_size_chart_path: state.sizeChartAsset?.file_path || selectedSizeChartTemplate?.file_path || ""' in script
+    # 末尾的 originalSizeChart 兜底：目录里没有引用的那张尺码图时沿用模板原值，别清空。
+    assert 'size_chart_asset_id: state.sizeChartAsset?.id || selectedSizeChartTemplate?.asset_id || originalSizeChart?.size_chart_asset_id || ""' in script
+    assert 'size_chart_preview_url: state.sizeChartAsset?.preview_url || selectedSizeChartTemplate?.preview_url || originalSizeChart?.size_chart_preview_url || ""' in script
+    assert 'default_size_chart_path: state.sizeChartAsset?.file_path || selectedSizeChartTemplate?.file_path || originalSizeChart?.default_size_chart_path || ""' in script
     assert "picker.hidden = false;" in script
     confirm_import = script[script.index("async function confirmMabangPageImport"):script.index("function openCopyTemplatePicker")]
     assert "focusFirstMissingStoreTemplateField(confirmed.template)" in confirm_import
@@ -1057,3 +1058,52 @@ def test_store_templates_are_scoped_to_a_mabang_account() -> None:
     assert "template-card-account" in script and ".template-card-account" in styles
     assert ".template-account-field" in styles
 
+
+
+def test_switch_store_keeps_category_and_rebinds_profile():
+    """切店铺不再把类目清空：类目 id 是平台级的，只有类目方案按站点分版本。"""
+    script = APP.read_text(encoding="utf-8")
+    assert "function restoreStoreTemplateCategoryForStore(" in script
+    assert "restoreStoreTemplateCategoryForStore(previousCategory)" in script
+    # 店铺 change 分支里不允许再直接清空类目
+    store_branch = script[script.index('target.id === "store-template-store"'):]
+    store_branch = store_branch[:store_branch.index("renderStoreTemplateDescriptionProfileOptions()")]
+    assert "clearMarketplaceCategorySelection" not in store_branch
+    # 找不到方案时保留类目并提示待补
+    helper = script[script.index("function restoreStoreTemplateCategoryForStore("):]
+    helper = helper[:helper.index("function marketplaceCategoryScopeReady(")]
+    assert "categoryProfileForMarketplaceCategory(categoryId, scope)" in helper
+    assert "还没有该类目的方案" in helper
+
+
+def test_promotion_recollect_starts_browser_when_cdp_is_down():
+    """采集浏览器按需启动：连不上时先拉起该账号浏览器再重试一次。"""
+    script = APP.read_text(encoding="utf-8")
+    fn = script[script.index("async function recollectStorePromotions("):]
+    fn = fn[:fn.index("const WATERMARK_ROLES")]
+    assert "连不上马帮采集浏览器" in fn
+    assert '"/api/mabang-browser/start"' in fn
+    assert fn.count("await collect()") == 2
+
+
+def test_size_chart_template_reference_survives_missing_catalog_entry():
+    """店铺尺码图目录没采全时，模板引用的那张尺码图不能被静默清空。"""
+    script = APP.read_text(encoding="utf-8")
+    render = script[script.index("function renderSizeChartTemplateOptions("):]
+    render = render[:render.index("async function loadHealth(")]
+    assert "keepValue = \"\"" in render and "keepName = \"\"" in render
+    assert "（目录未采集）" in render
+    assert 'data-name="${escapeHtml(names.get(value) || "")}"' in render
+    # 打开已有模板时把原值带进选择器
+    assert "keepValue: template.mabang_size_chart_template_id" in script
+    assert "keepName: template.mabang_size_chart_template_name" in script
+    # 保存时按 select 的值回写（目录查不到也不写空），并沿用原资产
+    assert 'const sizeChartTemplateValue = sizeChartSource === "template" ? (sizeChartTemplateSelect?.value || "") : "";' in script
+    assert 'mabang_size_chart_template_id: selectedSizeChartTemplate?.template_id || sizeChartTemplateValue || "",' in script
+    assert "originalSizeChart?.size_chart_asset_id" in script
+
+
+def test_copy_picker_explains_why_a_template_is_disabled():
+    script = APP.read_text(encoding="utf-8")
+    assert 'const blockTitle = missing.length ? `缺 ${missing.join("、")}：先到店铺模板里补上再复制` : "";' in script
+    assert 'title="${escapeHtml(blockTitle)}"' in script

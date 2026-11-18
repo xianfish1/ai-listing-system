@@ -65,7 +65,7 @@ const TEXT = Object.freeze({
 });
 
 const PUBLISH_TEXTS = [TEXT.saveAndList, TEXT.list, TEXT.publish, TEXT.submitReview];
-const CDP_DEFAULT = 'http://127.0.0.1:9223';
+const CDP_DEFAULT = 'http://127.0.0.1:18223';
 // Playwright 默认 30s 的连接预算对「已经开了几小时、DOM 很大的马帮刊登页」不够：
 // 现场 2026-09-27 19:0x 实测 connectOverCDP 要 34s，30s 直接报
 // 「browserType.connectOverCDP: Timeout 30000ms exceeded」——这是连接超时，不是页面问题。
@@ -3066,6 +3066,18 @@ async function setCategoryAttributes(frame, task, page) {
     Array.isArray(task.category_attribute_fields) ? task.category_attribute_fields : [],
   );
   const results = {};
+  // 属性阶段的耗时拆分：定位表单项（每次全表扫描，注释里记过 0.5~1.2s）和自选值 UI
+  // （打字 + 添加）是最可疑的两块。各累计一份，阶段结束写一条日志，跑几单就知道
+  // 这十几秒到底花在哪，下一步优化不用再猜。
+  const attributeTimings = { started_at: Date.now(), presence_ms: 0, custom_ui_ms: 0 };
+  const timeIt = async (key, run) => {
+    const startedAt = Date.now();
+    try {
+      return await run();
+    } finally {
+      attributeTimings[key] += Date.now() - startedAt;
+    }
+  };
   if (resolvedFields.length) {
     // Preferred path: match by the human-readable field label and option labels
     // resolved from the category profile snapshot. The raw Shopee attribute IDs
@@ -3222,12 +3234,12 @@ async function setCategoryAttributes(frame, task, page) {
       // 表单里没有这个属性：可选属性直接跳过（马帮默认只渲染必填属性）；
       // 必填属性则明确报"字段未找到"，而不是退回整页扫描后报一个误导性的
       // field_not_unique（count 会是全页输入框数量）。
-      let present = await findFormItemPresent(frame, labels, 2000, matchOptions);
+      let present = await timeIt('presence_ms', () => findFormItemPresent(frame, labels, 2000, matchOptions));
       if (!present && (siteMode || threePfMode) && !hiddenExpanded) {
         // 只尝试展开一次：展开后仍在的属性才是真的不在表单上。
         hiddenExpanded = true;
         if (await expandHiddenCategoryAttributes(frame, 2000, { broad: threePfMode })) {
-          present = await findFormItemPresent(frame, labels, 2000, matchOptions);
+          present = await timeIt('presence_ms', () => findFormItemPresent(frame, labels, 2000, matchOptions));
         }
       }
       if (!present) {
@@ -3267,14 +3279,14 @@ async function setCategoryAttributes(frame, task, page) {
           // 手工走一遍「搜索 → 添加 → 请输入自定义值 → ✔」后页面模型才变成马帮给的选项 id。
           // 所以这类字段强制走 UI 自选通道；单选/文本属性的老路径不动（它们的模型值本来就能存下来）。
           const forceAdd = await isTagBasedControl(present);
-          const viaUi = await applyCustomValueThroughUi(
+          const viaUi = await timeIt('custom_ui_ms', () => applyCustomValueThroughUi(
             frame,
             labels,
             optionLabels.length ? optionLabels : candidateValues,
             matchOptions,
             present,
             { forceAdd, fieldId: String(field.field_id) },
-          );
+          ));
           if (viaUi && !viaUi.failed) {
             customOptionUiApplied.push({
               field: labels[0],
@@ -3364,6 +3376,14 @@ async function setCategoryAttributes(frame, task, page) {
       // present 就是上面 findFormItemPresent 已经解析好的那一格，别再按标签重扫一遍。
       results[field.field_id] = await applyAttributeSafely(field, labels, present, optionLabels);
     }
+    attrPickDebug({
+      phase: 'attribute_stage_breakdown',
+      ms: Date.now() - attributeTimings.started_at,
+      presence_ms: attributeTimings.presence_ms,
+      custom_ui_ms: attributeTimings.custom_ui_ms,
+      fields: resolvedFields.length,
+      filled: Object.keys(results).length,
+    });
     emit('stage', {
       stage: 'set_category_attributes',
       ok: true,
@@ -3525,17 +3545,24 @@ async function uploadProductImages(frame, task) {
     if (!fs.existsSync(path)) {
       throw new BlockedError('upload_file_missing', { file: require('path').basename(path) });
     }
+    // 每次都重读一次张数：页面重渲染时卡片数可能原地变化，缓存上一张的数会让
+    // 「张数 > 上传前」这个条件永远不成立，白等到 90s 超时。
     const beforeCount = Math.max(0, await countCards().catch(() => 0));
     await productInput.setInputFiles(path);
     // Wait for this file's card to appear before starting the next upload. Give
     // each image up to 90s — large images (1.9MB PNG) on flaky NAS have been observed here.
-    const deadline = Date.now() + 90000;
+    const startedAt = Date.now();
+    const deadline = startedAt + 90000;
     let landed = false;
     while (Date.now() < deadline) {
       const now = await countCards().catch(() => beforeCount);
       if (now > beforeCount) { landed = true; break; }
       await sleep(150);
     }
+    attrPickDebug({
+      phase: 'product_image_landed', index, file: require('path').basename(path),
+      ms: Date.now() - startedAt, landed,
+    });
     if (!landed) {
       throw new BlockedError('product_image_upload_did_not_land', {
         index, file: require('path').basename(path), expected_after: beforeCount + 1,
@@ -5728,8 +5755,17 @@ async function uploadProductVideo(frame, task, page) {
         if (x) x.click();
       }
     });
-    await sleep(1000);
-
+    // 弹窗关掉后再等它真的从布局里消失：原来是固定 sleep(1000)，其实一消失就能往下走。
+    // 上限仍给 1 秒，等不到就照原样继续（后面本来就还有 auth 轮询兜着）。
+    const uploadDialogGoneAt = Date.now() + 1000;
+    while (Date.now() < uploadDialogGoneAt) {
+      const gone = await frame.evaluate(() => {
+        const ud = document.querySelector('#UploadDialog');
+        return !ud || getComputedStyle(ud).display === 'none';
+      }).catch(() => true);
+      if (gone) break;
+      await sleep(100);
+    }
     // 3) Auth is now guaranteed captured (from the upload POST at minimum).
     for (let i = 0; i < 10 && !authCapture.state.auth; i += 1) await sleep(300);
     const auth = authCapture.state.auth;
@@ -5936,9 +5972,32 @@ async function ensureVariantAxis(card, axis) {
   throw new BlockedError('variant_axis_not_selected', { axis });
 }
 
-async function addAxisValue(card, axis, value) {
-  const block = await ensureVariantAxis(card, axis);
-  if (await block.getByText(String(value), { exact: true }).count()) return;
+// 一个轴（.natureBlock）里所有叶子节点的文字。取值是否存在的判断从"每加一个值就
+// block.getByText(...).count() 扫一遍"改成"一次 evaluate 读全量再本地比对"：
+// 17 个颜色/尺码值 = 原来 17 次逐元素文本匹配，现在是 17 次轻量读（每次几百字节）。
+async function axisValueTexts(block) {
+  return block.evaluate((element) => [...element.querySelectorAll('*')]
+    .filter((node) => !node.childElementCount && String(node.textContent || '').trim())
+    .map((node) => String(node.textContent)))
+    .catch(() => []);
+}
+
+// 值是否已经在轴块里：和旧 getByText(exact) 判据对齐，但容忍马帮渲染在值后面的
+// 删除图标（"M×"、"M✕"）。只放过非文字符号，免得把 "M" 当成 "M2"。
+function axisValuePresent(texts, value) {
+  const wanted = compactText(value);
+  if (!wanted) return false;
+  return (Array.isArray(texts) ? texts : []).some((text) => {
+    const compact = compactText(text);
+    if (!compact || !compact.startsWith(wanted)) return false;
+    const remainder = compact.slice(wanted.length);
+    return remainder === '' || !/[0-9A-Za-z\u4e00-\u9fa5]/.test(remainder);
+  });
+}
+
+async function addAxisValueInBlock(block, axis, value) {
+  const hasValue = async () => axisValuePresent(await axisValueTexts(block), value);
+  if (await hasValue()) return 'already_present';
   const input = block.locator('input[placeholder="\u8bf7\u8f93\u5165"]').first();
   const buttons = block.locator('button').filter({ hasText: TEXT.addCustom });
   if ((await input.count()) !== 1 || (await buttons.count()) !== 1) {
@@ -5948,10 +6007,17 @@ async function addAxisValue(card, axis, value) {
   await buttons.first().click();
   const deadline = Date.now() + 5000;
   while (Date.now() < deadline) {
-    if (await block.getByText(String(value), { exact: true }).count()) return;
+    if (await hasValue()) return 'added';
     await new Promise((resolve) => setTimeout(resolve, 100));
   }
   throw new BlockedError('variant_axis_value_not_added', { axis, value: String(value) });
+}
+
+// 单个值的旧入口：自己解析轴块再交给 addAxisValueInBlock。
+// configureVariants 批量加值时直接复用解析好的轴块，省掉每个值一次的全卡扫描。
+async function addAxisValue(card, axis, value) {
+  const block = await ensureVariantAxis(card, axis);
+  return addAxisValueInBlock(block, axis, value);
 }
 
 async function waitForSkuRows(frame, expectedRows, timeoutMs = 10000) {
@@ -5978,13 +6044,34 @@ async function configureVariants(frame, task) {
 
   await selectVariantMode(frame);
   const card = await variantCard(frame);
-  await ensureVariantAxis(card, 'color');
-  await ensureVariantAxis(card, 'size');
+  // 轴块只解析一次，后面所有值都往同一个块里加：原来每个值都要
+  // ensureVariantAxis → 逐块 getByText 扫一遍卡片，17 个值就是 17 次全卡扫描。
+  const colorBlock = await ensureVariantAxis(card, 'color');
+  const sizeBlock = await ensureVariantAxis(card, 'size');
+  const axisStartedAt = Date.now();
   for (const color of colors) {
-    await addAxisValue(card, 'color', color);
+    await addAxisValueInBlock(colorBlock, 'color', color);
   }
   for (const size of sizes) {
-    await addAxisValue(card, 'size', size);
+    await addAxisValueInBlock(sizeBlock, 'size', size);
+  }
+  // 批量回读：两个轴各读一次，缺值直接点名报错，不再只靠 SKU 行数隐式推断。
+  const missingAxisValues = async (block, values) => {
+    const texts = await axisValueTexts(block);
+    return values.filter((value) => !axisValuePresent(texts, value));
+  };
+  const missingColors = await missingAxisValues(colorBlock, colors);
+  const missingSizes = await missingAxisValues(sizeBlock, sizes);
+  attrPickDebug({
+    phase: 'variant_axes', ms: Date.now() - axisStartedAt,
+    colors: colors.length, sizes: sizes.length,
+    missing_colors: missingColors, missing_sizes: missingSizes,
+  });
+  if (missingColors.length || missingSizes.length) {
+    throw new BlockedError('variant_axis_value_not_added', {
+      axis: missingColors.length ? 'color' : 'size',
+      value: String(missingColors[0] || missingSizes[0] || ''),
+    });
   }
   audit = await waitForSkuRows(frame, expectedRows);
   if (audit.rows !== expectedRows) {
@@ -6680,11 +6767,50 @@ async function uploadVariantThumbnails(frame, task) {
     if (index < 0) throw new BlockedError('variant_thumbnail_row_not_unique', { color });
     return index;
   };
-  const groupLoaded = async (groupIndex) => block.evaluate((element, index) => {
+  // 预览图状态：loaded = 组里有正常尺寸的预览图；remote = 这张预览图的 src 已经是
+  // 服务端地址（本地预览是 blob:/data:，后台传完 COS 后马帮会把它换成 CDN 地址）。
+  // remote 就是「这张图真的传完了」的现成信号——不用再靠固定 2 秒去猜。
+  const groupImageState = async (groupIndex) => block.evaluate((element, index) => {
     const group = element.children[index];
-    return !!group && [...group.querySelectorAll('img')]
-      .some((image) => image.naturalWidth > 64 && image.naturalHeight > 64);
-  }, groupIndex).catch(() => false);
+    if (!group) return { found: false, loaded: false, remote: false, scheme: '' };
+    const images = [...group.querySelectorAll('img')]
+      .filter((image) => image.naturalWidth > 64 && image.naturalHeight > 64);
+    if (!images.length) return { found: true, loaded: false, remote: false, scheme: '' };
+    const src = String(images[0].currentSrc || images[0].src || '');
+    return { found: true, loaded: true, remote: /^https?:/i.test(src), scheme: src.split(':')[0] || '' };
+  }, groupIndex).catch(() => ({ found: false, loaded: false, remote: false, scheme: '' }));
+  const groupLoaded = async (groupIndex) => (await groupImageState(groupIndex)).loaded;
+  // 一张传完再喂下一张这条顺序不能去：预览是本地文件先渲染的，上传还在后台跑，
+  // 喂太快会把前一张的预览顶掉（现场旧 bug）。原先这里固定 sleep(2000) 纯等；
+  // 现在先等 src 变服务端地址（真·完成信号），最多 2000ms 兜底 —— 最坏等于改动前，
+  // 通常能提前几百毫秒到一秒多。每张记一条 thumbnail_settle，跑几单就能看出命中率。
+  const THUMBNAIL_SETTLE_CEILING_MS = 2000;
+  // 快路径也有地板：万一马帮的预览图从一开始就是 http 地址（不是 blob:），
+  // 那就等于没有完成信号，别把 2 秒保护直接砍成 0 —— 至少留 500ms，最坏只比改动前快一点。
+  const THUMBNAIL_SETTLE_FLOOR_MS = 500;
+  const waitForThumbnailSettle = async (groupIndex, color) => {
+    const startedAt = Date.now();
+    let state = await groupImageState(groupIndex);
+    while (state.loaded && Date.now() - startedAt < THUMBNAIL_SETTLE_CEILING_MS) {
+      if (state.remote && Date.now() - startedAt >= THUMBNAIL_SETTLE_FLOOR_MS) break;
+      await sleep(250);
+      state = await groupImageState(groupIndex);
+    }
+    const elapsed = Date.now() - startedAt;
+    // 没等到服务端地址：把剩下的固定等待补齐，保持改动前那套保守时序。
+    if (!state.remote && elapsed < THUMBNAIL_SETTLE_CEILING_MS) {
+      await sleep(THUMBNAIL_SETTLE_CEILING_MS - elapsed);
+    }
+    const final = await groupImageState(groupIndex);
+    attrPickDebug({
+      phase: 'thumbnail_settle', color,
+      settle_ms: Date.now() - startedAt,
+      remote_src_seen: Boolean(final.remote),
+      loaded: Boolean(final.loaded),
+      src_scheme: final.scheme || '',
+    });
+    return { settled: Boolean(final.loaded), remote: Boolean(final.remote) };
+  };
   const uploadOne = async (color, upload) => {
     const groupIndex = await resolveGroupIndex(color);
     if (await groupLoaded(groupIndex)) return 'variant_thumbnail_already_uploaded';
@@ -6706,11 +6832,10 @@ async function uploadVariantThumbnails(frame, task) {
       await new Promise((resolve) => setTimeout(resolve, 200));
     }
     if (!(await groupLoaded(groupIndex))) return null;
-    // The preview renders from the local file before the COS upload finishes;
-    // rapid successive uploads raced and dropped all but one preview. Let the
-    // async upload settle, then confirm the preview is still there.
-    await sleep(2000);
-    return (await groupLoaded(groupIndex)) ? 'uploaded' : null;
+    // 预览在了，但后台上传可能还没完：等它真的传完（src 变服务端地址）再喂下一张，
+    // 别让下一张把这张顶掉。2000ms 内没等到就按原来的固定等待走完。
+    const settle = await waitForThumbnailSettle(groupIndex, color);
+    return settle.settled ? 'uploaded' : null;
   };
   const methods = {};
   let pending = entries.filter(([color]) => !methods[color]);
@@ -7118,6 +7243,46 @@ async function readSaveRejectionTexts(frame) {
   }, [SAVE_REJECTION_SELECTORS, SAVE_REJECTION_HINTS]).catch(() => []);
 }
 
+// 保存校验一轮要读的东西：成功提示 / productId / 发布守卫 / 拒绝文案。
+// 原来分两次 evaluate，每次都要 document.body.innerText —— 大表单上 innerText 会强制
+// layout，等于每 500ms 做两遍重活（validate_before_save 当年跑出 546s 就是同款地雷）。
+// 合并成一次：一次 body 文本同时喂「成功提示」和「拒绝文案」，拒绝文案的结点选择器/
+// 可见性判据与 readSaveRejectionTexts 完全一致。
+async function readSaveSignals(frame) {
+  const empty = { success_message: false, product_id: false, publish_clicked: false, rejection_texts: [] };
+  return frame.evaluate(([selector, hints]) => {
+    const visible = (node) => {
+      if (!node) return false;
+      const style = window.getComputedStyle(node);
+      if (style.display === 'none' || style.visibility === 'hidden' || Number(style.opacity) === 0) return false;
+      const rect = node.getBoundingClientRect();
+      return rect.width > 0 && rect.height > 0;
+    };
+    const rejection = [...document.querySelectorAll(selector)]
+      .filter(visible)
+      .map((node) => String(node.innerText || node.textContent || '').trim())
+      .filter(Boolean);
+    const bodyText = String((document.body && document.body.innerText) || '');
+    for (const line of bodyText.split(/\n+/)) {
+      const trimmed = line.trim();
+      if (trimmed && trimmed.length <= 300 && hints.some((hint) => trimmed.includes(hint))) {
+        rejection.push(trimmed);
+      }
+    }
+    const success = ['\u4fdd\u5b58\u6210\u529f', '\u64cd\u4f5c\u6210\u529f', '\u8349\u7a3f\u4fdd\u5b58\u6210\u529f']
+      .find((label) => bodyText.includes(label)) || '';
+    const productId = /(?:productId|product_id|id)=[0-9]+/.test(location.href)
+      || Boolean(document.querySelector('[data-product-id]'));
+    const guard = window.__AI_LISTING_PUBLISH_GUARD__ || {};
+    return {
+      success_message: Boolean(success),
+      product_id: productId,
+      publish_clicked: Boolean(guard.publishClicked),
+      rejection_texts: [...new Set(rejection)].slice(0, 20),
+    };
+  }, [SAVE_REJECTION_SELECTORS, SAVE_REJECTION_HINTS]).catch(() => empty);
+}
+
 // 提示也可能挂在父页面而不是详情 iframe 上：详情 frame 没读到就顺带扫一遍其它 frame。
 async function readSaveRejectionTextsAcrossFrames(page, detailFrame) {
   const own = await readSaveRejectionTexts(detailFrame);
@@ -7230,24 +7395,38 @@ async function savedDetailPageIsClosed(page) {
   return false;
 }
 
+// 保存后等详情页关闭。原来纯轮询：每 200ms 跑一次 savedDetailPageIsClosed（要跨 frame
+// 找「刊登草稿箱」文案、要 isDetached/getByText），而且上限给到 8 秒 —— 页面其实已经关了
+// 也得白等到 3 次连续命中；页面根本不关（只弹窗消失）就是整整 8 秒空转，现场收尾中位
+// 22.9 秒大头就在这里。现在：
+//   ① 页面 close 事件是最快信号（关标签页会派发），一有事件立刻返回；
+//   ② 保留 probe 兜底：有种收尾是弹窗关掉、页面自己回到列表（不关标签页）；
+//   ③ 上限降到 2.5 秒 —— 超时就交给调用方 page.close() 兜底，结果一样是「关掉」。
 async function waitForSavedDetailPageToClose(page, options = {}) {
-  const timeoutMs = Number(options.timeoutMs || 8000);
+  const timeoutMs = Number(options.timeoutMs || 2500);
   const intervalMs = Number.isFinite(options.intervalMs) ? Number(options.intervalMs) : 200;
   const stableRequired = Number(options.stableRequired || 3);
   const closureProbe = options.closureProbe || savedDetailPageIsClosed;
   const deadline = Date.now() + timeoutMs;
   let stableClosureMatches = 0;
+  let eventClosed = false;
+  const eventWait = typeof page.waitForEvent === 'function'
+    ? page.waitForEvent('close', { timeout: timeoutMs })
+      .then(() => { eventClosed = true; })
+      .catch(() => {})
+    : Promise.resolve();
   while (Date.now() < deadline) {
-    if (page.isClosed()) return true;
+    if (page.isClosed() || eventClosed) return true;
     if (await closureProbe(page)) {
       stableClosureMatches += 1;
       if (stableClosureMatches >= stableRequired) return true;
     } else {
       stableClosureMatches = 0;
     }
-    await new Promise((resolve) => setTimeout(resolve, intervalMs));
+    // 睡一个轮询间隔，但 close 事件一到就醒。
+    await Promise.race([eventWait, new Promise((resolve) => setTimeout(resolve, intervalMs))]);
   }
-  return page.isClosed();
+  return page.isClosed() || eventClosed;
 }
 
 async function closeSavedDetailPage(page, frame) {
@@ -7407,19 +7586,19 @@ async function verifySavedDraftEvidence(page, frame, saveResult, task, stages = 
   const deadline = Date.now() + 15000;
   let evidence = {};
   while (Date.now() < deadline) {
-    evidence = await frame.evaluate(() => {
-      const text = String(document.body && document.body.innerText || '');
-      const success = ['\u4fdd\u5b58\u6210\u529f', '\u64cd\u4f5c\u6210\u529f', '\u8349\u7a3f\u4fdd\u5b58\u6210\u529f'].find((label) => text.includes(label)) || '';
-      const productId = /(?:productId|product_id|id)=[0-9]+/.test(location.href) || Boolean(document.querySelector('[data-product-id]'));
-      const guard = window.__AI_LISTING_PUBLISH_GUARD__ || {};
-      return { success_message: Boolean(success), product_id: productId, publish_clicked: Boolean(guard.publishClicked) };
-    }).catch(() => ({ success_message: false, product_id: false, publish_clicked: false }));
+    // 一次 evaluate 同时拿成功证据和拒绝文案（原来两次，各读一遍整页 innerText）。
+    const signals = await readSaveSignals(frame);
+    evidence = {
+      success_message: signals.success_message,
+      product_id: signals.product_id,
+      publish_clicked: signals.publish_clicked,
+    };
     if (evidence.publish_clicked) {
       throw new BlockedError('publish_guard_triggered_after_save');
     }
     // 马帮拒绝保存的提示优先于证据计数：只要页面上出现了「描述图片宽度 < 700」这类
     // 拒绝文案，这次保存就没落草稿，不该再等出 save_result_not_proven。
-    const rejection = classifySaveRejection(await readSaveRejectionTexts(frame));
+    const rejection = classifySaveRejection(signals.rejection_texts || []);
     if (rejection) throw saveRejectionError(rejection, evidence, saveResult);
     const networkResponse = (saveResult.network || []).length > 0;
     const evidenceCount = [evidence.success_message, evidence.product_id, networkResponse].filter(Boolean).length;
@@ -7846,6 +8025,7 @@ module.exports = {
   TEXT,
   PUBLISH_TEXTS,
   disableSkuWeight,
+  axisValuePresent,
   matchSiteSkuRows,
   verifySiteSkuReadback,
   fillLogisticsInfo,

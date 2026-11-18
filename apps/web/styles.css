@@ -7705,3 +7705,123 @@ button.mini {
 #cnsc-target-th-large[hidden] {
   display: none !important;
 }
+
+/* Excel 商品导入：预览表 + 逐商品进度。显式压回 [hidden]，避免被通用 display 规则顶掉。 */
+#excel-import-preview[hidden],
+#excel-import-progress[hidden],
+#excel-import-warnings[hidden],
+#excel-import-retry-btn[hidden] {
+  display: none !important;
+}
+
+#excel-import-dialog {
+  width: min(1080px, calc(100vw - 32px));
+}
+
+.excel-import-file-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  margin: 8px 0 4px;
+}
+
+.excel-import-summary {
+  margin: 8px 0;
+  color: var(--muted);
+  font-size: 12.5px;
+}
+
+.excel-import-table-wrap {
+  max-height: 46vh;
+  overflow: auto;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+}
+
+.excel-import-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12.5px;
+}
+
+.excel-import-table th,
+.excel-import-table td {
+  padding: 6px 8px;
+  border-bottom: 1px solid var(--line);
+  text-align: left;
+  vertical-align: top;
+  white-space: nowrap;
+}
+
+.excel-import-table th {
+  position: sticky;
+  top: 0;
+  background: var(--panel-soft);
+  z-index: 1;
+  font-weight: 600;
+}
+
+.excel-import-table td:nth-child(3),
+.excel-import-table td:nth-child(5) {
+  white-space: normal;
+  min-width: 160px;
+}
+
+.excel-import-table td:nth-child(3) {
+  min-width: 220px;
+}
+
+.excel-import-status-cell {
+  color: var(--muted);
+}
+
+.excel-import-warnings {
+  margin: 8px 0 0;
+  padding-left: 18px;
+  color: var(--amber-ink, #8a5a00);
+  font-size: 12px;
+  max-height: 16vh;
+  overflow: auto;
+}
+
+.excel-import-progress-list {
+  margin: 6px 0 0;
+  padding-left: 18px;
+  max-height: 40vh;
+  overflow: auto;
+  font-size: 12.5px;
+}
+
+.excel-import-progress-item {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 3px 0;
+}
+
+.excel-import-progress-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.excel-import-progress-status {
+  color: var(--muted);
+  white-space: nowrap;
+}
+
+.excel-import-progress-succeeded .excel-import-progress-status {
+  color: var(--green-ink, #0b7a3b);
+}
+
+.excel-import-progress-failed .excel-import-progress-status {
+  color: var(--red-ink, #b42318);
+}
+
+/* 导入完成后把第一张新卡片滚进视野并短暂描边，明确告诉操作员「刚进来的是这些」。 */
+.product-card--imported {
+  outline: 2px solid var(--indigo-ink, #4338ca);
+  outline-offset: 2px;
+}
+

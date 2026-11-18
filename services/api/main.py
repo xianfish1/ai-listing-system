@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import io
 import json
 import gzip
@@ -23,7 +24,7 @@ from socketserver import TCPServer
 from typing import Any
 from urllib.parse import parse_qs, urlparse
 
-from services.api import asset_thumbnails, disk_cleanup, github_updates, keyword_workbench, network_access, project_plan, settings, storage, title_selection, title_skill_presets
+from services.api import asset_thumbnails, disk_cleanup, excel_import_tasks, github_updates, keyword_workbench, network_access, project_plan, settings, storage, title_selection, title_skill_presets
 from services.api.subprocess_utils import no_console_window_kwargs
 from services.api.runtime_configuration import (
     worker_idle_shutdown_seconds,
@@ -82,6 +83,8 @@ MAX_VIDEO_BODY_BYTES = 42_000_000
 MAX_IMAGE_UPLOAD_BODY_BYTES = 16 * 1024 * 1024
 # 关键词 Excel 走 base64 JSON：文件上限 12 MB × 4/3 ≈ 16.8 MB，留到 20 MB。
 MAX_KEYWORD_IMPORT_BODY_BYTES = 20 * 1024 * 1024
+# 商品导出 Excel 也是 base64 JSON；马帮在线商品导出文件通常 < 1 MB，给足余量。
+MAX_EXCEL_IMPORT_BODY_BYTES = 20 * 1024 * 1024
 MAX_LOCAL_UPLOAD_FILE_BYTES = 512 * 1024 * 1024
 _WORKER_SUPERVISOR: WorkerSupervisor | None = None
 _WORKER_RUNTIME_DIR: Path | None = None
@@ -3261,6 +3264,14 @@ class ApiHandler(BaseHTTPRequestHandler):
             self._json(task)
             return
 
+        if path.startswith("/api/excel-import/tasks/"):
+            task_id = path.rsplit("/", 1)[-1].strip()
+            snapshot = excel_import_tasks.task_snapshot(settings.STORAGE_DIR, task_id)
+            if snapshot is None:
+                raise ApiRequestError("Excel 导入任务不存在", status=404)
+            self._json(snapshot)
+            return
+
         if path == "/api/store-templates":
             # 模板按马帮账号隔离：传 account_id 只看该账号的模板。
             self._json({"items": storage.list_store_templates(account_id=(query.get("account_id") or [""])[0])})
@@ -4004,6 +4015,40 @@ class ApiHandler(BaseHTTPRequestHandler):
                 raise ApiRequestError(str(exc), 422) from exc
             self._json(product, status=201)
             return
+        if path == "/api/excel-import/preview":
+            payload = self._read_json(max_bytes=MAX_EXCEL_IMPORT_BODY_BYTES)
+            raw = str(payload.get("file_base64") or "").strip()
+            if not raw:
+                raise ApiRequestError("file_base64 is required", status=422)
+            try:
+                content = base64.b64decode(raw, validate=True)
+            except ValueError as exc:
+                raise ApiRequestError("Excel 文件内容无效", status=422) from exc
+            try:
+                result = excel_import_tasks.create_batch(
+                    settings.STORAGE_DIR,
+                    content,
+                    file_name=str(payload.get("file_name") or ""),
+                )
+            except excel_import_tasks.ExcelImportError as exc:
+                raise ApiRequestError(str(exc), status=422) from exc
+            self._json(result, status=201)
+            return
+        if path == "/api/excel-import/start":
+            payload = self._read_json()
+            keys = payload.get("keys")
+            if keys is not None and not isinstance(keys, list):
+                raise ApiRequestError("keys must be a list", status=422)
+            try:
+                result = excel_import_tasks.start_batch(
+                    settings.STORAGE_DIR,
+                    str(payload.get("batch_id") or ""),
+                    keys,
+                )
+            except excel_import_tasks.ExcelImportTaskError as exc:
+                raise ApiRequestError(str(exc), status=422) from exc
+            self._json(result, status=202)
+            return
         body_limit = (
             MAX_KEYWORD_IMPORT_BODY_BYTES
             if path == "/api/keyword-import/preview"
@@ -4685,6 +4730,17 @@ class ApiHandler(BaseHTTPRequestHandler):
             })
             return
 
+        if path.startswith("/api/mabang-page-imports/") and path.endswith("/cancel"):
+            run_id = path.strip("/").split("/")[2]
+            try:
+                result = storage.cancel_mabang_page_import(run_id)
+            except storage.MabangPageImportNotFound as exc:
+                raise ApiRequestError(str(exc), 404) from exc
+            except MabangPageImportError as exc:
+                raise ApiRequestError(str(exc), 422) from exc
+            self._json(result)
+            return
+
         if path.startswith("/api/mabang-page-imports/") and path.endswith("/complete"):
             run_id = path.strip("/").split("/")[2]
             try:
@@ -5296,6 +5352,14 @@ class ApiHandler(BaseHTTPRequestHandler):
             if result is None:
                 self._json({"error": "Category quick template not found"}, status=404)
                 return
+            self._json(result)
+            return
+        if path.startswith("/api/excel-import/batches/"):
+            batch_id = path.rsplit("/", 1)[-1].strip()
+            try:
+                result = excel_import_tasks.delete_batch(settings.STORAGE_DIR, batch_id)
+            except excel_import_tasks.ExcelImportTaskError as exc:
+                raise ApiRequestError(str(exc), status=422) from exc
             self._json(result)
             return
         if path.startswith("/api/local-folder-uploads/"):
@@ -6526,6 +6590,14 @@ def _warm_store_read_cache() -> None:
 
 def main() -> None:
     storage.ensure_dirs()
+    # 上一次进程遗留的「进行中」页面导入已经失效：先清掉，否则 Worker 起来后
+    # 会以为操作员还在用采集浏览器，一直等（任务全部待领取）。
+    try:
+        cleared = storage.cancel_interrupted_page_imports()
+        if cleared:
+            print(f"Cleared {cleared} interrupted page import session(s) on startup")
+    except Exception as exc:  # noqa: BLE001 - 清理失败不能挡住 API 启动
+        print(f"Clear interrupted page imports failed: {exc}")
     runtime_config = storage.get_runtime_configuration()
     worker_config = runtime_config["worker"]
     initial_host = network_access.resolve_bind_host(runtime_config.get("network") or {})
