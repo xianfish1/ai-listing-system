@@ -2196,7 +2196,7 @@ test('描述�?��插本地尺码图：走「上传图片�?�页签，插
   assert.match(uploadBody, /return String\(added\[added\.length - 1\] \|\| ''\);/);
   // 插进去之后并�?existing：去重�?�顺序�?�位�?��验与「网络图片�?�那条路完全�?致�??
   assert.match(source, /sizeChartExisting = \[\.\.\.existing, sizeChartUrl\]\.filter\(Boolean\);/);
-  assert.match(source, /const plan = buildDescriptionMediaPlan\(\{ sizeChartUrl, productImageUrls \}\);/);
+  assert.match(source, /const plan = buildDescriptionMediaPlan\(\{\s*sizeChartUrl,\s*productImageUrls,\s*maxImages: descriptionMediaMaxImages\(task\) \|\| 0,\s*\}\);/);
   assert.match(source, /const pending = missingDescriptionMedia\(plan, sizeChartExisting\);/);
   // �?��图没传上去只降级为�?告，产品图照插�??
   assert.match(source, /warnings\.push\('description_size_chart_upload_failed'\);/);
@@ -2248,6 +2248,43 @@ test('描述插图计划：尺码表在前、产品图全部插入（不再截�
   const max = source.match(/const DESCRIPTION_MEDIA_MAX_IMAGES = (\d+);/);
   assert.ok(max && Number(max[1]) >= 20, '收集上限必须远大于商品图上限，否则还�?���?���?');
   assert.doesNotMatch(source, /DESCRIPTION_MEDIA_LIMIT/);
+});
+
+test('站点描述配图上限：MY 3 张（含尺码表）、ID 0 张整步跳过', () => {
+  // 任务下发的上限（services/api/description_media_policy.py）：MY=3 张含尺码表。
+  const myPlan = executor.buildDescriptionMediaPlan({
+    sizeChartUrl: 's',
+    productImageUrls: ['p1', 'p2', 'p3', 'p4'],
+    maxImages: 3,
+  });
+  assert.deepEqual(myPlan, [
+    { kind: 'size_chart', url: 's' },
+    { kind: 'product_image', url: 'p1' },
+    { kind: 'product_image', url: 'p2' },
+  ]);
+  // 尺码表没取到时，3 个名额全给产品图。
+  const noSizePlan = executor.buildDescriptionMediaPlan({
+    productImageUrls: ['p1', 'p2', 'p3', 'p4'],
+    maxImages: 3,
+  });
+  assert.deepEqual(noSizePlan.map((entry) => entry.url), ['p1', 'p2', 'p3']);
+  // 不限（null/缺省）时保持原行为：全部产品图。
+  const unlimited = executor.buildDescriptionMediaPlan({ sizeChartUrl: 's', productImageUrls: ['p1', 'p2', 'p3', 'p4'] });
+  assert.deepEqual(unlimited.map((entry) => entry.url), ['s', 'p1', 'p2', 'p3', 'p4']);
+
+  assert.equal(executor.descriptionMediaMaxImages({ description_media: { max_images: 0 } }), 0);
+  assert.equal(executor.descriptionMediaMaxImages({ description_media: { max_images: 3 } }), 3);
+  assert.equal(executor.descriptionMediaMaxImages({ description_media: { max_images: null } }), null);
+  assert.equal(executor.descriptionMediaMaxImages({}), null);
+
+  // ID=0：整步跳过，不碰编辑器；尺码表仍走「尺码图表」字段。
+  const source = fs.readFileSync(path.join(__dirname, '../scripts/mabang_playwright_executor.cjs'), 'utf8');
+  assert.match(source, /if \(maxImages === 0\) \{[\s\S]{0,260}?description_media_disabled_for_market/);
+  assert.match(source, /maxImages: descriptionMediaMaxImages\(task\) \|\| 0,/);
+  // 老草稿里已有图超过站点上限：只报警告让运营手动删，不自动删图。
+  assert.match(source, /warnings\.push\('description_media_over_limit'\);/);
+  const app = fs.readFileSync(path.join(__dirname, '../apps/web/app.js'), 'utf8');
+  assert.match(app, /description_media_over_limit: "描述里已有的图片超过该站点上限/);
 });
 
 test('引用产品图弹窗：按地�?勾�?�待插的图，全部产品图都能插�?', async () => {

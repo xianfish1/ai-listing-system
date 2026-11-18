@@ -2936,7 +2936,7 @@ function renderSizeChartSource(source = "upload") {
   const hint = $("store-template-size-chart-file-name");
   if (hint && !state.sizeChartAsset?.id) {
     hint.textContent = normalized === "template"
-      ? "选择模板时，这张图会插到商品描述末尾 · PNG / JPEG / WebP"
+      ? "选择模板时，这张图会插到商品描述末尾（站点不允许描述插图时不插） · PNG / JPEG / WebP"
       : "PNG / JPEG / WebP · 建议 <2MB";
   }
   renderStoreTemplateSizeChartPreview();
@@ -12943,6 +12943,7 @@ const AUTOMATION_ERROR_LABELS = {
   description_media_position_unrepaired: "描述图片位置没修好（撤销没把图撤回去），本次插图已停止，请人工调整描述末尾",
   description_media_existing_position_not_at_tail: "描述里已有的图片不在末尾（可能在正文中间），请人工调整描述末尾",
   description_media_order_unexpected: "描述插图顺序不对，已尝试撤回本次插入，请检查描述末尾",
+  description_media_over_limit: "描述里已有的图片超过该站点上限（马来站最多 3 张），请手动删掉多余的图",
   description_size_chart_not_inserted: "尺码图没插进描述，已尝试撤回本次插入",
   description_product_images_not_inserted: "产品图没插进描述，已尝试撤回本次插入",
   description_caret_not_at_end: "描述正文没滚到底，本次未插图（描述未改动）",

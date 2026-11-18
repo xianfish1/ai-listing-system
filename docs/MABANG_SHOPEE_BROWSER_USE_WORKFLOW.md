@@ -369,6 +369,13 @@ to CDP. Consequences worth knowing:
      size chart URL. Both insert at the caret, so the caret must sit at the end of the
      description body; the executor's `append_description_media` stage does this and
      verifies the images really landed at the tail (undo + retry otherwise).
+     - Per-market caps come from the store's `country` and are sent in the task as
+       `description_media.max_images` (single source of truth:
+       `services/api/description_media_policy.py`): **MY = 3 images total** (the size
+       chart counts as one, so it is the size chart + 2 product images) and **ID = 0**
+       (Indonesia forbids description images, so the whole stage is skipped; the size
+       chart still goes to the 尺码图表 field). Any other market keeps "size chart +
+       all product images".
 9. Set product type to variation.
 10. Create `color` and `size` variation attributes.
 11. Upload color thumbnails with ASCII temp files.

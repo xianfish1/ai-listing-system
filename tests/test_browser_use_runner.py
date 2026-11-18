@@ -374,6 +374,31 @@ def test_description_media_action_is_site_only_and_follows_image_upload(tmp_path
     assert "append_description_media" not in [action["type"] for action in cnsc_task["actions"]]
 
 
+def test_task_plan_carries_the_store_market_description_media_limit(tmp_path: Path) -> None:
+    """描述配图上限按站点下发：MY 最多 3 张（含尺码表），ID 一张都不插，其它站不限。"""
+    my_task = browser_use_runner.build_browser_use_task_plan(_ready_payload(), tmp_path / "uploads", allow_save=True)
+    assert my_task["description_media"] == {"country": "MY", "max_images": 3}
+    my_label = next(
+        action["label"] for action in my_task["actions"] if action["type"] == "append_description_media"
+    )
+    assert "最多 3 张" in my_label
+
+    id_payload = _ready_payload()
+    id_payload["listing_copy"]["country"] = "ID"
+    id_task = browser_use_runner.build_browser_use_task_plan(id_payload, tmp_path / "uploads", allow_save=True)
+    assert id_task["description_media"] == {"country": "ID", "max_images": 0}
+    assert "append_description_media" not in [action["type"] for action in id_task["actions"]]
+
+    ph_payload = _ready_payload()
+    ph_payload["listing_copy"]["country"] = "PH"
+    ph_task = browser_use_runner.build_browser_use_task_plan(ph_payload, tmp_path / "uploads", allow_save=True)
+    assert ph_task["description_media"] == {"country": "PH", "max_images": None}
+    ph_label = next(
+        action["label"] for action in ph_task["actions"] if action["type"] == "append_description_media"
+    )
+    assert ph_label == "在商品描述末尾追加尺码表与全部产品图"
+
+
 def test_task_plan_uses_the_grid_order_from_browser_inputs(tmp_path: Path) -> None:
     """SKU 网格顺序必须来自 browser_inputs，而不是快照顶层那份。
 

@@ -26,6 +26,10 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from services.api import settings, storage  # noqa: E402
+from services.api.description_media_policy import (  # noqa: E402
+    description_media_max_images,
+    normalize_country,
+)
 from services.api.listing_modes import (  # noqa: E402
     is_cnsc_page,
     is_local_like,
@@ -492,6 +496,23 @@ def build_browser_use_task_plan(
     listing_mode = normalize_listing_mode(
         browser_inputs.get("listing_mode") or listing_copy.get("listing_mode")
     )
+    # 商品描述配图上限按站点（国家）走：MY 最多 3 张、ID 一张都不插（见
+    # services/api/description_media_policy.py）。None = 不限（尺码表 + 全部产品图）。
+    description_country = normalize_country(
+        browser_inputs.get("country") or listing_copy.get("country")
+    )
+    description_media_limit = description_media_max_images(description_country)
+    description_media_actions: list[dict[str, str]] = []
+    if is_local_like(listing_mode) and description_media_limit != 0:
+        if description_media_limit is None:
+            description_media_label = "在商品描述末尾追加尺码表与全部产品图"
+        else:
+            description_media_label = (
+                f"在商品描述末尾追加尺码表与产品图（该站点描述最多 {description_media_limit} 张图）"
+            )
+        description_media_actions.append(
+            {"type": "append_description_media", "label": description_media_label}
+        )
 
     return {
         "ok": True,
@@ -522,6 +543,12 @@ def build_browser_use_task_plan(
         },
         "category_attributes": category_attributes,
         "category_attribute_fields": category_attribute_fields,
+        # 描述配图上限：country 只用于日志/排查，执行器只看 max_images
+        # （None = 不限，0 = 整步跳过，N = 含尺码表在内最多 N 张）。
+        "description_media": {
+            "country": description_country,
+            "max_images": description_media_limit,
+        },
         # AI 属性推荐使用冻结的商品事实作为上下文；模板缺失时仍由页面现场
         # options 约束可选值，重试不会重新读取已变化的基础商品。
         "recognized_attributes": deepcopy(listing_copy.get("recognized_attributes") or {}),
@@ -584,7 +611,7 @@ def build_browser_use_task_plan(
             {"type": "set_category_attributes", "label": "填写分类属性"},
             {"type": "fill_basic_info", "label": "填写标题、描述和 Parent SKU"},
             {"type": "upload_product_images", "label": "上传并排序 9 张商品图"},
-            *([{"type": "append_description_media", "label": "在商品描述末尾追加尺码表与全部产品图"}] if is_local_like(listing_mode) else []),
+            *description_media_actions,
             {"type": "apply_main_image_watermark", "label": "应用主图水印"},
             {"type": "apply_product_image_watermark", "label": "应用产品图水印"},
             {"type": "upload_product_video", "label": "上传商品视频"},

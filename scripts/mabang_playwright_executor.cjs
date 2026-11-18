@@ -3638,6 +3638,22 @@ const DESCRIPTION_TAIL_SETTLE_MS = 800;
 // 「上传图片」要把本地文件发给马帮、等它回地址再落到正文，比按地址引用慢一截。
 const DESCRIPTION_SIZE_CHART_UPLOAD_TIMEOUT = 60000;
 
+// 站点描述配图上限（任务里 description_media.max_images，由 runner 按国家下发）：
+//   null/缺省 → 不限（沿用上面的收集护栏）；
+//   0         → 描述里一张图都不插（印尼站），整步跳过；
+//   N         → 描述里一共最多 N 张（尺码表也算一张，排第一）。
+// 国家表只有一份（services/api/description_media_policy.py），执行器不重复维护，
+// 旧任务快照没有这个字段时按不限处理（不改变已完成任务的行为）。
+function descriptionMediaMaxImages(task) {
+  const bucket = (task && task.description_media) || {};
+  const raw = bucket.max_images;
+  if (raw === null || raw === undefined || raw === '') return null;
+  const value = Number(raw);
+  if (!Number.isFinite(value)) return null;
+  return Math.max(0, Math.floor(value));
+}
+
+
 // ---------------------------------------------------------------------------
 // 平台差异：撤销、「跳到文末」的快捷键。
 //
@@ -3846,13 +3862,22 @@ async function waitForSizeChartPreviewUrl(frame, timeoutMs = DESCRIPTION_MEDIA_T
 }
 
 // 描述末尾要插的图片顺序：尺码表图在前，产品图（全部）在后。
-function buildDescriptionMediaPlan({ sizeChartUrl = '', productImageUrls = [], limit = DESCRIPTION_MEDIA_MAX_IMAGES } = {}) {
+// maxImages 是站点上限（含尺码表那张）：给 3 且尺码图存在时＝尺码表 + 2 张产品图；
+// 不给/为 0 时保持原行为（产品图按 limit 收集上限截断）。
+function buildDescriptionMediaPlan({
+  sizeChartUrl = '',
+  productImageUrls = [],
+  limit = DESCRIPTION_MEDIA_MAX_IMAGES,
+  maxImages = 0,
+} = {}) {
   const plan = [];
   if (sizeChartUrl) plan.push({ kind: 'size_chart', url: sizeChartUrl });
-  for (const url of (productImageUrls || []).filter(Boolean).slice(0, limit)) {
+  const capped = Number(maxImages) > 0;
+  const budget = capped ? Math.max(0, Number(maxImages) - plan.length) : limit;
+  for (const url of (productImageUrls || []).filter(Boolean).slice(0, budget)) {
     plan.push({ kind: 'product_image', url });
   }
-  return plan;
+  return capped ? plan.slice(0, Number(maxImages)) : plan;
 }
 
 // 描述里要用哪几张产品图：把「顶在产品图区末位的尺码表」去掉。
@@ -4422,6 +4447,12 @@ async function appendDescriptionMediaOnce(frame, task) {
   const sizeChartSource = descriptionSizeChartSource(task);
   const productImageUrlCandidates = await collectProductImageUrls(frame).catch(() => []);
   const warnings = [];
+  // 站点描述配图上限（MY=3）：老草稿/复用页面里已经插过更多图时自动删不安全，
+  // 报出来让运营手动删（非阻断，草稿照常保存）。
+  const siteMaxImages = descriptionMediaMaxImages(task);
+  if (siteMaxImages && existing.length > siteMaxImages) {
+    warnings.push('description_media_over_limit');
+  }
   // 尺码表图先落地：上传图片那条路要先把本地文件插进正文，才能拿到马帮给的地址，
   // 之后按地址走的计划/去重/顺序/位置校验与「网络图片」那条路完全一致。
   let sizeChartUrl = '';
@@ -4480,7 +4511,11 @@ async function appendDescriptionMediaOnce(frame, task) {
   });
   const productImageUrls = productImageSelection.urls;
   const sizeChartExcluded = productImageSelection.dropped;
-  const plan = buildDescriptionMediaPlan({ sizeChartUrl, productImageUrls });
+  const plan = buildDescriptionMediaPlan({
+    sizeChartUrl,
+    productImageUrls,
+    maxImages: descriptionMediaMaxImages(task) || 0,
+  });
   if (!plan.length) throw new BlockedError('description_media_source_missing');
   const sizeCharts = plan.filter((entry) => entry.kind === 'size_chart').length;
   const productImages = plan.filter((entry) => entry.kind === 'product_image').length;
@@ -4695,6 +4730,14 @@ async function insertDescriptionMediaBatch(frame, context, pending, sizeChartUrl
 async function appendDescriptionMedia(frame, task) {
   // 跨境 CNSC 的描述页没有这套插图入口；跨境 3PF 按本土要求尝试，失败只降级成警告。
   if (isPureCnscMode((task.store || {}).listing_mode)) return { skipped: true };
+  // 站点限制一张都不许插（印尼站）：整步跳过，连编辑器都不碰。
+  // 尺码表图仍然走「尺码图表」字段（upload_product_images 那条路），只是不进描述。
+  const maxImages = descriptionMediaMaxImages(task);
+  if (maxImages === 0) {
+    const skipped = { skipped: true, reason: 'description_media_disabled_for_market', max_images: maxImages };
+    emit('stage', { stage: 'append_description_media', ...skipped });
+    return skipped;
+  }
   try {
     const result = await appendDescriptionMediaOnce(frame, task);
     // 步骤追踪只留 stage/ok，具体是哪条路（upload / upload-reinsert / already）与
@@ -8031,6 +8074,7 @@ module.exports = {
   fillLogisticsInfo,
   appendDescriptionMedia,
   buildDescriptionMediaPlan,
+  descriptionMediaMaxImages,
   descriptionProductImageUrls,
   missingDescriptionMedia,
   descriptionMediaAppendedAtTail,
