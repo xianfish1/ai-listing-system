@@ -119,5 +119,20 @@ storage\   ← 截图 / 导出 / 更新缓存等运行时文件
 - **打不开页面**：确认 `start-api-silent.vbs` 已运行；看 `data\api-runtime\api.err.log`。
 - **导出报模板缺失**：确认 NAS `\\Juns\产品编辑部\宁\产品导入示例模板 (1).xlsx` 可达，
   或把模板路径写进 `.env` 的 `MABANG_TEMPLATE_PATH`。
-- **更新**：更新通道（GitHub Release）需要在设置页配 Token；没有配置时手动用新部署包
-  解压覆盖即可（不要覆盖 `data\` 与 `storage\`）。
+
+## 在线更新（GitHub Release）
+
+新机装好后就能用应用内更新，不需要配 Token（仓库 `xianfish1/ai-listing-system` 是公开的，
+`DEFAULT_REPO` 已内置）：
+
+1. 侧栏底部的更新提醒点开，或 **设置 → 版本更新 → 检查更新**；
+2. 有新版本点 **立即更新**，下载 GitHub Release 的安装包（zip + sha256），校验 manifest
+   后原地替换代码文件；
+3. `data\`、`storage\` 不会被覆盖，更新后按提示重启 API。
+
+- **Token 只在「自己发新版」时才需要**（设置页填 owner/repo + Token）；只更新不发布可以不填。
+- 更新安装包是**瘦包**（不含 `vendor\chrome` / 模板），只用于已有部署的增量更新；
+  新机首次部署仍用本目录的 `*-deploy-full.zip` 手动解压，**不要**把 deploy-full 包喂给更新器。
+- 网络需要代理时，在 `.env` 里加 `GITHUB_UPDATE_PROXY=http://127.0.0.1:<端口>`
+  （`api.github.com` 默认直连，见 `.env.example` 说明），改完重启 API。
+
