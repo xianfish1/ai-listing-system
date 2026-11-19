@@ -284,7 +284,7 @@ def _find_group_dirs(root: Path, limit: int = 200) -> list[Path]:
                 except OSError:
                     continue
                 child = Path(entry.path)
-                if _extract_group_token(entry.name.upper()):
+                if _extract_group_token(entry.name):
                     result.append(child)
                     if len(result) >= limit:
                         break
@@ -400,7 +400,7 @@ def _detect_group_root(root: Path, file_path: Path, group_id: str) -> Path:
 def _detect_default_group_id(root: Path) -> str:
     current = root
     for _ in range(4):
-        matched = _extract_group_token(current.name.upper())
+        matched = _extract_group_token(current.name)
         if matched:
             return matched
         if current.parent == current:
@@ -414,7 +414,7 @@ def _infer_category(root: Path, parts: tuple[str, ...], default_group_id: str) -
         # When scanning a single product folder, the first relative path part is
         # usually a file name, not a category. Use the parent material folder.
         parent = root.parent.name.strip()
-        if parent and _extract_group_token(parent.upper()) == default_group_id:
+        if parent and _extract_group_token(parent) == default_group_id:
             return root.parent.parent.name or "unknown"
         return parent or "unknown"
     return parts[0] if len(parts) >= 1 else "unknown"
@@ -423,42 +423,36 @@ def _infer_category(root: Path, parts: tuple[str, ...], default_group_id: str) -
 def _detect_group_id(parts: tuple[str, ...], fallback: str) -> str:
     for part in parts:
         normalized = part.upper()
-        matched = _extract_group_token(normalized)
+        matched = _extract_group_token(part)
         if matched:
             return matched
         if len(normalized) >= 4 and any(ch.isdigit() for ch in normalized):
             if normalized[:2].isalpha() or normalized[:1].isalpha():
                 return normalized
-    matched = _extract_group_token(fallback.upper())
+    matched = _extract_group_token(fallback)
     if matched:
         return matched
     return fallback.split("-")[0].split("_")[0].upper()
 
 
+# 主 SKU 形状：开头那串 ASCII 字母数字，遇到「中文/空格/符号」或「大写+小写开头的
+# 单词」（款式名 Retton）就截断；全大写后缀（YSC008P / AC4B7920）保留。
+# 2026-11-19：AL0839Retton 曾被导成 AL0839RETTON。
+# 与 services/api/storage.py::_derive_main_sku_from_folder_name 同一套口径——
+# 商品的 group_id（扫描器）和 main_sku（storage）必须来自同一条规则。
 def _extract_group_token(value: str) -> str:
-    token = []
-    started = False
-    for ch in value:
-        if ch.isascii() and ch.isalpha():
-            token.append(ch)
-            started = True
-            continue
-        if started and ch.isdigit():
-            token.append(ch)
-            continue
-        if started and token and any(c.isdigit() for c in token):
+    name = str(value or "").strip()
+    if not (name[:1].isascii() and name[:1].isalpha()):
+        return ""  # 年份/数字开头（2024夏季新款）不是 SKU
+    token: list[str] = []
+    for index, ch in enumerate(name):
+        if not (ch.isascii() and ch.isalnum()):
             break
-        if started and not ch.isascii():
+        if ch.isupper() and index + 1 < len(name) and name[index + 1].islower():
             break
-        if started and not ch.isalnum():
-            if any(c.isdigit() for c in token):
-                break
-            token = []
-            started = False
+        token.append(ch.upper())
     raw = "".join(token)
-    if len(raw) >= 4 and any(ch.isdigit() for ch in raw):
-        return raw
-    return ""
+    return raw if len(raw) >= 4 and any(ch.isdigit() for ch in raw) else ""
 
 
 def _detect_brand(parts: tuple[str, ...]) -> str:

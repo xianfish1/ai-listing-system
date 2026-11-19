@@ -10882,33 +10882,32 @@ def _derive_group_from_path(value: str) -> str:
 
 
 def _derive_main_sku_from_folder_name(value: str) -> str:
-    """Extract the main SKU from a NAS folder name: keep the leading run of
-    ASCII letters+digits and cut at the first Chinese/space/symbol character.
+    """Extract the main SKU from a NAS folder name.
 
-    Product folders are commonly named like ``AL0301男语言月`` (SKU glued to a
-    Chinese product name) or ``AL0002 我的世界`` — the old word-boundary regex
-    missed the glued form because CJK counts as a word char, so no ``\\b``
-    exists between the digits and the Chinese. Returns "" when the leading run
-    is not SKU-like (must start with a letter, be ≥4 chars and contain a
-    digit), mirroring the group-token rule the asset scanner uses
-    (workers/asset_scanner/scanner.py). Year-first names (``2024夏季新款``) do
-    not match and fall back to auto-assign."""
-    name = Path(str(value or "")).name.strip().upper()
+    文件夹一般是「SKU + 款式名」拼在一起的：``AL0301男语言月``（中文直接粘）、
+    ``AL0002 我的世界``（空格）、``AL0839Retton``（英文直接粘，没有分隔符）。
+    规则：取开头那串 ASCII 字母数字，遇到下面三种边界就截断——
+      1) 中文/空格/符号；
+      2) 「大写字母 + 小写字母」开头的单词：那是款式名（Retton / Ray / Tshirt），
+         不是 SKU 后缀（2026-11-19 现场：AL0839Retton 被导成 AL0839RETTON）。
+    保留全大写后缀（``YSC008P``、``AC4B7920`` 这类真实 SKU 形态）。
+    返回 "" 表示不像 SKU（纯中文/年份开头），由 auto-assign 兜底。
+
+    与素材扫描器 workers/asset_scanner/scanner.py::_extract_group_token 同一套规则：
+    两边口径必须一致，否则商品的 group_id 和 main_sku 会分叉。
+    """
+    name = Path(str(value or "")).name.strip()
+    if not (name[:1].isascii() and name[:1].isalpha()):
+        return ""  # 年份/数字开头（2024夏季新款）不是 SKU
     token: list[str] = []
-    for ch in name:
-        if token:
-            if ch.isascii() and (ch.isalpha() or ch.isdigit()):
-                token.append(ch)
-                continue
-            break  # Chinese / space / symbols (#, -, &, …) end the run
-        if ch.isascii() and ch.isalpha():
-            token.append(ch)  # token must start with a letter
-            continue
-        break  # digit-/symbol-/Chinese-led names never start a SKU token
+    for index, ch in enumerate(name):
+        if not (ch.isascii() and ch.isalnum()):
+            break  # 中文 / 空格 / 符号
+        if ch.isupper() and index + 1 < len(name) and name[index + 1].islower():
+            break  # 款式名的单词起点（Retton / Tshirt）
+        token.append(ch.upper())
     raw = "".join(token)
-    if len(raw) >= 4 and any(ch.isdigit() for ch in raw):
-        return raw
-    return ""
+    return raw if len(raw) >= 4 and any(ch.isdigit() for ch in raw) else ""
 
 
 def _auto_assign_sku_enabled(payload: dict[str, Any]) -> bool:

@@ -105,24 +105,20 @@
     };
   }
 
-  // 目录名 → 主 SKU，与后端 _derive_main_sku_from_folder_name 同一条规则：
-  // 以字母开头、连续字母数字、至少 4 位且带数字；不像 SKU 时返回 ''。
+  // 目录名 → 主 SKU。与后端 _derive_main_sku_from_folder_name、扫描器 _extract_group_token
+  // 同一条规则：以字母开头，取开头那串 ASCII 字母数字，但遇到「大写 + 小写开头的单词」
+  // （AL0839Retton 里的 Retton）就截断——那是款式名，不是 SKU 后缀；全大写后缀保留
+  // （YSC008P / AC4B7920）。至少 4 位且带数字，不像 SKU 时返回 ''。
   function folderSkuToken(name) {
-    const value = String(name || '').trim().toUpperCase();
+    const value = String(name || '').trim();
+    if (!value || !/[A-Za-z]/.test(value[0])) return '';
     let token = '';
-    for (const ch of value) {
-      if (!token) {
-        if (ch >= 'A' && ch <= 'Z') {
-          token += ch;
-          continue;
-        }
-        break;
-      }
-      if ((ch >= 'A' && ch <= 'Z') || (ch >= '0' && ch <= '9')) {
-        token += ch;
-        continue;
-      }
-      break;
+    for (let index = 0; index < value.length; index += 1) {
+      const ch = value[index];
+      if (!/[A-Za-z0-9]/.test(ch)) break;
+      const next = value[index + 1] || '';
+      if (/[A-Z]/.test(ch) && /[a-z]/.test(next)) break; // 款式名的单词起点
+      token += ch.toUpperCase();
     }
     return token.length >= 4 && /\d/.test(token) ? token : '';
   }

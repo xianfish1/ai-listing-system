@@ -3046,3 +3046,38 @@ def test_from_folder_mixed_numeric_leading_and_main_filenames_do_not_crash(tmp_p
     assert product["main_image"] == "main-01.jpg"
     # 所有 main/model 图都进了商品图列表
     assert set(product["product_images"]) == {"01-main.jpg", "main-01.jpg", "主图-2.jpg", "2.jpg", "Main-10.jpg"}
+
+
+def test_english_style_name_glued_to_the_sku_is_not_part_of_the_main_sku(tmp_path: Path) -> None:
+    """2026-11-19 现场：文件夹叫 AL0839Retton，主 SKU 被导成 AL0839RETTON。
+
+    主 SKU 只取「字母前缀 + 数字」，后面的英文款式名（Retton）不算 SKU，
+    但仍要是商品名（product_name_cn）。
+    """
+    product = storage.create_base_product_from_folder({
+        "root_path": str(_make_import_folder(tmp_path / "AL0839Retton")),
+        "category": "POD Mens T-Shirt",
+    })
+
+    assert product["main_sku"] == "AL0839"
+    assert product["group_id"] == "AL0839"
+    assert product["product_name_cn"] == "Retton"
+
+
+def test_sku_derivation_matches_the_asset_scanner_group_rule() -> None:
+    """storage 的主 SKU 和扫描器的 group token 必须是同一条规则，否则会分叉。"""
+    from workers.asset_scanner.scanner import _extract_group_token
+
+    for name in (
+        "AL0839Retton",
+        "AL0301男语言月",
+        "AL0002 我的世界",
+        "AL0839",
+        "HN0244_9",
+        "SKU-AL0839",
+        "AL0839RettonV2",
+        "T-SHIRT AL0839",
+        "2024夏季新款",
+        "纯中文文件夹",
+    ):
+        assert storage._derive_main_sku_from_folder_name(name) == _extract_group_token(name), name

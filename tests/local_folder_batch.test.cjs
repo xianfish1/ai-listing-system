@@ -343,3 +343,17 @@ test('SKU-named folder repeated under a different parent is still the same produ
   assert.deepEqual(result.groups.map((group) => group.folderName), ['HN0003']);
   assert.deepEqual(result.duplicates, [{ folderName: 'HN0001', reason: 'existing' }]);
 });
+
+test('folder SKU token cuts a glued style name but keeps real uppercase suffixes', () => {
+  // 2026-11-19 现场：AL0839Retton 被导成 AL0839RETTON。
+  assert.equal(batch.folderSkuToken('AL0839Retton'), 'AL0839');
+  assert.equal(batch.folderSkuToken('AL0301男语言月'), 'AL0301');
+  assert.equal(batch.folderSkuToken('AL0002 我的世界'), 'AL0002');
+  assert.equal(batch.folderSkuToken('AL0839RettonV2'), 'AL0839');
+  // 全大写后缀是 SKU 的一部分，不能截
+  assert.equal(batch.folderSkuToken('YSC008P'), 'YSC008P');
+  assert.equal(batch.folderSkuToken('AC4B7920'), 'AC4B7920');
+  // 非 SKU 形状
+  assert.equal(batch.folderSkuToken('2024夏季新款'), '');
+  assert.equal(batch.folderSkuToken('1 (2)'), '');
+});
