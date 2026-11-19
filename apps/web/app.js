@@ -2348,6 +2348,13 @@ async function loadStorePromotions(keepActivityId = "") {
     : '<option value="">活动未配置</option>';
   select.disabled = !items.some((item) => !item.retained);
   renderStorePromotionStatus(data.status);
+  // 活动目录是**按店铺**的（同店铺的模板共用，不同店铺各自采集；不按国家共用）。
+  // 这个店铺一条可用活动都没有、也没有采集状态记录 → 明确告诉操作员要在这个店铺采集一次。
+  const statusEl = $("store-template-promotion-status");
+  const hasSelectable = items.some((item) => !item.retained);
+  if (!hasSelectable && !data.status && statusEl && !String(statusEl.textContent || "").trim()) {
+    statusEl.textContent = "该店铺还没采集活动目录：点「重新采集活动」（浏览器要停在马帮这个店铺的商品编辑页）";
+  }
 }
 
 /**
@@ -9589,13 +9596,52 @@ function collectStoreTemplateDefaultSku() {
   };
 }
 
+// 默认 SKU（白T恤）在**新建模板**时的预填值（2026-11-19 用户指定）：
+// 颜色 PureWhite、SKU 固定字面 AL9999-PureWhite-{size}；
+// 售价/折扣价跟随「交易信息」的原价 / 六折售价，操作员手动改过就不再覆盖。
+const DEFAULT_SKU_COLOR_PREFILL = "PureWhite";
+const DEFAULT_SKU_CODE_PREFILL = "AL9999-PureWhite-{size}";
+
+function syncDefaultSkuPricesFromTemplatePrices() {
+  const normal = $("store-template-default-sku-normal-price");
+  const sale = $("store-template-default-sku-sale-price");
+  const templateNormal = $("store-template-normal-price")?.value.trim() || "";
+  const templateSale = $("store-template-sale-price")?.value.trim() || "";
+  if (normal && normal.dataset.manual !== "1") normal.value = templateNormal;
+  if (sale && sale.dataset.manual !== "1") sale.value = templateSale;
+  refreshDefaultSkuSizePricePlaceholders();
+}
+
+function prefillStoreTemplateDefaultSku() {
+  const color = $("store-template-default-sku-color");
+  const code = $("store-template-default-sku-code");
+  if (color) color.value = DEFAULT_SKU_COLOR_PREFILL;
+  if (code) code.value = DEFAULT_SKU_CODE_PREFILL;
+  for (const id of ["store-template-default-sku-normal-price", "store-template-default-sku-sale-price"]) {
+    const el = $(id);
+    if (!el) continue;
+    el.value = "";
+    el.dataset.manual = ""; // 回到「跟随交易信息」的自动态
+  }
+  syncDefaultSkuPricesFromTemplatePrices();
+}
+
 function fillStoreTemplateDefaultSku(defaultSku) {
   const config = defaultSku || {};
   if ($("store-template-default-sku-enabled")) $("store-template-default-sku-enabled").checked = config.enabled === true;
   if ($("store-template-default-sku-color")) $("store-template-default-sku-color").value = config.color_name || "";
   if ($("store-template-default-sku-code")) $("store-template-default-sku-code").value = config.sku || "";
-  if ($("store-template-default-sku-normal-price")) $("store-template-default-sku-normal-price").value = config.normal_price ?? "";
-  if ($("store-template-default-sku-sale-price")) $("store-template-default-sku-sale-price").value = config.sale_price ?? "";
+  const normalInput = $("store-template-default-sku-normal-price");
+  const saleInput = $("store-template-default-sku-sale-price");
+  if (normalInput) {
+    normalInput.value = config.normal_price ?? "";
+    // 模板自带的值算「操作员定过」：之后改交易信息的价格不再覆盖它。
+    normalInput.dataset.manual = String(normalInput.value).trim() ? "1" : "";
+  }
+  if (saleInput) {
+    saleInput.value = config.sale_price ?? "";
+    saleInput.dataset.manual = String(saleInput.value).trim() ? "1" : "";
+  }
   renderDefaultSkuSizePriceOverrides(config.size_price_overrides || {});
   if ($("store-template-default-sku-path")) $("store-template-default-sku-path").value = config.image_path || "";
   state.defaultSkuImageAsset = config.image_asset_id ? {
@@ -10323,6 +10369,9 @@ async function openNewStoreTemplateEditor() {
   const sku = $("store-template-sku-template"); if (sku) sku.value = "{main_sku}_{color}||{size}";
   if ($("store-template-strip-parentheses")) $("store-template-strip-parentheses").checked = true;
   fillStoreTemplateDefaultSku(null);
+  // 新建模板的默认 SKU 直接预填（颜色 PureWhite / SKU AL9999-PureWhite-{size}，
+  // 售价与折扣价跟随下面填写的原价/六折售价）。
+  prefillStoreTemplateDefaultSku();
   await Promise.all([loadStorePromotions(), loadStoreWatermarks(), loadStoreSizeChartTemplates()]).catch(() => {});
   renderStoreTemplateDescriptionProfileOptions();
   resetStoreWatermarkChoices();
@@ -14106,18 +14155,29 @@ document.addEventListener("input", (event) => {
     if (!storeTemplateSalePriceIsManual()) {
       $("store-template-sale-price").value = calculateFortyPercentDiscount(target.value);
     }
+    // 默认 SKU 的售价/折扣价默认跟随这两栏（手填过就不跟了）。
+    syncDefaultSkuPricesFromTemplatePrices();
     renderSizePriceOverrides(collectSizePriceOverrides());
     return;
   }
   if (target instanceof HTMLInputElement && target.id === "store-template-sale-price") {
     // 手填后不再被原价自动覆盖；清空即回到"按原价六折"的自动预填。
     target.dataset.manual = target.value.trim() ? "1" : "";
+    syncDefaultSkuPricesFromTemplatePrices();
     renderSizePriceOverrides(collectSizePriceOverrides());
     return;
   }
   if (target instanceof HTMLInputElement && ["store-template-default-sku-normal-price", "store-template-default-sku-sale-price"].includes(target.id)) {
-    // 默认 SKU 售价/折扣价变化：只刷新分尺码行的占位符，操作员自己填过的值不动。
-    refreshDefaultSkuSizePricePlaceholders();
+    // 默认 SKU 售价/折扣价：操作员填过就固定下来（不再跟随交易信息），
+    // 清空即恢复「跟随原价 / 六折售价」。
+    if (target.value.trim()) {
+      target.dataset.manual = "1";
+      // 只刷新分尺码行的占位符，操作员自己填过的值不动。
+      refreshDefaultSkuSizePricePlaceholders();
+    } else {
+      target.dataset.manual = "";
+      syncDefaultSkuPricesFromTemplatePrices();
+    }
     return;
   }
   if (target instanceof HTMLInputElement && target.dataset.templateSize) {

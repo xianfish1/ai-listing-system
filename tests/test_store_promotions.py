@@ -216,3 +216,39 @@ def test_full_catalog_capture_still_retires_missing_activities() -> None:
     )
 
     assert data["store_promotion_activities"][0]["status"] == "unresolved"
+
+
+def test_promotion_catalogs_stay_per_store_inside_the_same_country() -> None:
+    """活动目录按**店铺**，不按国家（与平台类目树按国家共用相反）。
+
+    同一国家的两家店铺各有一份目录，互不共享；换店铺必须在那个店铺自己采集。
+    """
+    data: dict = {"store_promotion_activities": []}
+    replace_promotion_catalog(
+        data,
+        store_id="ph-store-1",
+        raw_items=[{"activity_id": "a1", "name": "一号店活动", "discount_rate": "0.6", "status": "enabled"}],
+        now="2026-11-19T00:00:00Z",
+    )
+    replace_promotion_catalog(
+        data,
+        store_id="ph-store-2",
+        raw_items=[{"activity_id": "b1", "name": "二号店活动", "discount_rate": "0.6", "status": "enabled"}],
+        now="2026-11-19T00:00:00Z",
+    )
+
+    def by_store(store_id: str) -> list[dict]:
+        return [item for item in data["store_promotion_activities"] if item["store_id"] == store_id]
+
+    assert [item["activity_id"] for item in by_store("ph-store-1")] == ["a1"]
+    assert [item["activity_id"] for item in by_store("ph-store-2")] == ["b1"]
+
+    # 再采一号店（这次没读到列表）：只把一号店自己的活动标成 unresolved，二号店不动。
+    replace_promotion_catalog(
+        data,
+        store_id="ph-store-1",
+        raw_items=[],
+        now="2026-11-19T01:00:00Z",
+    )
+    assert [item["status"] for item in by_store("ph-store-1")] == ["unresolved"]
+    assert [item["status"] for item in by_store("ph-store-2")] == ["available"]

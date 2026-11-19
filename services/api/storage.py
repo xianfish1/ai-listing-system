@@ -9517,6 +9517,9 @@ def _validate_store_template_category_binding(data: dict[str, Any], template: di
         if not canonical_store or not canonical_country or not country_matches:
             raise CategoryProfileConflict("Store template category does not match the selected store scope")
 
+    # 类目树按**国家**共用（本土口径，2026-11-19）：跨境模板的 country 可能是 GLOBAL，
+    # 但树仍挂在店铺国家下，所以内容校验一律用店铺国家（拿不到才回落到模板 country）。
+    catalog_country = store_country or country
     store_categories = [
         item
         for item in all_categories
@@ -9525,13 +9528,12 @@ def _validate_store_template_category_binding(data: dict[str, Any], template: di
     # 该店存在于已选店铺（store_options 已验证 platform/country），但从未采集过
     # 类目树（store_categories 为空）：允许保存模板，等采集后再做类目内容强校验——
     # 否则已存在的模板连其它字段都保存不了（采集入口独立于模板保存）。
+    # （选类目时前端会用同国家的共享树，见 marketplace_category_catalog.search_catalog；
+    #  这里不做跨店兜底校验：别家店的树可能采得不全，不能据此判某类目"不存在"。）
     # 下方 profile 一致性校验仍会执行。
     catalog_missing_for_store = bool(all_categories) and not store_categories
     if catalog_missing_for_store and not store_options:
         raise CategoryProfileConflict("Store template category does not match the selected store scope")
-    # 类目树按店铺采集：跨境模板的 country 可能是 GLOBAL，但树仍挂在店铺国家下，
-    # 所以内容校验一律用店铺国家（拿不到才回落到模板 country）。
-    catalog_country = store_country or country
     category = None
     if not catalog_missing_for_store:
         catalog_scopes = {

@@ -602,3 +602,51 @@ def test_legacy_cnsc_template_bound_to_the_site_profile_still_saves():
         data,
         _binding_template(listing_mode="cnsc_global"),
     )
+
+
+def test_second_store_in_the_same_country_can_save_before_its_own_catalog_is_collected():
+    """本土类目树按国家共用：新店铺还没采集类目树时照样能保存模板（选类目走同国家共享树）。"""
+    _seed_catalog_and_profile()
+    data = storage.load_store()
+    data["mabang_store_options"].append(
+        {
+            "id": "store-option-2",
+            "platform": "shopee",
+            "country": "PH",
+            "store_name": "POD菲律宾 2",
+            "mabang_store_id": "store-2",
+            "status": "active",
+        }
+    )
+    storage.save_store(data)
+    data = storage.load_store()
+
+    # store-2 自己一条类目都没有 → 用 store-1（同国家）的树校验通过
+    storage._validate_store_template_category_binding(
+        data,
+        _binding_template(mabang_store_id="store-2"),
+    )
+
+
+def test_shared_country_tree_still_rejects_a_category_from_another_country():
+    """跨国家不共用：ID 店铺的模板不能拿 PH 的类目/方案。"""
+    _seed_catalog_and_profile()
+    data = storage.load_store()
+    data["mabang_store_options"].append(
+        {
+            "id": "store-option-id",
+            "platform": "shopee",
+            "country": "ID",
+            "store_name": "印尼店",
+            "mabang_store_id": "store-id",
+            "status": "active",
+        }
+    )
+    storage.save_store(data)
+    data = storage.load_store()
+
+    with pytest.raises(CategoryProfileConflict, match="selected store scope"):
+        storage._validate_store_template_category_binding(
+            data,
+            _binding_template(mabang_store_id="store-id"),
+        )

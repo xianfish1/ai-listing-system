@@ -361,3 +361,61 @@ def test_explicit_path_does_not_split_commas_inside_category_name():
     )
 
     assert data["marketplace_categories"][0]["path"] == "Accessories > Shirts, Blouses"
+
+
+def test_search_catalog_shares_the_country_tree_across_stores_but_not_countries():
+    """本土类目树按国家共用：同国家的新店铺没采集也能选到同一套类目；
+    PH 的树不会出现在 ID 店铺，ID 的也不会出现在 PH。"""
+    data = _store()
+    for store_id, country, leaf_id in (
+        ("store-ph-1", "PH", "111"),
+        ("store-id-1", "ID", "911"),
+    ):
+        run = create_catalog_run(
+            data,
+            {"platform": "shopee", "country": country, "store_id": store_id},
+            now="2026-11-19T10:00:00+00:00",
+        )
+        complete_catalog_run(
+            data,
+            run["id"],
+            _capture(
+                [
+                    {"id": f"{leaf_id}0", "name": "Men Clothes"},
+                    {"id": leaf_id, "name": "T-Shirts", "parent_id": f"{leaf_id}0"},
+                ]
+            ),
+            now="2026-11-19T10:01:00+00:00",
+        )
+
+    # 同国家的另一家店铺（还没采集）能用到 PH 的树
+    shared = search_catalog(
+        data["marketplace_categories"],
+        platform="shopee",
+        country="PH",
+        store_id="store-ph-new",
+        query="shirt",
+        leaf_only=True,
+    )
+    assert [item["category_id"] for item in shared] == ["111"]
+
+    # 跨国家不能共用
+    wrong_country = search_catalog(
+        data["marketplace_categories"],
+        platform="shopee",
+        country="PH",
+        store_id="store-id-1",
+        query="shirt",
+        leaf_only=True,
+    )
+    assert wrong_country == []
+
+    id_tree = search_catalog(
+        data["marketplace_categories"],
+        platform="shopee",
+        country="ID",
+        store_id="store-id-1",
+        query="shirt",
+        leaf_only=True,
+    )
+    assert [item["category_id"] for item in id_tree] == ["911"]

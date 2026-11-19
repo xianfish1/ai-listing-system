@@ -252,16 +252,36 @@ def search_catalog(
     wanted_parent = None if parent_id is None else str(parent_id or "").strip()
     bounded_limit = max(1, min(int(limit or 50), 500))
     scoped = []
+    country_pool = []
+    store_has_platform_rows = False
     for item in categories:
         if not item.get("active", True):
             continue
         if wanted_platform and str(item.get("platform") or "").strip().lower() != wanted_platform:
             continue
+        store_matches = str(item.get("store_id") or "").strip() == wanted_store
+        if store_matches:
+            store_has_platform_rows = True
         if wanted_country and str(item.get("country") or "").strip().upper() != wanted_country:
             continue
-        if wanted_store and str(item.get("store_id") or "").strip() != wanted_store:
+        country_pool.append(item)
+        if wanted_store and not store_matches:
             continue
         scoped.append(item)
+
+    # 「本土」的类目树按**国家**共用，不按店铺隔离：同一个国家（同一平台）下不同店铺
+    # 可以选同一套平台类目（2026-11-19 用户口径）。当前店铺一条类目都没采集过时，回落到
+    # 同平台同国家其它店铺的类目，按 category_id 去重（类目 id 是平台级的，各店铺一致）。
+    # 跨国家绝不混用——PH 的树不会出现在 ID 店铺里（哪怕请求的 country 写错，店铺已有
+    # 其它国家的树时也不兜底）；跨境(GLOBAL)同样按 country 隔离。
+    if wanted_store and not scoped and wanted_country and country_pool and not store_has_platform_rows:
+        seen: set[str] = set()
+        for item in country_pool:
+            key = str(item.get("category_id") or "").strip()
+            if key and key in seen:
+                continue
+            seen.add(key)
+            scoped.append(item)
 
     parent_ids = {str(item.get("parent_id") or "").strip() for item in scoped if str(item.get("parent_id") or "").strip()}
     matches = []
