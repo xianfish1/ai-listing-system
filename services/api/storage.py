@@ -21,8 +21,10 @@ from typing import Any, Callable, Iterator
 
 from services.api import settings
 from services.api.listing_modes import (
+    GLOBAL_CATEGORY_SCOPE,
     LISTING_MODE_CNSC_3PF,
     LISTING_MODE_SITE,
+    category_profile_country,
     is_cnsc_page,
     is_local_like,
     is_pure_cnsc,
@@ -9472,6 +9474,13 @@ def _validate_store_template_category_binding(data: dict[str, Any], template: di
     category_id = str(template.get("mabang_category_id") or "").strip()
     if not platform or not country or not store_id or not category_id:
         return
+    # 类目方案分「本土站点 / 跨境站点」两个作用域（2026-11-19）：
+    #   本土 site        → 店铺国家（PH/TW…）
+    #   跨境 cnsc_global / cnsc_3pf → GLOBAL
+    # 跨境模板自身 country 仍保留店铺国家（3PF 要按站点算描述配图上限等），
+    # 只有**方案**按 GLOBAL 作用域校验；老数据绑的是店铺国家方案，照样放行。
+    listing_mode = normalize_listing_mode(template.get("listing_mode"))
+    cnsc_page = is_cnsc_page(listing_mode)
 
     active_store_options = [
         item
@@ -9489,6 +9498,7 @@ def _validate_store_template_category_binding(data: dict[str, Any], template: di
     ]
     if active_store_options and not store_options:
         raise CategoryProfileConflict("Store template category does not match the selected store scope")
+    store_country = ""
     if store_options:
         canonical_store = next(
             (
@@ -9499,7 +9509,12 @@ def _validate_store_template_category_binding(data: dict[str, Any], template: di
             None,
         )
         canonical_country = str((canonical_store or {}).get("country") or "").strip().upper()
-        if not canonical_store or not canonical_country or canonical_country != country:
+        store_country = canonical_country
+        # 跨境页模板可以是 GLOBAL（纯跨境）或本店国家（3PF / 老数据），两者都合法。
+        country_matches = canonical_country == country if not cnsc_page else (
+            country in {canonical_country, GLOBAL_CATEGORY_SCOPE}
+        )
+        if not canonical_store or not canonical_country or not country_matches:
             raise CategoryProfileConflict("Store template category does not match the selected store scope")
 
     store_categories = [
@@ -9514,6 +9529,9 @@ def _validate_store_template_category_binding(data: dict[str, Any], template: di
     catalog_missing_for_store = bool(all_categories) and not store_categories
     if catalog_missing_for_store and not store_options:
         raise CategoryProfileConflict("Store template category does not match the selected store scope")
+    # 类目树按店铺采集：跨境模板的 country 可能是 GLOBAL，但树仍挂在店铺国家下，
+    # 所以内容校验一律用店铺国家（拿不到才回落到模板 country）。
+    catalog_country = store_country or country
     category = None
     if not catalog_missing_for_store:
         catalog_scopes = {
@@ -9523,14 +9541,14 @@ def _validate_store_template_category_binding(data: dict[str, Any], template: di
             )
             for item in store_categories
         }
-        if catalog_scopes and (platform, country) not in catalog_scopes:
+        if catalog_scopes and (platform, catalog_country) not in catalog_scopes:
             raise CategoryProfileConflict("Store template category does not match the selected store scope")
 
         scope_categories = [
             item
             for item in store_categories
             if str(item.get("platform") or "").strip().lower() == platform
-            and str(item.get("country") or "").strip().upper() == country
+            and str(item.get("country") or "").strip().upper() == catalog_country
         ]
         if scope_categories:
             category = next(
@@ -9561,7 +9579,13 @@ def _validate_store_template_category_binding(data: dict[str, Any], template: di
     profile_category_id = str(profile.get("marketplace_category_id") or profile.get("mabang_category_id") or "").strip()
     profile_platform = str(profile.get("platform") or "").strip().lower()
     profile_country = str(profile.get("country") or "").strip().upper()
-    if profile_category_id != category_id or profile_platform != platform or profile_country != country:
+    # 跨境模板绑 GLOBAL 方案（新口径）；店铺国家方案（老数据）继续放行，
+    # 免得已在跑的跨境模板因为这次口径调整连保存都过不去。
+    expected_profile_country = category_profile_country(listing_mode, store_country or country)
+    accepted_countries = {expected_profile_country}
+    if cnsc_page and store_country:
+        accepted_countries.add(store_country)
+    if profile_category_id != category_id or profile_platform != platform or profile_country not in accepted_countries:
         raise CategoryProfileConflict("Store template category does not match the published category profile")
 
     if not category:

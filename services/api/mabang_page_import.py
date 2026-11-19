@@ -6,7 +6,7 @@ from typing import Any
 
 from services.api.category_profile_service import create_candidate_from_capture
 from services.api import settings
-from services.api.listing_modes import is_cnsc_page, normalize_listing_mode
+from services.api.listing_modes import category_profile_country, is_cnsc_page, normalize_listing_mode
 from services.api.mabang_size_chart_import import import_mabang_size_chart
 from services.api.mabang_import_snapshot import (
     MabangImportSnapshotError,
@@ -169,12 +169,15 @@ def confirm_page_import(
                 now=now,
                 account_id=account_id,
             )
+    # 类目方案按「本土站点 / 跨境站点」分作用域：CNSC 页（纯跨境与 3PF）一律采集到
+    # GLOBAL 方案，绝不覆盖本土站点同一类目的必填项规则（2026-11-19）。
+    profile_country = category_profile_country(payload.get("listing_mode"), store["country"])
     category_result = create_candidate_from_capture(
         staged,
         run_id=f"page-import:{run_id}",
         raw_capture={
             "platform": store["platform"],
-            "country": store["country"],
+            "country": profile_country,
             "store_id": store["id"],
             "marketplace_category_id": category["id"],
             "observed_category_id": category["id"],

@@ -74,3 +74,18 @@ def is_pure_cnsc(value: Any) -> bool:
 
 def listing_mode_label(value: Any) -> str:
     return LISTING_MODE_LABELS.get(normalize_listing_mode(value), "本土")
+
+
+# 「类目方案」的作用域站点：本土站点用店铺自己的国家（PH/TW…），跨境页
+# （cnsc_global / cnsc_3pf）用 GLOBAL。同一个类目在两侧是**两份**必填项规则：
+# 跨境页的必填属性/选项与本土站点不是一套（2026-11-19 用户口径），
+# 采集、绑定、校验都必须按这个作用域走，否则 CNSC 页采集会覆盖本土方案。
+GLOBAL_CATEGORY_SCOPE = "GLOBAL"
+
+
+def category_profile_country(listing_mode: Any, store_country: Any) -> str:
+    """类目方案（category profile）应绑定的 country 作用域。"""
+
+    if is_cnsc_page(listing_mode):
+        return GLOBAL_CATEGORY_SCOPE
+    return str(store_country or "").strip().upper()

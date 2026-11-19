@@ -466,3 +466,26 @@ def test_missing_store_id_stays_bare_when_no_capture_diagnostic_is_available() -
 
     with pytest.raises(MabangImportSnapshotError, match=r"^未识别到马帮店铺编号$"):
         normalize_mabang_capture(capture)
+
+
+def test_pure_cnsc_page_always_reports_the_global_scope_country() -> None:
+    """纯跨境 CNSC 页即使在 PH 店铺下采集，也按 GLOBAL 口径落库。"""
+    capture = _cnsc_fixture()
+    capture["page"]["country"] = "PH"
+
+    snapshot = normalize_mabang_capture(capture)
+
+    assert snapshot["listing_mode"] == "cnsc_global"
+    assert snapshot["store"]["country"] == "GLOBAL"
+
+
+def test_3pf_page_keeps_the_local_store_country() -> None:
+    """跨境本土 3PF 保留店铺国家：模板仍要按站点算描述配图上限等。"""
+    capture = _cnsc_fixture()
+    capture["page"]["country"] = "PH"
+    capture["requested_listing_mode"] = "cnsc_3pf"
+
+    snapshot = normalize_mabang_capture(capture)
+
+    assert snapshot["listing_mode"] == "cnsc_3pf"
+    assert snapshot["store"]["country"] == "PH"

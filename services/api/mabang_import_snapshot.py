@@ -5,7 +5,7 @@ from copy import deepcopy
 from typing import Any
 from urllib.parse import urlsplit, urlunsplit
 
-from services.api.listing_modes import is_cnsc_page, normalize_listing_mode
+from services.api.listing_modes import is_cnsc_page, is_pure_cnsc, normalize_listing_mode
 
 
 class MabangImportSnapshotError(ValueError):
@@ -53,7 +53,13 @@ def normalize_mabang_capture(raw: dict[str, Any]) -> dict[str, Any]:
     listing_mode, listing_mode_evidence = _normalize_listing_mode(raw)
     platform = _text(page.get("platform") or raw.get("platform") or "shopee").lower()
     country = _text(page.get("country") or raw.get("country")).upper()
-    if is_cnsc_page(listing_mode) and not country:
+    # 纯跨境（CNSC）模板的 country 口径是 GLOBAL：CNSC 页永远采集不到「站点国家」，
+    # 这里固定下来，别再让页面上的店铺国家漏进来。3PF 不同：模板仍要保留店铺国家
+    # （描述配图上限等按站点算），只有「类目方案」按 GLOBAL 作用域走
+    # （见 listing_modes.category_profile_country）。
+    if is_pure_cnsc(listing_mode):
+        country = "GLOBAL"
+    elif is_cnsc_page(listing_mode) and not country:
         country = "GLOBAL"
     normalized_store = {
         "id": _required_text(store.get("id"), _store_id_error(store, raw.get("capture_debug"))),

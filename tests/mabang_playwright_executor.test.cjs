@@ -128,6 +128,36 @@ test('logistics value formatting keeps weight decimals and rounds package dims t
   assert.equal(executor.formatPackageCm('24.6'), '25');
 });
 
+// 2026-11-18 现场：交易信息 卡头带「商品级预购（物流信息）」角标 + 卡内提示「未勾选时，预购
+// 仍在物流信息里设置」，整卡 hasText 会命中两张卡（logistics_card_not_unique count=2）。
+// 2026-11-19 现场：型号(101639) 的下拉里没有任何枚举，只有一条「＋ 添加自选值」。
+// 旧实现只认「添加」两个字，找不到按钮 → 值只打进搜索框 → 草稿里型号仍为空
+// （tmp_upload/auto-fill-debug.log 的 custom_option_add_missed）。
+test('custom add entry matches 添加自选值 / 添加自填选项 / 旧版添加', () => {
+  assert.equal(executor.isCustomAddEntryText('＋ 添加自选值'), true);
+  assert.equal(executor.isCustomAddEntryText('+ 添加自选值'), true);
+  assert.equal(executor.isCustomAddEntryText('添加自选值'), true);
+  assert.equal(executor.isCustomAddEntryText('添加自填选项'), true);
+  assert.equal(executor.isCustomAddEntryText('添加'), true);
+  assert.equal(executor.isCustomAddEntryText('添 加'), true);
+  // 相近但不同义的文案不能被当成自选入口
+  assert.equal(executor.isCustomAddEntryText('添加SKU'), false);
+  assert.equal(executor.isCustomAddEntryText('添加水印'), false);
+  assert.equal(executor.isCustomAddEntryText('T-shirt'), false);
+  // 整段容器文本（超过 24 字）不当入口
+  assert.equal(executor.isCustomAddEntryText('添加自选值 请输入自定义值 确认 取消 清空筛选'), false);
+});
+
+test('logistics card is identified by its own header, not by any card mentioning 物流信息', () => {
+  assert.equal(executor.logisticsCardKind('物流信息'), 'exact');
+  assert.equal(executor.logisticsCardKind(' 物流信息 '), 'exact');
+  assert.equal(executor.logisticsCardKind('交易信息 商品级预购（物流信息） 显示变种图片全屏显示表格'), '');
+  assert.equal(executor.logisticsCardKind('交易信息'), '');
+  // 卡头读不到时的降级：含 物流信息 且不含 交易信息 才算候选。
+  assert.equal(executor.logisticsCardKind('物流信息 设置'), 'loose');
+  assert.equal(executor.logisticsCardKind(''), '');
+});
+
 test('CNSC payload validation blocks missing identity, prices, and warehouse values', () => {
   const base = {
     store: {

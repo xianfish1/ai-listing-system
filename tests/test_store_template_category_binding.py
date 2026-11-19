@@ -504,3 +504,101 @@ def test_update_listing_copy_can_repair_profile_binding(tmp_path: Path) -> None:
     )
     assert cleared["category_profile_id"] == ""
     assert cleared.get("profile_snapshot_hash", "") == ""
+
+
+def _seed_global_profile() -> None:
+    data = storage.load_store()
+    data["category_profiles"].append(
+        {
+            "id": "shopee-global-100244",
+            "platform": "shopee",
+            "country": "GLOBAL",
+            "marketplace_category_id": "100244",
+            "published_version_id": "version-global",
+        }
+    )
+    data["category_profile_versions"].append(
+        {
+            "id": "version-global",
+            "profile_id": "shopee-global-100244",
+            "status": "published",
+            "version": 1,
+            "fields": [],
+        }
+    )
+    storage.save_store(data)
+
+
+def _binding_template(**overrides):
+    template = {
+        "platform": "shopee",
+        "country": "PH",
+        "mabang_store_id": "store-1",
+        "mabang_category_id": "100244",
+        "marketplace_category_path": "Men Clothes > Tops > T-Shirts",
+        "listing_mode": "site",
+        "category_profile_id": "shopee-ph-100244",
+        "category_profile_version_id": "version-1",
+    }
+    template.update(overrides)
+    return template
+
+
+def test_cnsc_page_template_binds_the_global_scope_profile():
+    """跨境页（cnsc_global / cnsc_3pf）的类目方案是 GLOBAL 那一份，哪怕店铺是 PH。"""
+    _seed_catalog_and_profile()
+    _seed_global_profile()
+    data = storage.load_store()
+
+    storage._validate_store_template_category_binding(
+        data,
+        _binding_template(
+            listing_mode="cnsc_3pf",
+            category_profile_id="shopee-global-100244",
+            category_profile_version_id="version-global",
+        ),
+    )
+
+
+def test_pure_cnsc_template_with_global_country_is_accepted_for_a_site_store():
+    _seed_catalog_and_profile()
+    _seed_global_profile()
+    data = storage.load_store()
+
+    storage._validate_store_template_category_binding(
+        data,
+        _binding_template(
+            country="GLOBAL",
+            listing_mode="cnsc_global",
+            category_profile_id="shopee-global-100244",
+            category_profile_version_id="version-global",
+        ),
+    )
+
+
+def test_site_template_rejects_the_global_scope_profile():
+    """本土模板不许挂跨境站点的方案：同一类目在两侧是两套必填项规则。"""
+    _seed_catalog_and_profile()
+    _seed_global_profile()
+    data = storage.load_store()
+
+    with pytest.raises(CategoryProfileConflict, match="published category profile"):
+        storage._validate_store_template_category_binding(
+            data,
+            _binding_template(
+                category_profile_id="shopee-global-100244",
+                category_profile_version_id="version-global",
+            ),
+        )
+
+
+def test_legacy_cnsc_template_bound_to_the_site_profile_still_saves():
+    """改口径之前建的跨境模板绑的是店铺国家方案：继续放行，等重采再迁到 GLOBAL。"""
+    _seed_catalog_and_profile()
+    _seed_global_profile()
+    data = storage.load_store()
+
+    storage._validate_store_template_category_binding(
+        data,
+        _binding_template(listing_mode="cnsc_global"),
+    )

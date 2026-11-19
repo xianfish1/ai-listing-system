@@ -18,6 +18,7 @@ import pytest
 from services.api import settings, storage
 from services.api.listing_modes import (
     LISTING_MODE_CNSC_3PF,
+    category_profile_country,
     is_cnsc_page,
     is_local_like,
     is_pure_cnsc,
@@ -334,3 +335,11 @@ def test_three_pf_template_price_change_syncs_to_existing_copy(tmp_path: Path) -
     # 默认 SKU 的价格仍用自己配置，但全球价跟模板走。
     assert prices["AL9999-PureWhite-130cm"]["normal_price"] == 120.0
     assert skus["AL9999-PureWhite-130cm"]["global_price_cny"] == 25.0
+
+
+def test_category_profile_scope_splits_local_site_and_cross_border_pages() -> None:
+    """类目方案作用域：本土站点=店铺国家；CNSC 页（纯跨境/3PF）=GLOBAL。"""
+    assert category_profile_country("site", "PH") == "PH"
+    assert category_profile_country("cnsc_global", "PH") == "GLOBAL"
+    assert category_profile_country("cnsc_3pf", "PH") == "GLOBAL"
+    assert category_profile_country(None, " th ") == "TH"

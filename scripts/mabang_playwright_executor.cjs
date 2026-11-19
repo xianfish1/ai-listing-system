@@ -1648,15 +1648,21 @@ async function isSelectPanelOpen(item) {
   return (await item.locator('.el-select__caret.is-reverse').count().catch(() => 0)) > 0;
 }
 
-// 确保下拉展开并返回带输入框的面板；返回 null 表示这个控件不是这种下拉。
+// 确保下拉展开并返回面板；返回 null 表示这个控件不是这种下拉。
 // 注意返回的是**会重新解析**的复合 locator（.first() + filter），不是按序号取的 nth(i)：
 // element-ui 的 popper 会在 DOM 里换位，nth(i) 之后再解析可能落到另一个（隐藏的）面板上，
 // 后续点击就会卡在 actionability 上直到超时。
+// 面板优先取「带输入框」的那张（能键入搜索/自填值）；**不可搜索的下拉面板里没有 input**
+// （2026-11-19 现场：型号 的面板只有一条「＋ 添加自选值」，没有搜索框），以前一律按
+// `has: input` 过滤，这种面板直接取不到 → 自选通道第一步就返回 null → 值永远加不上去。
+// 所以拿不到带输入框的面板时退回任意可见下拉。
 async function openSelectPanel(frame, item) {
-  const visiblePanel = () => frame
+  const panelWithInput = () => frame
     .locator('.el-select-dropdown:visible')
     .filter({ has: frame.locator('input') })
     .first();
+  const anyVisiblePanel = () => frame.locator('.el-select-dropdown:visible').first();
+  const visiblePanel = () => panelWithInput();
   if (!(await isSelectPanelOpen(item))) {
     // 优先点输入框本体：原生 el-select 点输入框一样能展开面板，而且**不会**碰到 Element UI
     // 的"清除"图标。控件里已经有值时（强制自选通道刚把值写进页面模型，控件就渲染出来了），
@@ -1666,11 +1672,13 @@ async function openSelectPanel(frame, item) {
     if (await input.count().catch(() => 0)) {
       await input.click({ timeout: 5000 }).catch(() => {});
       const inputDeadline = Date.now() + 1200;
-      while (Date.now() < inputDeadline && !(await visiblePanel().count().catch(() => 0))) {
+      // 判「面板开没开」用任意可见下拉：不可搜索的下拉面板里没有 input，
+      // 用带 input 的 locator 会一直判成没开，接着去点箭头（可能撞出清除图标把值清掉）。
+      while (Date.now() < inputDeadline && !(await anyVisiblePanel().count().catch(() => 0))) {
         await new Promise((resolve) => setTimeout(resolve, 100));
       }
     }
-    if (!(await visiblePanel().count().catch(() => 0))) {
+    if (!(await anyVisiblePanel().count().catch(() => 0))) {
       const arrow = item.locator('.el-select .el-input__suffix:visible').first();
       if (await arrow.count().catch(() => 0)) await arrow.click({ timeout: 5000 }).catch(() => {});
       else await item.locator('.el-select').first().click({ timeout: 5000 }).catch(() => {});
@@ -1680,6 +1688,13 @@ async function openSelectPanel(frame, item) {
   while (Date.now() < panelDeadline) {
     const candidate = visiblePanel();
     if (await candidate.count().catch(() => 0)) return candidate;
+    // 不可搜索的下拉：面板里没有 input，退回任意可见下拉（等 150ms 让「输入框版」有机会先渲染）。
+    const loose = anyVisiblePanel();
+    if (await loose.count().catch(() => 0)) {
+      await new Promise((resolve) => setTimeout(resolve, 150));
+      const late = visiblePanel();
+      return (await late.count().catch(() => 0)) ? late : loose;
+    }
     await new Promise((resolve) => setTimeout(resolve, 100));
   }
   return null;
@@ -1972,12 +1987,135 @@ async function typeIntoField(field, target) {
   return false;
 }
 
+// 「添加自选值」这类入口的固定文案（现网 UI = 「＋ 添加自选值」，更早是「添加自填选项」）。
+const CUSTOM_ADD_ENTRY_LABELS = ['添加自选值', '添加自填选项', '添加自定义值'];
+
+// 「添加自选值」入口的文案判定。马帮现在（2026-11-19 现场）在**没有枚举**的下拉里只给
+// 一条「＋ 添加自选值」：点它 → 同一位置换成自填输入行 → 键入 → ✔/回车，值才会被登记成
+// 马帮选项。老 UI 是搜索框右边的「添加」文字链接，更老的是「添加自填选项」。三种都要认。
+function isCustomAddEntryText(value) {
+  const text = compactText(value).replace(/^[+＋]+/, '');
+  if (!text) return false;
+  if (text === '添加') return true;
+  return CUSTOM_ADD_ENTRY_LABELS.some((label) => {
+    if (text === label) return true;
+    if (!text.startsWith(label)) return false;
+    // 入口带了尾巴（如「＋ 添加自选值 "T-shirt"」）也认；但整段容器文本
+    // （「添加自选值 请输入自定义值 确认 取消」）不算，避免点到大块容器。
+    const rest = text.slice(label.length);
+    return rest.length <= 16 && !/确认|取消|清空|筛选|请输入/.test(rest);
+  });
+}
+
+// 在下拉面板里找「添加自选值」入口。优先明确带「自选/自填」字样的那条：旧 UI 的「添加」
+// 只在找不到自选入口时才退回使用（有些面板两者都有，点「添加」会要求先有搜索词）。
+async function findCustomAddEntry(panel) {
+  const candidates = panel.locator(
+    'button:visible, .el-button:visible, .el-select-dropdown__item:visible, li:visible, a:visible, span:visible, i:visible',
+  );
+  const total = Math.min(await candidates.count().catch(() => 0), 80);
+  let fallback = null;
+  for (let index = 0; index < total; index += 1) {
+    const node = candidates.nth(index);
+    const text = await node.innerText().catch(() => '');
+    if (!isCustomAddEntryText(text)) continue;
+    const compact = compactText(text);
+    if (compact.includes('自选') || compact.includes('自填')) return node;
+    if (!fallback) fallback = node;
+  }
+  return fallback;
+}
+
+// 点完「添加自选值」后出现的自填输入框：优先 .addCustomBox，其次 placeholder 带「自定义/
+// 自选」的输入框，最后退回「点击后新出现的那一个可见输入框」——不可搜索的下拉面板原本
+// 一个 input 都没有，点入口后只多出 1 个，不能再用「面板里至少 2 个输入框」那种假设。
+async function waitForCustomInputRow(panel, timeoutMs = 3000, inputsBefore = 0) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const boxed = panel.locator('.addCustomBox input:visible').first();
+    if (await boxed.count().catch(() => 0)) return boxed;
+    const placeholder = panel.locator('input[placeholder*="自定义"]:visible, input[placeholder*="自选"]:visible').first();
+    if (await placeholder.count().catch(() => 0)) return placeholder;
+    const inputs = panel.locator('input:visible');
+    const total = await inputs.count().catch(() => 0);
+    if (total > inputsBefore) return inputs.nth(total - 1);
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  }
+  return null;
+}
+
+// 提交自填行：✔ → 「确定/确认/添加」按钮/链接 → 回车，三级兜底。
+async function confirmCustomInputRow(panel, input) {
+  const box = panel.locator('.addCustomBox');
+  const check = (await box.count().catch(() => 0))
+    ? box.locator('.el-icon-check:visible').first()
+    : panel.locator('.el-icon-check:visible').last();
+  if (await check.count().catch(() => 0)) {
+    await check.click({ timeout: 5000 }).catch(() => {});
+    return;
+  }
+  const button = panel.locator('button:visible, .el-button:visible').filter({ hasText: /确认|确定|添加/ }).last();
+  if (await button.count().catch(() => 0)) {
+    await button.click({ timeout: 5000 }).catch(() => {});
+    return;
+  }
+  const link = panel.locator('a:visible, span:visible, i:visible, .add-btn:visible')
+    .filter({ hasText: /确认|确定|添加自选值|^\s*添\s*加\s*$/ }).last();
+  if (await link.count().catch(() => 0)) {
+    await link.click({ timeout: 5000 }).catch(() => {});
+    return;
+  }
+  await input.press('Enter').catch(() => {});
+}
+
 // 把自填值提交到马帮的下拉面板。按 DOM 判断，不靠猜：
-//   现网 UI 是两步——面板先给「搜索框 + 添加」；在搜索框键入值并点「添加」后，同一行才切换成
-//   自填输入行（.addCustomBox，placeholder「请输入自定义值」+ ✔ / ✕），在自填框里键入值再点 ✔
-//   才真正加入。旧 UI 则是搜索框 + 「添加」一步到位。
+//   ① 现网 UI（2026-11-19 截图）：没有枚举的下拉（型号）里只有一条「＋ 添加自选值」，
+//      点它 → 自填输入行 → 键入 → ✔。这条路必须先试：以前只按「搜索框 + 添加」找，
+//      找不到「添加」按钮，值只打进搜索框，型号永远是空的（日志 custom_option_add_missed）。
+//   ② 老 UI 是两步——搜索框键入值并点「添加」后，同一行才切换成自填输入行
+//      （.addCustomBox，placeholder「请输入自定义值」+ ✔ / ✕），在自填框里键入值再点 ✔。
 // 返回 false 表示这个面板两种都不是（例如普通可编辑文本框）。
 async function submitCustomSelectValue(panel, target) {
+  // ① 「＋ 添加自选值 / 添加自填选项」入口（现网 UI）
+  const entry = await findCustomAddEntry(panel);
+  if (entry) {
+    const inputsBefore = await panel.locator('input:visible').count().catch(() => 0);
+    const entryText = cleanText(await entry.innerText().catch(() => '')).slice(0, 40);
+    await entry.click({ timeout: 5000 }).catch(() => {});
+    const rowInput = await waitForCustomInputRow(panel, 3000, inputsBefore);
+    attrPickDebug({
+      phase: 'custom_add_entry', target, entry: entryText,
+      inputs_before: inputsBefore, row_found: Boolean(rowInput),
+    });
+    if (rowInput) {
+      if (!(await typeIntoField(rowInput, target))) return false;
+      await confirmCustomInputRow(panel, rowInput);
+      return true;
+    }
+    // 有的版本把自填行做成 contenteditable（不是 <input>）：fill() 对 contenteditable 也有效，
+    // 但 typeIntoField 的回读（inputValue）不适用，这里单独走一遍按键输入。
+    const editable = panel.locator('[contenteditable="true"]:visible').first();
+    if (await editable.count().catch(() => 0)) {
+      await editable.click({ timeout: 5000 }).catch(() => {});
+      await editable.pressSequentially(target, { delay: 25, timeout: 10000 }).catch(() => {});
+      attrPickDebug({ phase: 'custom_add_entry', target, entry: entryText, contenteditable: true });
+      await confirmCustomInputRow(panel, editable);
+      return true;
+    }
+    // 点入口后没出现新输入行：有的版本把光标直接放进入口本身，直接把值打进去再回车。
+    const inputs = panel.locator('input:visible');
+    const total = await inputs.count().catch(() => 0);
+    if (total > 0) {
+      const last = inputs.nth(total - 1);
+      if (await typeIntoField(last, target)) {
+        await confirmCustomInputRow(panel, last);
+        return true;
+      }
+    }
+  } else {
+    attrPickDebug({ phase: 'custom_add_entry_missing', target });
+  }
+  // ② 旧 UI：搜索框 + 「添加」
   // 一律用 `:visible` 的复合 locator：面板里同一控件常有多份（隐藏模板行 + 真正可点的那份），
   // 按序号取会在 DOM 换位后落到隐藏元素上，点击随即卡在 actionability 直到超时。
   const search = panel.locator('.searchBox input:visible, input:visible').first();
@@ -6625,6 +6763,60 @@ function formatPackageCm(value) {
   return String(Math.round(num));
 }
 
+// 2026-11-18 现场（HN_POD 批次 7 单全部 logistics_card_not_unique，details.count=2）：
+// 交易信息 卡的卡头现在挂着「商品级预购（物流信息）」角标、卡里还有「未勾选时，预购仍在
+// 物流信息里设置」提示，整卡文本包含 物流信息 会同时命中 交易信息 和 物流信息 两张卡。
+// 真实 物流信息 卡的卡头文字就是「物流信息」，所以按卡头精确认卡；卡头读不到时才退一步
+// 接受「含 物流信息 但不含 交易信息」的卡。
+function logisticsCardKind(headerText) {
+  const compact = compactText(headerText);
+  if (!compact) return '';
+  if (compact === TEXT.logisticsInfo) return 'exact';
+  if (compact.includes(TEXT.logisticsInfo) && !compact.includes(TEXT.tradeInfo)) return 'loose';
+  return '';
+}
+
+async function locateLogisticsCard(frame) {
+  const cards = frame.locator('.el-card:visible');
+  const total = await cards.count().catch(() => 0);
+  const headers = [];
+  const exact = [];
+  const loose = [];
+  for (let index = 0; index < total; index += 1) {
+    const card = cards.nth(index);
+    const header = card.locator(':scope > .el-card__header');
+    const headerCount = await header.count().catch(() => 0);
+    const headerText = headerCount === 1 ? compactText(await header.innerText().catch(() => '')) : '';
+    headers.push(headerText);
+    const kind = logisticsCardKind(headerText);
+    if (kind === 'exact') exact.push(card);
+    else if (kind === 'loose') loose.push(card);
+  }
+  const pool = exact.length ? exact : loose;
+  if (pool.length !== 1) throw new BlockedError('logistics_card_not_unique', { count: pool.length, headers });
+  return pool[0];
+}
+
+// 物流信息 卡里「物流设置」子项也带 重量限制 字样，hasText:'重量' 会撞上；按自身 label
+// 精确匹配（同 09-15「尺寸 vs 包裹尺寸」的坑）。
+async function logisticsFormItem(card, label) {
+  const items = card.locator('.el-form-item');
+  const total = await items.count().catch(() => 0);
+  const labels = [];
+  const matched = [];
+  for (let index = 0; index < total; index += 1) {
+    const item = items.nth(index);
+    const ownLabel = item.locator(':scope > .el-form-item__label');
+    const labelText = (await ownLabel.count().catch(() => 0)) === 1
+      ? compactText(await ownLabel.innerText().catch(() => ''))
+      : '';
+    labels.push(labelText);
+    if (labelText === label) matched.push(item);
+  }
+  if (matched.length !== 1) throw new BlockedError('logistics_form_item_not_unique', { label, count: matched.length, labels });
+  return matched[0];
+}
+
 // Fill the product-level 物流信息 card (重量 + 包裹尺寸) from transaction_info. Only
 // used together with disableSkuWeight (which moves these off the per-SKU grid). The
 // values originate from the store template via the listing copy.
@@ -6637,11 +6829,10 @@ async function fillLogisticsInfo(frame, task) {
     });
     throw new BlockedError('logistics_info_incomplete', { missing });
   }
-  const card = frame.locator('.el-card:visible').filter({ hasText: TEXT.logisticsInfo });
-  if ((await card.count()) !== 1) throw new BlockedError('logistics_card_not_unique', { count: await card.count() });
+  const card = await locateLogisticsCard(frame);
 
   // 重量: the single text input in the 重量 form-item of this card.
-  const weightItem = card.locator('.el-form-item').filter({ hasText: '重量' }).first();
+  const weightItem = await logisticsFormItem(card, '重量');
   const weightInput = weightItem.locator('input.el-input__inner').first();
   const weightValue = formatWeightKg(info.weight_kg);
   await weightInput.fill(weightValue);
@@ -6649,7 +6840,7 @@ async function fillLogisticsInfo(frame, task) {
   await weightInput.dispatchEvent('change').catch(() => {});
 
   // 包裹尺寸: three integer inputs matched by placeholder (长/宽/高).
-  const sizeItem = card.locator('.el-form-item').filter({ hasText: '包裹尺寸' }).first();
+  const sizeItem = await logisticsFormItem(card, '包裹尺寸');
   const dims = [
     { placeholder: '长', value: formatPackageCm(info.package_length_cm) },
     { placeholder: '宽', value: formatPackageCm(info.package_width_cm) },
@@ -8037,6 +8228,7 @@ module.exports = {
   applyCustomValueThroughUi,
   clearAttributeValueInModel,
   registeredCustomOption,
+  isCustomAddEntryText,
   isTagBasedControl,
   customValueEchoed,
   selectedTextsForItem,
@@ -8048,6 +8240,9 @@ module.exports = {
   logisticsValuesComplete,
   formatWeightKg,
   formatPackageCm,
+  logisticsCardKind,
+  locateLogisticsCard,
+  logisticsFormItem,
   buildCNSCDomGridPlan,
   validateCNSCDomGridReadback,
   resolveCNSCWarehouseStock,

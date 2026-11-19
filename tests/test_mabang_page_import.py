@@ -627,3 +627,35 @@ def test_confirm_import_keeps_previous_activity_when_catalog_loaded_without_sele
     assert target["discount_name"] == "旧活动"
     assert target["discount_percent"] == 35
     assert [entry["mabang_discount_id"] for entry in target["discount_catalog"]] == ["ph-20", "ph-40"]
+
+
+def test_cnsc_import_captures_the_category_profile_under_the_global_scope() -> None:
+    """CNSC 页采集的「分类属性」落在跨境站点（GLOBAL）方案上，不碰本土站点方案。"""
+    data = _store()
+    stage_page_import(data, "run-1", _cnsc_capture(), now="2026-11-19T00:01:00Z")
+
+    result = confirm_page_import(data, "run-1", now="2026-11-19T00:02:00Z")
+
+    template = result["template"]
+    profiles = data["category_profiles"]
+    assert [profile["id"] for profile in profiles] == ["shopee-global-100244"]
+    assert profiles[0]["country"] == "GLOBAL"
+    assert template["category_profile_id"] == "shopee-global-100244"
+    assert template["country"] == "GLOBAL"
+
+
+def test_3pf_import_keeps_store_country_but_binds_the_global_profile_scope() -> None:
+    """3PF 页是 CNSC 页：方案落 GLOBAL，模板本身仍保留店铺国家（描述配图上限等按站点算）。"""
+    data = _store()
+    data["mabang_page_import_runs"][0]["requested_listing_mode"] = "cnsc_3pf"
+    capture = _cnsc_capture()
+    capture["page"]["country"] = "PH"
+    stage_page_import(data, "run-1", capture, now="2026-11-19T00:01:00Z")
+
+    result = confirm_page_import(data, "run-1", now="2026-11-19T00:02:00Z")
+
+    template = result["template"]
+    assert template["listing_mode"] == "cnsc_3pf"
+    assert template["country"] == "PH"
+    assert template["category_profile_id"] == "shopee-global-100244"
+    assert data["category_profiles"][0]["country"] == "GLOBAL"

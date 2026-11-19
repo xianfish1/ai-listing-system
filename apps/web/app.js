@@ -3326,15 +3326,46 @@ function categoryProfile(profileId) {
   return state.categoryProfiles.find((item) => (item.profile_id || item.id) === profileId || item.id === profileId) || null;
 }
 
+// 类目方案（必填项规则）按「本土站点 / 跨境站点」两套作用域绑定：
+//   本土 site                  → 店铺国家（PH/TW…）
+//   跨境 cnsc_global / cnsc_3pf → GLOBAL
+// 优先取跨境站点作用域；老模板绑的是店铺国家方案（改口径之前建的），找不到再回落，
+// 免得已配好的跨境模板在编辑器里变成「未绑定」。
+// 同一作用域里若有「空方案」（采集到 0 个字段的历史版本），优先选有字段的那份，
+// 否则一绑上就把分类属性整段清空（09-26 空采集的同一类坑）。
+function categoryProfileHasFields(profile) {
+  const fields = ((profile || {}).published_version || {}).fields;
+  if (Array.isArray(fields) && fields.length) return true;
+  return Object.keys((profile || {}).category_attributes || {}).length > 0;
+}
+
 function categoryProfileForMarketplaceCategory(categoryId, scope = marketplaceCategoryScope()) {
   const normalized = String(categoryId || "").trim();
   if (!normalized) return null;
-  return state.categoryProfiles.find((item) => (
-    String(item.mabang_category_id || item.marketplace_category_id || "").trim() === normalized
-    && String(item.platform || "shopee").toLowerCase() === String(scope.platform || "").toLowerCase()
-    && String(item.country || "").toUpperCase() === String(scope.country || "").toUpperCase()
-    && (item.active_version_id || item.published_version_id)
-  )) || null;
+  const matchCountry = (country) => {
+    const candidates = state.categoryProfiles.filter((item) => (
+      String(item.mabang_category_id || item.marketplace_category_id || "").trim() === normalized
+      && String(item.platform || "shopee").toLowerCase() === String(scope.platform || "").toLowerCase()
+      && String(item.country || "").toUpperCase() === String(country || "").toUpperCase()
+      && (item.active_version_id || item.published_version_id)
+    ));
+    return candidates.find(categoryProfileHasFields) || candidates[0] || null;
+  };
+  const preferred = scope.profileCountry || scope.country;
+  const profile = matchCountry(preferred);
+  if (profile && categoryProfileHasFields(profile)) return profile;
+  const legacy = preferred === scope.country ? null : matchCountry(scope.country);
+  if (legacy && categoryProfileHasFields(legacy)) return legacy;
+  return profile || legacy;
+}
+
+// 类目方案作用域的中文名：跨境页（纯跨境/3PF）统一叫「跨境站点」，本土按店铺国家。
+function categoryProfileScopeLabel(scope = marketplaceCategoryScope()) {
+  const country = String(scope.profileCountry || scope.country || "").toUpperCase();
+  if (isCnscPageMode(scope.listingMode || $("store-template-listing-mode")?.value)) {
+    return country === "GLOBAL" ? "跨境站点（GLOBAL）" : `跨境站点（${country || "GLOBAL"}）`;
+  }
+  return country ? `本土站点（${country}）` : "本土站点";
 }
 
 function renderCategoryProfileOptions() {
@@ -3402,6 +3433,7 @@ function applyStoreTemplateCategoryProfile() {
   const summary = $("store-template-category-summary");
   if (summary) {
     summary.textContent = [
+      `类目方案：${categoryProfileScopeLabel()} · ${profile.profile_id || profile.id || ""}`,
       `Brand: ${attrs.brand || ""}`,
       `Pattern: ${attrs.pattern || ""}`,
       `Material: ${attrs.material || ""}`,
@@ -3413,13 +3445,27 @@ function applyStoreTemplateCategoryProfile() {
   loadCategoryProfileVersions(profile.profile_id || profile.id || "");
 }
 
+// 类目树按店铺采集（platform/country/store_id 都要），但「类目方案」另有作用域：
+// 跨境页（cnsc_global / cnsc_3pf）的方案一律是 GLOBAL，本土站点跟店铺国家。
+// profileCountry 就是拿去匹配/绑定方案的那个 country，别拿它去查类目树。
 function marketplaceCategoryScope() {
+  const mode = normalizeListingMode($("store-template-listing-mode")?.value);
+  const cnscPage = isCnscPageMode(mode);
+  const pureCnsc = isPureCnscMode(mode);
   const storeSelect = $("store-template-store");
   const selectedStore = storeSelect?.selectedOptions?.[0];
+  const cnscStoreSelect = $("store-template-cnsc-store");
+  const selectedCnscStore = cnscStoreSelect?.selectedOptions?.[0];
+  // 纯跨境没有普通店铺下拉：店铺身份来自「CNSC 店铺」。
+  const storeId = pureCnsc ? (cnscStoreSelect?.value || "") : (storeSelect?.value || "");
+  const storeCountry = (pureCnsc ? selectedCnscStore?.dataset.country : selectedStore?.dataset.country) || "";
   return {
-    platform: selectedStore?.dataset.platform || "shopee",
-    country: selectedStore?.dataset.country || "",
-    storeId: storeSelect?.value || "",
+    platform: selectedStore?.dataset.platform || selectedCnscStore?.dataset.platform || "shopee",
+    // 类目树查询用店铺自己的国家；跨境店铺没标国家时按 GLOBAL（纯跨境的目录口径）。
+    country: storeCountry || (cnscPage ? "GLOBAL" : ""),
+    storeId,
+    listingMode: mode,
+    profileCountry: cnscPage ? "GLOBAL" : storeCountry,
   };
 }
 
@@ -3497,11 +3543,20 @@ function restoreStoreTemplateCategoryForStore(previous = {}) {
   }
   const summary = $("store-template-category-summary");
   if (summary) {
+    const scopeLabel = categoryProfileScopeLabel(scope);
     summary.textContent = profile
-      ? `${categoryPath || categoryId} · 已按新店铺站点重新绑定类目方案`
-      : `${categoryPath || categoryId} · 新店铺站点还没有该类目的方案，请先采集当前页或建方案再保存`;
+      ? `${categoryPath || categoryId} · 已按${scopeLabel}重新绑定类目方案`
+      : `${categoryPath || categoryId} · ${scopeLabel}还没有该类目的方案，请先采集当前页或建方案再保存`;
   }
   return { kept: true, profile };
+}
+
+// 切换刊登模式后按新作用域重绑类目方案（本土站点 ↔ 跨境站点 GLOBAL）。
+function rebindStoreTemplateCategoryProfileForMode() {
+  const categoryId = String($("store-template-category-id")?.value || "").trim();
+  const categoryPath = String($("store-template-category-path")?.value || "").trim();
+  if (!categoryId) return;
+  restoreStoreTemplateCategoryForStore({ id: categoryId, path: categoryPath });
 }
 
 function marketplaceCategoryScopeReady(scope, results, status) {
@@ -3719,8 +3774,8 @@ function selectMarketplaceCategory(categoryId) {
   state.categoryProfileVersions = [];
   renderCategoryProfileVersions();
   renderStoreTemplateCategoryFields([], {});
-  $("store-template-category-summary").textContent = "当前类目尚无已发布必填项规则";
-  if (status) status.textContent = `已选择 ${category.path || category.name || ""}，等待采集必填项`;
+  $("store-template-category-summary").textContent = `当前类目在${categoryProfileScopeLabel()}尚无已发布必填项规则`;
+  if (status) status.textContent = `已选择 ${category.path || category.name || ""}，等待采集${categoryProfileScopeLabel()}必填项`;
   if (collectButton) collectButton.hidden = false;
 }
 
@@ -3736,7 +3791,9 @@ async function createSelectedCategoryProfileCollectionRun() {
     method: "POST",
     body: JSON.stringify({
       platform: scope.platform,
-      country: category.country || scope.country,
+      // 采集方案落哪个作用域：跨境页（纯跨境/3PF）是 GLOBAL，本土站点是店铺国家。
+      // 采集脚本会把这里的 country 原样带进 capture，服务端据此建对应的方案。
+      country: scope.profileCountry || category.country || scope.country,
       store_id: scope.storeId,
       category_id: category.category_id,
       category_path: category.path || "",
@@ -9399,7 +9456,7 @@ function validateStoreTemplateForm() {
   // 选了类目但还没绑定必填规则：服务端会报 "requires an active category profile"，
   // 这里提前用中文说清怎么解（页面采集会补方案与必填项）。
   if ($("store-template-category-id")?.value.trim() && !$("store-template-category-profile")?.value.trim()) {
-    return "已选类目但当前店铺/站点还没有该类目的必填项规则：请在该店铺打开马帮商品编辑页做一次「采集当前页」（会自动补齐类目方案与必填项），或在「平台类目」里点「采集必填项」并确认导入；也可以改选已有规则的类目";
+    return `已选类目但${categoryProfileScopeLabel()}还没有该类目的必填项规则：请在该店铺打开马帮商品编辑页做一次「采集当前页」（会自动补齐类目方案与必填项），或在「平台类目」里点「采集必填项」并确认导入；也可以改选已有规则的类目（本土站点与跨境站点各有一套方案，不能混用）`;
   }
   if (isLocalLikeMode(listingMode) && $("store-template-default-sku-enabled")?.checked) {
     const defaultSkuRequirements = [
@@ -9661,6 +9718,11 @@ async function createStoreTemplate() {
   const identityFromCnscStore = isPureCnscMode(listingMode);
   const effectiveStoreId = identityFromCnscStore ? (cnscStoreSelect?.value || "") : (storeSelect?.value || "");
   const effectiveStoreName = identityFromCnscStore ? (selectedCnscStore?.dataset.storeName || "") : (selectedStore?.dataset.storeName || "");
+  // 模板 country 跟店铺走（3PF 保留 PH 等店铺国家，跨境页也只按这里算描述配图上限等）；
+  // 纯跨境沿用 GLOBAL 口径。类目方案的作用域另由 profileCountry 决定（跨境=GLOBAL）。
+  const effectiveCountry = identityFromCnscStore
+    ? (selectedCnscStore?.dataset.country || "GLOBAL")
+    : (selectedStore?.dataset.country || "");
   const sizeChartSource = $("store-template-size-chart-source")?.value === "template" ? "template" : "upload";
   const selectedSizeChartTemplate = sizeChartSource === "template" ? selectedStoreSizeChartTemplate() : null;
   // 目录里没有当前选中的那张尺码图模板（店铺尺码图目录没采全/过期）时，select 里仍然
@@ -9687,6 +9749,7 @@ async function createStoreTemplate() {
     body: JSON.stringify({
       store_name: effectiveStoreName,
       mabang_store_id: effectiveStoreId,
+      country: effectiveCountry,
       // 模板按马帮账号隔离：保存时带上当前账号（店铺下拉已经只列这个账号的店铺）。
       account_id: currentStoreTemplateAccountId(),
       template_name: $("store-template-name").value.trim(),
@@ -13816,6 +13879,9 @@ document.addEventListener("change", (event) => {
   }
   if (target instanceof HTMLSelectElement && target.id === "store-template-listing-mode") {
     updateCnscTemplateVisibility();
+    // 切换刊登模式 → 类目方案作用域从「本土站点(店铺国家)」切到「跨境站点(GLOBAL)」
+    // 或反过来：按当前类目重新绑定一次，绑不上只提示待补，不清掉已选类目。
+    rebindStoreTemplateCategoryProfileForMode();
     return;
   }
   if (target instanceof HTMLSelectElement && target.id === "store-template-target-sites") {
