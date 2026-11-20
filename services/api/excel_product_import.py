@@ -384,14 +384,14 @@ def _product_from_rows(
         warnings.append(f"{parent_sku}：没有任何带变种图的颜色，整组跳过")
         return None
 
+    # 主图顺序 = 表格列顺序（图片1（主图）→ 图片9）。逐列取第一条非空地址，而不是
+    # 「拿第一行有图的记录就收工」：有的导出把图片分散在不同子 SKU 行上，按第一行
+    # 截断会只剩 1-3 张，顺序也跟着丢。
     gallery_urls: list[str] = []
-    for row in rows:
-        for field in ("main_image", *GALLERY_FIELDS):
-            url = row.get(field, "").strip()
-            if url and url not in gallery_urls:
-                gallery_urls.append(url)
-        if gallery_urls:
-            break
+    for field in ("main_image", *GALLERY_FIELDS):
+        url = next((row.get(field, "").strip() for row in rows if row.get(field, "").strip()), "")
+        if url and url not in gallery_urls:
+            gallery_urls.append(url)
     if not gallery_urls:
         warnings.append(f"{parent_sku}：没有商品图（图片1-9），整组跳过")
         return None

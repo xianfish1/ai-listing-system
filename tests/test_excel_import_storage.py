@@ -105,6 +105,20 @@ def test_same_main_sku_is_skipped_not_overwritten(tmp_path: Path) -> None:
     assert "jb0034" in storage.existing_base_product_identifiers()
 
 
+def test_reimport_replaces_group_assets_instead_of_duplicating(tmp_path: Path) -> None:
+    """删商品不会删素材；同一 SKU 再导一次必须整组换掉旧记录，不能堆两份。"""
+    root = tmp_path / "JB0034"
+    first = storage.create_base_product_from_excel(_payload(root))
+    storage.delete_base_products([first["product"]["id"]])
+    assert len(storage.assets_for_group("JB0034")) == 4
+
+    second = storage.create_base_product_from_excel(_payload(root))
+
+    assert second["status"] == "created"
+    assert second["asset_count"] == 4
+    assert len(storage.assets_for_group("JB0034")) == 4
+
+
 def test_missing_image_aborts_without_partial_product(tmp_path: Path) -> None:
     root = tmp_path / "JB0034"
     payload = _payload(root)

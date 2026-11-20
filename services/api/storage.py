@@ -5235,6 +5235,17 @@ def create_base_product_from_excel(payload: dict[str, Any]) -> dict[str, Any]:
         }
         data.setdefault("assets", [])
         data.setdefault("base_products", [])
+        # 重导入同一个 SKU 时，把该组旧的 Excel 素材记录整组换掉：素材没有删除接口，
+        # 删商品也不会清素材，不换就会每导一次多一套同文件名的重复记录（素材列表里
+        # 看到两倍图片）。旧记录对应的文件可能已被新批次取代，按当前 plan 重建最准。
+        data["assets"] = [
+            asset
+            for asset in data.get("assets") or []
+            if not (
+                str(asset.get("group_id") or "").strip().casefold() == group_id.casefold()
+                and str(asset.get("origin") or "") == EXCEL_IMPORT_ORIGIN
+            )
+        ]
         data["assets"] = [*(data.get("assets") or []), *assets]
         data["base_products"] = [*(data.get("base_products") or []), base_product]
         save(data)

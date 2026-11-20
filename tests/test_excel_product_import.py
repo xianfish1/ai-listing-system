@@ -132,6 +132,31 @@ def test_column_order_and_title_row_are_tolerated():
 
     plan = parse_export_workbook(buffer.getvalue())
     assert plan["products"][0]["main_sku"] == "VZ930"
+    # 主图顺序按列名（图片1→图片9），与表头在表里的物理位置无关。
+    assert [entry["url"] for entry in plan["products"][0]["gallery"]] == [
+        f"https://cdn.test/VZ930/main-{index}.jpg" for index in range(1, 10)
+    ]
+
+
+def test_gallery_order_follows_columns_when_images_span_rows():
+    """图片分散在不同子 SKU 行时也要按「图片1→图片9」收全，不能只拿第一行。"""
+    first = _row(sku="A1", color="Red", gallery=3)
+    second = _row(sku="A1", color="Blue", gallery=9)
+    for index in range(1, 4):
+        second["图片1（主图）" if index == 1 else f"图片{index}"] = None
+
+    product = parse_export_workbook(_workbook_bytes([first, second]))["products"][0]
+    assert [entry["url"] for entry in product["gallery"]] == [
+        f"https://cdn.test/A1/main-{index}.jpg" for index in range(1, 10)
+    ]
+
+
+def test_title_is_kept_verbatim():
+    title = "Daddy's Girl Bow — 2-12Y (Kids) | OOTD 100% Cotton"
+    product = parse_export_workbook(
+        _workbook_bytes([_row(sku="A1", color="Red", title=title)])
+    )["products"][0]
+    assert product["title"] == title
 
 
 def test_missing_required_column_raises():
