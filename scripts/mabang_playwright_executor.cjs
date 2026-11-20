@@ -1859,6 +1859,8 @@ async function applyAttributeValuesInModel(frame, entries) {
         labels: resolved.map((entry) => entry.label),
         is_array: isArray,
         custom: resolved.some((entry) => entry.from_options === false),
+        option_count: options.length,
+        from_options: resolved.map((entry) => entry.from_options),
       });
     }
     return { results };
@@ -3094,15 +3096,35 @@ async function autoFillMissingRequiredAttributes(frame, task, page, resolvedFiel
         live: (live || []).map((f) => ({ id: f.field_id, label: f.label, required: f.required, opts: (f.options || []).length })),
       }) + '\n');
     } catch (_e) { /* debug log best-effort */ }
+    // 快照 id→标签翻译只给本土站点用：跨境（cnsc_global / 3PF）坚持原路径，
+    // 不因为这次改动把「查不到文字就跳过」变成「翻译成标签再填」。
     const templateFields = resolveTemplateAttributeFields(
       live,
       task.category_attributes || task.attribute_values || task.listing_copy?.attribute_values || {},
       // 副本快照自带 id→标签对照：模板把「型号」存成选项 id 时靠它翻回文字。
-      snapshotAttributeOptionLabels(task.category_profile_snapshot || task.listing_copy?.category_profile_snapshot),
+      siteMode
+        ? snapshotAttributeOptionLabels(task.category_profile_snapshot || task.listing_copy?.category_profile_snapshot)
+        : null,
     );
     const templateIds = new Set(templateFields.map((field) => String(field.field_id)));
+    const providedById = new Map(resolvedFields.map((field) => [String(field.field_id), field]));
+    // 兜底：现场重算把「模板存成选项 id、快照里又查不到文字」的字段判成 unresolved 时，
+    // 如果 Python 侧（拿着类目方案）已经解析出人能读的标签，就用那份标签填——绝不把
+    // 1795012147982 这种内部 id 当值写进刊登（现场：型号整格被静默跳过，草稿一直为空）。
+    const templateFieldsMerged = siteMode ? templateFields.map((field) => {
+      if (!field.unresolved_option_id) return field;
+      const provided = providedById.get(String(field.field_id));
+      const providedLabels = ((provided && provided.option_labels) || [])
+        .map((value) => String(value || '').trim()).filter(Boolean);
+      if (!providedLabels.length) return field;
+      attrPickDebug({
+        phase: 'attribute_unresolved_recovered', field: field.label, field_id: String(field.field_id),
+        values: field.value_ids || [], labels: providedLabels,
+      });
+      return { ...field, option_labels: providedLabels, matched_value_ids: [], unresolved_option_id: false };
+    }) : templateFields;
     const mergedSnapshot = [
-      ...templateFields,
+      ...templateFieldsMerged,
       ...resolvedFields.filter((field) => !templateIds.has(String(field.field_id))),
     ];
     preferredFields = mergedSnapshot;
@@ -3366,6 +3388,10 @@ async function setCategoryAttributes(frame, task, page) {
       // 1790002081766 这种 id）：绝不把这串数字当"自定义值"打进刊登，如实报在结果里等人处理。
       if (field.unresolved_option_id) {
         unresolvedOptionIdFields.push({ field: labels[0], field_id: String(field.field_id), values: field.value_ids || [] });
+        attrPickDebug({
+          phase: 'attribute_unresolved_option_id', field: labels[0],
+          field_id: String(field.field_id), values: field.value_ids || [],
+        });
         results[field.field_id] = { value: '', method: 'model_failed', note: 'option_id_not_resolved' };
         continue;
       }
@@ -3406,6 +3432,18 @@ async function setCategoryAttributes(frame, task, page) {
       const candidateValues = [...(field.matched_value_ids ?? field.value_ids ?? []), ...optionLabels].filter(Boolean);
       if (siteMode && candidateValues.length) {
         const applied = prewritten.get(String(field.field_id)) || await applyAttributeValueInModel(frame, field.field_id, candidateValues);
+        // 点选/UI 分支的现场取证：型号这类多选自选值「模型写了也算填好」曾经把草稿存成空，
+        // 这条日志把每个字段实际走的证据摆出来（option_count=页面模型里的选项数）。
+        attrPickDebug({
+          phase: 'attribute_model_plan',
+          field: labels[0], field_id: String(field.field_id),
+          ok: Boolean(applied.ok), custom: Boolean(applied.custom),
+          applied: applied.applied, labels: applied.labels,
+          option_count: applied.option_count, from_options: applied.from_options,
+          option_labels: optionLabels, candidate: candidateValues,
+          confirmed: confirmed.has(String(field.field_id)),
+          model_evidence: modelEvidenceFields.has(String(field.field_id)),
+        });
         // 自选值（页面枚举里没有这个值——型号就是）**必须**在 UI 上真的"添加"出来。
         // 现场（2026-10-02）：写页面表单模型时页面上有 tag、模型里也是 ['T-shirt']，但马帮保存
         // 出来的草稿里型号是空的——那次只写了模型，没走「搜索 → 添加 → 请输入自定义值 → ✔」。

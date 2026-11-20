@@ -526,6 +526,32 @@ def test_resolve_category_attribute_fields_marks_free_text_values_as_text_input(
     assert by_id["100168"]["input_kind"] == "select"
 
 
+def test_task_plan_carries_category_profile_snapshot_for_option_id_translation(tmp_path: Path) -> None:
+    """型号(101639) 常被模板存成选项 id（1795012147982）：执行器要靠副本快照把 id 翻回
+    「T-shirt」才能真的走「＋ 添加自选值」。任务计划里少这份快照时，执行器会判定
+    「查不到文字、又长得像选项 id」而整格跳过，草稿里的型号一直为空（2026-11-20 复现）。
+    """
+    payload = deepcopy(_ready_payload())
+    payload["browser_inputs"].update({
+        "category_attributes": {"101639": ["1795012147982"]},
+        "category_profile_snapshot": {
+            "fields": [{
+                "field_id": "101639",
+                "label": "型号",
+                "type": "multi_select",
+                "options": [{"value": "1795012147982", "label": "T-shirt"}],
+            }]
+        },
+    })
+
+    task = browser_use_runner.build_browser_use_task_plan(payload, tmp_path / "uploads", allow_save=True)
+
+    assert task["category_profile_snapshot"]["fields"][0]["field_id"] == "101639"
+    field = {item["field_id"]: item for item in task["category_attribute_fields"]}["101639"]
+    assert field["option_labels"] == ["T-shirt"]
+    assert field["value_ids"] == ["1795012147982"]
+
+
 def test_save_draft_script_allows_exact_save_once_and_keeps_publish_guard(tmp_path: Path) -> None:
     task = browser_use_runner.build_browser_use_task_plan(_ready_payload(), tmp_path / "uploads", allow_save=True)
 

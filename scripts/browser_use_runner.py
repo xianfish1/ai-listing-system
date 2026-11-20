@@ -543,6 +543,11 @@ def build_browser_use_task_plan(
         },
         "category_attributes": category_attributes,
         "category_attribute_fields": category_attribute_fields,
+        # 副本冻结的类目快照（字段 + 选项 id→标签）。执行器要靠它把模板里存成
+        # **选项 id** 的属性值（现场：型号 101639 = 1795012147982）翻回文字；
+        # 少了这一份，执行器会认为「查不到文字、又长得像选项 id」而整格跳过，
+        # 草稿里的型号就一直为空（2026-11-20 复现）。
+        "category_profile_snapshot": deepcopy(browser_inputs.get("category_profile_snapshot") or {}),
         # 描述配图上限：country 只用于日志/排查，执行器只看 max_images
         # （None = 不限，0 = 整步跳过，N = 含尺码表在内最多 N 张）。
         "description_media": {
