@@ -4656,6 +4656,23 @@ def update_store_template(template_id: str, payload: dict[str, Any]) -> dict[str
                         continue
                     listing_copy["default_video_id"] = str(updated.get("default_video_id") or "").strip()
                     listing_copy["updated_at"] = now
+            # 站点国家/币种同样是模板-owned，必须同步到已有副本：商品描述配图上限
+            # （services/api/description_media_policy.py）按**副本**的 country 算，
+            # 不同步的话存量副本会继续按旧站点插图（现场 2026-11-20：MY 本土店被配成
+            # PH，按「不限」插了 10 张，保存被马帮拒掉，17 个任务全停在待确认）。
+            if "country" in payload or "currency" in payload or "description_media_max_images" in payload:
+                for listing_copy in data.get("store_listing_copies", []):
+                    if listing_copy.get("template_id") != template_id:
+                        continue
+                    if "country" in payload:
+                        listing_copy["country"] = str(updated.get("country") or "").strip().upper()
+                    if "currency" in payload:
+                        listing_copy["currency"] = str(updated.get("currency") or "").strip().upper()
+                    if "description_media_max_images" in payload:
+                        listing_copy["description_media_max_images"] = _description_media_limit(
+                            updated.get("description_media_max_images")
+                        )
+                    listing_copy["updated_at"] = now
             save(data)
             return deepcopy(template)
             changed_sync_fields = {field for field in sync_fields if field in payload}
@@ -5545,6 +5562,8 @@ def update_store_listing_copy(listing_copy_id: str, payload: dict[str, Any]) -> 
         "size_chart_as_last_product_image",
         "description_profile_version_id", "promotion_activity_id", "mabang_discount_id", "discount_label",
         "product_images", "main_image", "attribute_values",
+        # 描述配图上限（店铺级覆盖）：""=跟随站点策略，0=不插，N=最多 N 张（含尺码表）。
+        "description_media_max_images",
         # Decision B: the copy editor may edit the full CNSC configuration, not just
         # per-SKU warehouse stock. These stay permissive on save (partial progress is
         # allowed); the automation readiness gate stays fail-closed at job creation.
@@ -5598,6 +5617,8 @@ def update_store_listing_copy(listing_copy_id: str, payload: dict[str, Any]) -> 
             changed["default_site_discount_percent"] = _float_or_empty(changed["default_site_discount_percent"])
         if "cnsc_store" in changed and not isinstance(changed["cnsc_store"], dict):
             changed.pop("cnsc_store")
+        if "description_media_max_images" in changed:
+            changed["description_media_max_images"] = _description_media_limit(changed["description_media_max_images"])
         if "category_profile_id" in changed:
             changed["category_profile_id"] = str(changed.get("category_profile_id") or "").strip()
         if "category_profile_version_id" in changed:
@@ -9427,6 +9448,9 @@ def _normalize_store_template_payload(payload: dict[str, Any], *, now: str) -> d
         # 上传成功后回填（见 finish_automation_job → _record_default_video_id_from_result）。
         # 跨境模板不设该字段，自动化照旧每次上传（视频标题统一用主 SKU）。
         "default_video_id": str(payload.get("default_video_id") or "").strip(),
+        # 描述配图上限（店铺级覆盖，含尺码表那张）：""=跟随站点策略（MY 3 / ID 0），
+        # 0=描述里不插图，N=最多 N 张。站点国家配错时用它兜底（2026-11-20 MY 店配成 PH）。
+        "description_media_max_images": _description_media_limit(payload.get("description_media_max_images")),
         "size_chart_asset_id": str(payload.get("size_chart_asset_id") or "").strip(),
         "size_chart_preview_url": str(payload.get("size_chart_preview_url") or "").strip(),
         "size_chart_source": _normalize_size_chart_source(payload.get("size_chart_source")),
@@ -9772,6 +9796,9 @@ def _build_store_listing_copy(
         "global_price_cny": _float_or_empty(template.get("global_price_cny")),
         # 默认视频（马帮 videoId，本土模板）：副本带上它，执行器按 ID 选视频而不再上传。
         "default_video_id": str(template.get("default_video_id") or "").strip(),
+        # 描述配图上限（店铺级覆盖）：""=跟随站点策略（description_media_policy），
+        # 0=不插，N=最多 N 张（含尺码表那张）。
+        "description_media_max_images": _description_media_limit(template.get("description_media_max_images")),
         # 模板的尺码 chip 顺序：本土副本尺码轴按它排（模板已删时执行器退回这份）。
         "sizes": deepcopy(template.get("sizes") or []),
         "cnsc_binding_mode": cnsc_binding_mode if is_pure_cnsc(template.get("listing_mode")) else "",
@@ -10817,6 +10844,11 @@ def _build_browser_inputs(
         "mabang_category_id": listing_copy.get("mabang_category_id") or "",
         "discount_label": listing_copy.get("discount_label") or "",
         "mabang_discount_id": listing_copy.get("mabang_discount_id") or "",
+        # 描述配图上限（店铺级覆盖）：""=跟随站点策略（见 description_media_policy），
+        # 0=不插，N=最多 N 张（含尺码表那张）。runner 优先用它，才回落到站点策略。
+        "description_media_max_images": _description_media_limit(
+            listing_copy.get("description_media_max_images")
+        ),
         "cnsc_store": deepcopy(listing_copy.get("cnsc_store") or {}),
         "target_site_stores": deepcopy(listing_copy.get("target_site_stores") or []),
         "default_site_discount_percent": listing_copy.get("default_site_discount_percent") or 40,
@@ -11193,3 +11225,25 @@ def _int_or_empty(value: Any) -> int | str:
     except (TypeError, ValueError):
         return ""
     return number if number > 0 else ""
+
+
+def _description_media_limit(value: Any) -> int | str:
+    """店铺级「商品描述配图上限」（含尺码表那张）。
+
+    ``""`` = 跟随站点策略（services/api/description_media_policy.py）；
+    ``0`` = 描述里一张图都不插（印尼站口径）；``N`` = 最多 N 张。
+
+    站点策略只认 country，而马帮那边的「店铺国家」是页面导入时操作员选的、
+    可能配错（现场 2026-11-20：MY 本土店被配成 PH → 按不限插了 10 张，保存被拒）。
+    这个字段让运营可以在不改站点国家的前提下把上限钉死在某家店上。
+    """
+
+    if value is None:
+        return ""
+    text = str(value).strip()
+    if not text:
+        return ""
+    try:
+        return max(0, int(float(text)))
+    except (TypeError, ValueError):
+        return ""

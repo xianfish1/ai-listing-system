@@ -498,10 +498,21 @@ def build_browser_use_task_plan(
     )
     # 商品描述配图上限按站点（国家）走：MY 最多 3 张、ID 一张都不插（见
     # services/api/description_media_policy.py）。None = 不限（尺码表 + 全部产品图）。
+    # 店铺级覆盖（模板/副本上的 description_media_max_images）优先于站点策略：
+    # "" = 跟随站点；0 = 不插；N = 最多 N 张（含尺码表那张）。马帮的「店铺国家」
+    # 是导入时操作员选的、可能配错（2026-11-20：MY 本土店配成 PH → 按不限插 10 张，
+    # 保存被 Shopee 拒掉），这个字段让运营能按店铺把上限钉死。
     description_country = normalize_country(
         browser_inputs.get("country") or listing_copy.get("country")
     )
-    description_media_limit = description_media_max_images(description_country)
+    description_override = browser_inputs.get("description_media_max_images", "")
+    if str(description_override).strip() == "":
+        description_media_limit = description_media_max_images(description_country)
+    else:
+        try:
+            description_media_limit = max(0, int(float(description_override)))
+        except (TypeError, ValueError):
+            description_media_limit = description_media_max_images(description_country)
     description_media_actions: list[dict[str, str]] = []
     if is_local_like(listing_mode) and description_media_limit != 0:
         if description_media_limit is None:

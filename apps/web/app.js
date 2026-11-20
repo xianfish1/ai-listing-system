@@ -7052,6 +7052,23 @@ function renderStoreTemplates() {
   renderStoreTemplateCards();
 }
 
+// 站点徽章（PH / MY / TH …）：纯跨境模板的 country 是 GLOBAL，不显示。
+// 站点决定描述配图上限等规则（MY 3 张 / ID 0 张），配错时列表上要一眼看出来。
+function templateSiteBadge(item) {
+  const code = String(item?.country || "").trim().toUpperCase();
+  if (!/^[A-Z]{2}$/.test(code)) return "";
+  return `<span class="template-site-badge" title="店铺站点：${escapeHtml(code)}（描述配图上限等站点规则按它算）">${escapeHtml(code)}</span>`;
+}
+
+// 店铺级描述配图上限（"" = 跟随站点策略）：卡片上标出来，运营能看出这家店钉了上限。
+function templateDescriptionLimitLabel(item) {
+  const raw = item?.description_media_max_images;
+  if (raw === "" || raw === null || raw === undefined) return "";
+  const value = Number(raw);
+  if (!Number.isFinite(value)) return "";
+  return value > 0 ? `≤${value} 张` : "不插图";
+}
+
 function renderStoreTemplateTable() {
   const tbody = $("store-template-table");
   if (!tbody) return;
@@ -7084,7 +7101,7 @@ function renderStoreTemplateTable() {
     const tr = document.createElement("tr");
     tr.innerHTML = `
       <td><input type="checkbox" data-store-template-select="${escapeHtml(template.id)}" ${state.selectedStoreTemplates.has(template.id) ? "checked" : ""} /></td>
-      <td>${escapeHtml(template.store_name || "")} ${cnsc ? `<span class="template-mode-badge${isPureCnscMode(template) ? "" : " is-3pf"}">${escapeHtml(listingModeBadgeLabel(template))}</span>` : ""}${cnscMissing.length ? `<span class="template-readiness-badge" title="${escapeHtml(cnscMissing.map(cnscConfigurationLabel).join("、"))}">待补全配置</span>` : ""}</td>
+      <td>${escapeHtml(template.store_name || "")} ${templateSiteBadge(template)}${cnsc ? `<span class="template-mode-badge${isPureCnscMode(template) ? "" : " is-3pf"}">${escapeHtml(listingModeBadgeLabel(template))}</span>` : ""}${cnscMissing.length ? `<span class="template-readiness-badge" title="${escapeHtml(cnscMissing.map(cnscConfigurationLabel).join("、"))}">待补全配置</span>` : ""}</td>
       <td>${escapeHtml(template.template_name || "")}</td>
       <td>${escapeHtml(template.marketplace_category_path || "")}</td>
       <td>${escapeHtml(promotion)}</td>
@@ -7132,13 +7149,14 @@ function renderStoreTemplateCards() {
           <div class="template-card-name">${escapeHtml(template.template_name || "未命名模板")}</div>
           ${accountLabel ? `<div class="template-card-account">账号 · ${escapeHtml(accountLabel)}</div>` : ""}
         </div>
-        <div class="template-card-badges">${cnsc ? `<span class="template-mode-badge${isPureCnscMode(template) ? "" : " is-3pf"}">${escapeHtml(listingModeBadgeLabel(template))}</span>` : ""}${cnscMissing.length ? '<span class="template-readiness-badge">待补全配置</span>' : ""}</div>
+        <div class="template-card-badges">${templateSiteBadge(template)}${cnsc ? `<span class="template-mode-badge${isPureCnscMode(template) ? "" : " is-3pf"}">${escapeHtml(listingModeBadgeLabel(template))}</span>` : ""}${cnscMissing.length ? '<span class="template-readiness-badge">待补全配置</span>' : ""}</div>
       </div>
       <div class="template-card-meta">
         <span>类目 · <code>${escapeHtml(template.marketplace_category_path || "未选择")}</code></span>
         <span>价格 · <code>${escapeHtml(price || "未设置")}</code></span>
         <span>尺码 · <code>${escapeHtml(sizes)}</code></span>
         <span>${cnsc ? "站点" : "活动"} · ${escapeHtml(cnsc ? `${(template.target_site_stores || []).length} 个目标店铺` : promotion)}</span>
+        ${templateDescriptionLimitLabel(template) ? `<span>描述配图 · ${escapeHtml(templateDescriptionLimitLabel(template))}</span>` : ""}
         ${cnscMissing.length ? `<span>待补全 · ${escapeHtml(cnscMissing.map(cnscConfigurationLabel).join("、"))}</span>` : ""}
       </div>
       <div class="template-card-actions">
@@ -10446,14 +10464,36 @@ function syncMabangPageImportAccountOptions() {
   if (preferred && accounts.some((item) => item.id === preferred)) select.value = preferred;
 }
 
+// 预填导入弹窗的「站点」：只按**要导入的那家店**已记录的站点填，绝不按工作台随便
+// 当前选中的店铺填（那正是 MY 店被记成 PH 的来源）；不认识这家店就留空强制手选。
+function preselectMabangPageImportCountry(expectedStoreId) {
+  const select = $("mabang-page-import-country");
+  if (!select) return;
+  const wanted = String(expectedStoreId || "").trim();
+  const match = wanted
+    ? (state.mabangStoreOptions || []).find((item) => String(item.mabang_store_id || "").trim() === wanted)
+    : null;
+  const code = String((match || {}).country || "").trim().toUpperCase();
+  select.value = /^[A-Z]{2}$/.test(code) ? code : "";
+}
+
 function openMabangPageImportDialog(expectedStoreId = "") {
   _mabangImportExpectedStoreId = expectedStoreId || "";
   syncMabangPageImportAccountOptions();
+  // 站点：知道要导入哪家店时，用它已记录的站点预填（仍可见、可改）；不知道是谁
+  // （新店）就留空强制手选。以前这里静默填 PH，MY 店整店被记成 PH。
+  preselectMabangPageImportCountry(expectedStoreId);
   const accountSelect = $("mabang-page-import-account");
   if (accountSelect && !accountSelect.dataset.bound) {
     accountSelect.dataset.bound = "1";
     // 换账号 = 换一套登录态，导入任务要按新账号重建。
     accountSelect.addEventListener("change", () => { startMabangPageImportRun(); });
+  }
+  const countrySelect = $("mabang-page-import-country");
+  if (countrySelect && !countrySelect.dataset.bound) {
+    countrySelect.dataset.bound = "1";
+    // 站点是导入任务的一部分（写进模板/副本），换站点要重建导入任务。
+    countrySelect.addEventListener("change", () => { startMabangPageImportRun(); });
   }
   const link = $("open-mabang-new-product-link");
   if (link) link.href = MABANG_NEW_PRODUCT_URL;
@@ -10467,6 +10507,21 @@ function startMabangPageImportRun() {
   const confirmButton = $("confirm-mabang-page-import-btn");
   const runIdBox = $("mabang-page-import-run-id-box");
   const runIdValue = $("mabang-page-import-run-id-value");
+  // 站点不再缺省 PH：以前取工作台当前店铺的 country、拿不到就填 PH，MY 本土店
+  // 会被整店记成 PH，站点规则（描述配图上限等）全用错，保存被马帮拒掉。
+  const country = $("mabang-page-import-country")?.value || "";
+  if (!country) {
+    state.mabangPageImportRunId = "";
+    state.mabangPageImportRun = null;
+    stopMabangPageImportPolling();
+    if (collectButton) collectButton.disabled = true;
+    if (confirmButton) confirmButton.disabled = true;
+    if (runIdBox) runIdBox.hidden = true;
+    if (runIdValue) runIdValue.textContent = "—";
+    $("mabang-import-preview")?.setAttribute("hidden", "");
+    if (result) result.textContent = "请先选择站点（本店是哪个 Shopee 站点）：马帮页面不提供站点字段，这里选的站点会写进模板与副本。";
+    return Promise.resolve(null);
+  }
   state.mabangPageImportRunId = "";
   state.mabangPageImportRun = null;
   stopMabangPageImportPolling();
@@ -10482,7 +10537,7 @@ function startMabangPageImportRun() {
     method: "POST",
     body: JSON.stringify({
       platform: store.platform || "shopee",
-      country: store.country || "PH",
+      country,
       conflict_action: "update",
       expected_store_id: _mabangImportExpectedStoreId,
       account_id: $("mabang-page-import-account")?.value || "",

@@ -224,6 +224,32 @@ function selectionEvidenceMatches(actualTexts, target, optionClass = '', optionA
     || String(optionAriaSelected || '').toLowerCase() === 'true';
 }
 
+// 把「模板/AI 给的值」解析成页面枚举里的某一项。顺序很重要：
+//   ① 选项 id 完全相等（模板把属性存成 id 时走这条）；
+//   ② 标签完全相等（去掉全部空白、忽略大小写）；
+//   ③ 才做宽松的子串匹配（"Philippines" 对「菲律宾 (Philippines)」这类）。
+//
+// **纯数字的值不许走 ③**：selectTextMatches 是双向子串匹配，选项 id 又都是短数字，
+// 于是 "129"（泰国）会因为 `"129".includes("1")` 命中枚举第一项「日本 (Japan)」（id=1），
+// 现场表现就是「原产地选泰国，刊登出来是日本」（2026-11-20）。110/112/130/131/132/133
+// 这些 id 全都会塌到日本，属于同一类错值。
+function resolveOptionFromValue(options, value) {
+  const list = Array.isArray(options) ? options.filter(Boolean) : [];
+  const raw = String(value ?? '').trim();
+  if (!raw || !list.length) return undefined;
+  const exactValue = list.find((option) => String(option.value ?? '').trim() === raw);
+  if (exactValue) return exactValue;
+  const token = compactText(raw).toLocaleLowerCase();
+  const exactLabel = list.find((option) => (
+    compactText(option.label ?? option.name_cn ?? '').toLocaleLowerCase() === token
+  ));
+  if (exactLabel) return exactLabel;
+  if (/^\d+$/.test(token)) return undefined;
+  return list.find((option) => (
+    selectTextMatches(option && option.value, raw) || selectTextMatches(option && option.label, raw)
+  ));
+}
+
 // Mabang's description control is a contenteditable wangEditor. Playwright's
 // fill() maps each source line break to exactly one block element, so "A\n\nB"
 // lands as A / empty paragraph / B — i.e. one blank line, which is the spacing
@@ -3026,10 +3052,9 @@ function resolveTemplateAttributeFields(liveFields, categoryAttributes, snapshot
     const values = rawValues.map((value) => String(value ?? '').trim()).filter(Boolean);
     if (!values.length) continue;
     const options = Array.isArray(field.options) ? field.options : [];
-    const optionFor = (value) => options.find((option) => (
-      selectTextMatches(option && option.value, value)
-      || selectTextMatches(option && option.label, value)
-    ));
+    // 先 id 完全相等、再标签完全相等，最后才宽松匹配（见 resolveOptionFromValue：
+    // 纯数字不能走子串匹配，否则 "129"＝泰国 会被解析成 id=1 的「日本」）。
+    const optionFor = (value) => resolveOptionFromValue(options, value);
     const matchedOptions = values.map(optionFor);
     const hasEnum = options.length > 0;
     const allMatch = hasEnum && matchedOptions.every(Boolean);
@@ -3038,14 +3063,19 @@ function resolveTemplateAttributeFields(liveFields, categoryAttributes, snapshot
     //   - 页面现场有枚举且匹配上 → 用它的 id + 标签（老路径，不动）；
     //   - 匹配不上但快照里有 id→标签 → 用**标签**（型号 1790002081766 → T-shirt）；
     //   - 两边都没有、值本身又长得像选项 id → 不安全，整格不填、如实报错。
+    //   「枚举字段 + 纯数字但枚举里没有」同样按不安全处理：把 "129" 这种内部 id 当文本
+    //   打进马帮，页面要么加个无意义的自填项、要么匹配到别的国家，比不填更糟。
+    //   跳过后 autoFillMissingRequiredAttributes 会拿 Python 侧（方案里 id→标签）的
+    //   标签兜底。
     const entries = values.map((value, index) => {
       const live = matchedOptions[index];
       const snapshotLabel = perFieldSnapshotLabels.get(String(value)) || '';
       const text = String((live && live.label) || snapshotLabel || value).trim();
+      const unresolvedNumericEnum = hasEnum && !live && !snapshotLabel && /^\d+$/.test(text);
       return {
         text,
         id: live ? String(live.value || value).trim() : '',
-        safe: Boolean(live || snapshotLabel) || !looksLikeOptionId(text),
+        safe: Boolean(live || snapshotLabel) || (!looksLikeOptionId(text) && !unresolvedNumericEnum),
       };
     }).filter((entry) => entry.text);
     const safeEntries = entries.filter((entry) => entry.safe);
@@ -3176,11 +3206,9 @@ async function autoFillMissingRequiredAttributes(frame, task, page, resolvedFiel
       if (!liveField) continue;
       const rawValues = (Array.isArray(value) ? value : [value]).map((item) => String(item || '').trim()).filter(Boolean);
       const liveOptions = Array.isArray(liveField.options) ? liveField.options : [];
-      const matchedOptions = rawValues.map((raw) => liveOptions.find((option) => (
-        selectTextMatches(option && option.value, raw)
-        || selectTextMatches(option && option.label, raw)
-      )));
       // AI 只能补页面已有枚举，未知值丢弃；文本属性保留原始字符串。
+      // 同样的解析顺序：id/标签完全相等优先，纯数字不走子串匹配。
+      const matchedOptions = rawValues.map((raw) => resolveOptionFromValue(liveOptions, raw));
       if (liveOptions.length && matchedOptions.some((option) => !option)) { skipped += 1; continue; }
       const valueIds = rawValues.map((raw, index) => String((matchedOptions[index] && matchedOptions[index].value) || raw).trim()).filter(Boolean);
       if (!valueIds.length) { skipped += 1; continue; }
@@ -7469,12 +7497,23 @@ const SAVE_REJECTION_SELECTORS = [
 const SAVE_REJECTION_HINTS = Object.freeze([
   '\u56fe\u7247\u5bbd\u5ea6\u4e0d\u80fd\u5c0f\u4e8e',
   '\u7f16\u8f91\u56fe\u7247\u6309\u94ae\u8fdb\u884c\u4fee\u6539',
+  // 站点对描述图的限制：超张数（MY 3 张）或整站不允许插图（ID 0 张）。
+  '\u5546\u54c1\u63cf\u8ff0\u4e2d\u7684\u56fe\u7247',
 ]);
 
 const SAVE_REJECTION_RULES = Object.freeze([
   {
     code: 'description_image_width_too_small',
     pattern: /商品描述中的图片宽度不能小于|图片宽度不能小于\s*700/,
+  },
+  {
+    // 站点对「描述图总张数」有上限（尺码表那张也算），超了马帮直接拒存：
+    // MY 最多 3 张；ID 一张都不允许。上限该由任务里的 description_media.max_images
+    // 提前卡住，走到这里说明站点国家配错了（现场：MY 店被配成 PH → 不限 → 插了 10 张）。
+    // 文案按站点/版本可能变（「不能大于」「不能超过」「不支持」），这里放宽匹配；
+    // 实在认不出来的原文也会进 details.page_messages。
+    code: 'description_image_count_over_limit',
+    pattern: /商品描述中的图片(?:不能大于|不能超过|最多|不能上传|不支持|不允许)|描述中的图片不能(?:大于|超过)\s*\d+\s*张/,
   },
 ]);
 
@@ -7857,9 +7896,17 @@ async function verifySavedDraft(page, frame, saveResult, task, stages = {}, brow
 async function verifySavedDraftEvidence(page, frame, saveResult, task, stages = {}, browser = null) {
   const deadline = Date.now() + 15000;
   let evidence = {};
+  // 轮询期间见到的**所有**页面提示都留一份。以前只有命中 SAVE_REJECTION_RULES 的
+  // 文案才会保留，认不出来的直接丢掉：等到最后报 save_result_not_proven 时详情里
+  // 只剩一个空数组，运营只能靠截图猜（现场 2026-11-20「描述图不能大于3张」）。
+  const seenMessages = [];
   while (Date.now() < deadline) {
     // 一次 evaluate 同时拿成功证据和拒绝文案（原来两次，各读一遍整页 innerText）。
     const signals = await readSaveSignals(frame);
+    for (const text of signals.rejection_texts || []) {
+      const line = cleanText(text).slice(0, 200);
+      if (line && !seenMessages.includes(line) && seenMessages.length < 8) seenMessages.push(line);
+    }
     evidence = {
       success_message: signals.success_message,
       product_id: signals.product_id,
@@ -7918,6 +7965,12 @@ async function verifySavedDraftEvidence(page, frame, saveResult, task, stages = 
   const lateTexts = await readSaveRejectionTextsAcrossFrames(page, frame);
   const lateRejection = classifySaveRejection(lateTexts);
   if (lateRejection) throw saveRejectionError(lateRejection, evidence, saveResult);
+  // 轮询期看到过的提示 + 收尾这一轮扫到的，合并后一起带出去：马帮换文案时，
+  // 操作员在任务详情里就能读到原文，不用再复现一次。
+  const messages = [...new Set([
+    ...(Array.isArray(lateTexts) ? lateTexts : []).map((text) => cleanText(text).slice(0, 200)),
+    ...seenMessages,
+  ].filter(Boolean))].slice(0, 8);
   throw new BlockedError('save_result_not_proven', {
     save_clicked: true,
     publish_clicked: false,
@@ -7925,10 +7978,7 @@ async function verifySavedDraftEvidence(page, frame, saveResult, task, stages = 
     product_id: Boolean(evidence.product_id),
     save_response: (saveResult.network || []).length > 0,
     // 认不出来的页面提示也留在详情里：下次马帮换了文案，操作员不用再靠截图猜。
-    page_messages: (Array.isArray(lateTexts) ? lateTexts : [])
-      .map((text) => cleanText(text).slice(0, 200))
-      .filter(Boolean)
-      .slice(0, 5),
+    page_messages: messages,
   });
 }
 
@@ -8249,6 +8299,10 @@ module.exports = {
   normalizeContentEditableText,
   ownLabelText,
   formItemByOwnLabel,
+  // 选项解析（模板值/id → 页面选项）：纯数字不许走子串匹配，单测见
+  // scripts/verify_attribute_option_resolution.cjs。
+  resolveOptionFromValue,
+  selectTextMatches,
   prefixAnchoredItems,
   expandHiddenCategoryAttributes,
   isSelectPanelOpen,

@@ -210,7 +210,8 @@ button.secondary {
 
 /* 模板列表/卡片上的模式与就绪徽章。 */
 .template-mode-badge,
-.template-readiness-badge {
+.template-readiness-badge,
+.template-site-badge {
   display: inline-block;
   margin-left: 6px;
   padding: 1px 7px;
@@ -220,6 +221,15 @@ button.secondary {
   line-height: 18px;
   vertical-align: middle;
   white-space: nowrap;
+}
+
+/* 店铺站点徽章（PH / MY / TH …）：模板的站点决定描述配图上限等站点规则，
+   站点配错时要在列表上第一眼就能看出来（2026-11-20 MY 店被配成 PH）。 */
+.template-site-badge {
+  border: 1px solid var(--border, #d0d7de);
+  background: var(--surface-muted, #f2f4f6);
+  color: var(--ink-muted, #57606a);
+  letter-spacing: 0.4px;
 }
 
 .template-mode-badge {

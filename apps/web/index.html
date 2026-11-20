@@ -632,6 +632,8 @@
           <div class="panel-head"><h2>从马帮当前页导入</h2><button type="button" data-close-dialog="mabang-page-import-dialog" aria-label="关闭">×</button></div>
           <label class="mabang-import-account-field">马帮账号<select id="mabang-page-import-account"></select></label>
           <label class="mabang-import-account-field" id="mabang-page-import-mode-field">导入模式<select id="mabang-page-import-listing-mode"><option value="">自动识别</option><option value="cnsc_3pf">跨境本土 (3PF)</option></select></label>
+          <label class="mabang-import-account-field" id="mabang-page-import-country-field">站点<select id="mabang-page-import-country"><option value="">请选择站点</option><option value="PH">PH 菲律宾</option><option value="MY">MY 马来西亚</option><option value="SG">SG 新加坡</option><option value="TH">TH 泰国</option><option value="TW">TW 台湾</option><option value="ID">ID 印尼</option><option value="VN">VN 越南</option><option value="MX">MX 墨西哥</option><option value="BR">BR 巴西</option></select></label>
+          <p class="muted">站点必须手选：马帮商品页上的店铺不带站点字段，这里选的站点会写进店铺模板与副本，站点相关规则（如商品描述配图上限：MY 3 张、ID 0 张）都按它算。选错会让整店的自动化按别国规则执行。</p>
           <p class="muted">「跨境本土 (3PF)」只用于跨境 3PF 店：页面仍须是 CNSC 全球商品编辑页，导入后按本土要求上款（默认 SKU / 尺码表 / 描述插图 / 默认视频），同时保留跨境的站点价格表与目标站点。</p>
           <p class="muted">点「服务器 Chrome 打开」会用所选账号的浏览器打开马帮，<strong>这一步会临时把窗口显示出来</strong>（方便你手动进商品编辑页）；采集完成后自动恢复无头。展开所选店铺 picker、必要时点开每站活动 → 回到本弹窗点「采集当前页」。</p>
           <p class="muted">采集只读取当前页面，不会点击马帮的保存、保存并刊登、发布或提交。</p>
