@@ -30,7 +30,10 @@ MAX_IMAGE_BYTES = 3 * 1024 * 1024  # 3 MB per image keeps latency + cost bounded
 # 12 张 1280px 大图的请求体是 3~5MB，色卡级小图能小一个数量级，视觉模型 prefill 也快得多
 # （现场反馈「导入识别太慢」，这是导入路径上最大的一笔）。
 IMAGE_PROFILE_TEXT = {"edge": 1280, "quality": 85, "max_bytes": MAX_IMAGE_BYTES}
-IMAGE_PROFILE_COLOR = {"edge": 512, "quality": 70, "max_bytes": 400 * 1024, "always_downscale": True}
+# 颜色识别档位（2026-11-20）：512px/70 会把「杏色 vs 白色」这种只差一点暖调的布面
+# 压成几乎同一个颜色（JPEG 4:2:0 色度减半 + 量化），现场症状就是浅杏色被读成白色、
+# 杏色被读成棕色。768px/80 单张仍只有 100~200KB，一次 12 张也远低于请求预算。
+IMAGE_PROFILE_COLOR = {"edge": 768, "quality": 80, "max_bytes": 400 * 1024, "always_downscale": True}
 # 单次视觉请求的图片总预算（base64 之后）：供应商普遍按 32MB/请求封顶，超了直接
 # 413 把整趟颜色识别打死（现场症状：8-9 张 3MB 原图 → 34.9MB → 全线回落到款式A/B/C）。
 # 留足余量给提示词与 JSON，超出就把图片分批发、结果合并。
@@ -122,15 +125,11 @@ _COLOR_SYNONYMS = {
     "sage": "Green",
     "army": "Green",
     "forest": "Green",
-    "cream": "White",
-    "ivory": "White",
-    "offwhite": "White",
-    "pearl": "White",
-    "eggshell": "White",
+    # 暖白/浅棕这类「边界色」不再强行归到白色/棕色（2026-11-20）：模型对浅杏色
+    # 常常谨慎地回答 Cream/Tan，以前被这张表改成 White/Brown，正好就是现场报的
+    # 「杏色被填成白色」「杏色被填成棕色」。认不出就保留原话，让操作员看见再改。
     "chocolate": "Brown",
     "coffee": "Brown",
-    "tan": "Brown",
-    "camel": "Brown",
     "charcoal": "Black",
     "peach": "Apricot",
 }
@@ -507,6 +506,51 @@ Rules:
   the description brief; don't fabricate specifics."""
 
 
+_COLOR_SYSTEM_PROMPT = """You name garment colors for a Chinese seller listing on Shopee.
+For every attached photo, name the color of the garment FABRIC itself.
+
+Return STRICTLY valid JSON with one key and nothing else — no markdown fences, no prose:
+
+{"color_translations": {"<exact image filename from the attached list>": "<color>"}}
+
+For the color values use ONLY these fixed color names — Apricot, Purple, Blue, Red,
+Black, White, Pink, Brown, Green.
+
+How to decide (look at the knit fabric; ignore the printed graphic, the background,
+the props, the model's skin/hair, and shadowed folds):
+- White = neutral or cool white. No warm tint.
+- Apricot = pale warm cream/peach: light like white but the cloth is clearly warmer
+  (more red/orange) than the background or than a white garment in the same set.
+  When a set has both White and a pale garment with ANY visible warm/peach tint, the
+  warmer one is Apricot and the neutral/cool one is White.
+- Brown = mid-to-dark tan/caramel/chocolate. Clearly darker than Apricot; if the
+  fabric is light and only slightly warm, it is Apricot, not Brown.
+- Pink = pink/rose (cool or magenta cast), not an orange cast.
+- Red, Blue, Green, Purple, Black = the obvious readings.
+- The attached images are usually the SAME product in different colors: compare them
+  with each other (rank by warmth and lightness) before naming, instead of naming each
+  photo in isolation.
+- Never invent, compound or translate color names (no "Cream", "Beige", "Tan",
+  "Navy", "LightPurple"); never answer in Chinese.
+- Exception — variant sets: when the images show what the package contains instead of a
+  color difference (e.g. wig only, costume only, and the full set), name each variant by
+  its contents — "Costume" for the garment alone, "Wig" for the wig alone, "Costume + Wig"
+  for the full set (same for other accessories, e.g. "Costume + Shoes"). These content
+  labels are the only values allowed outside the fixed color list. Vendors may name files
+  "Costumes" / "Only Wig" — map them to the same labels.
+- Use the exact filename from the attached list as the key. Numeric parts of a
+  filename are image indexes, not colors."""
+
+
+def color_system_prompt() -> str:
+    """颜色那一趟的专用提示词：只做配色，不复用写标题/详情的长提示词。
+
+    以前颜色趟复用 _SYSTEM_PROMPT（写标题 + 详情 + 属性 + 颜色），模型大半注意力
+    花在文案上，配色只扫一眼；且 9 个颜色没有任何锚点说明，「杏色/白色/棕色」这种
+    只差一点暖调和明度的边界就成了掷骰子。"""
+    return _COLOR_SYSTEM_PROMPT
+
+
 def build_system_prompt(
     title_skill: dict[str, Any] | None = None,
     hot_words: list[str] | None = None,
@@ -587,6 +631,13 @@ def _build_user_prompt(
                 "Fixed color palette — every color value in color_translations must be "
                 f"exactly one of: {FIXED_COLOR_PROMPT_LIST}. Pick the closest match; do "
                 "not invent, mix, or translate into other color names."
+            )
+            parts.append(
+                "Judge the garment fabric only — ignore the printed graphic, the background, "
+                "props and the model's skin. These images are usually the same product in "
+                "different colors, so compare them with each other before naming: the pale "
+                "garment with a visible warm/peach tint is Apricot, the neutral or cool pale "
+                "one is White, and only a clearly darker tan/caramel is Brown."
             )
     elif unnamed_variant_files:
         parts.append(
@@ -1071,7 +1122,7 @@ def _color_pass_result(
     def ask(batch: list[tuple[Path, GenerationImage]]) -> tuple[dict[str, str], str]:
         names = [path.name for path, _ in batch]
         request = GenerationRequest(
-            system=build_system_prompt(),
+            system=color_system_prompt(),
             user=_build_user_prompt(base_product, attribute_hints, assets, names, color_only=True),
             # Reasoning models spend thinking tokens out of this budget before any text.
             max_tokens=8192,

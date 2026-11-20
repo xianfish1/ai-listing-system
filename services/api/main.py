@@ -488,12 +488,19 @@ def _apply_ai_audience_to_title_context(
     connection: dict[str, Any] | None,
     overrides: dict[str, Any],
     attribute_hints: dict[str, str] | None = None,
+    *,
+    enabled: bool = True,
 ) -> tuple[dict[str, Any], str, str]:
     """人群未确认时先让 AI 识别款式适合谁，再按识别结果重新匹配标题规则。
 
     返回 (context, 识别到的人群, 失败原因)。操作员已指定规则/人群、或商品本身已经
     有人群证据（title_audience / 属性里的 Gender）时直接跳过；AI 失败时原样返回
-    context——这一步只是选规则的依据，绝不能阻断导入和预览。"""
+    context——这一步只是选规则的依据，绝不能阻断导入和预览。
+
+    ``enabled`` 是「导入/重识别时开了 AI 标题」的开关：人群归类只服务于标题规则
+    匹配，AI 标题没开就整步跳过，一次 AI 调用都不发（2026-11-20）。"""
+    if not enabled:
+        return context, "", ""
     if overrides.get("audience") or overrides.get("skill_id"):
         return context, "", ""
     try:
@@ -697,7 +704,8 @@ def _enrich_with_vision_listing(
     detected_audience = ""
     if title_context is not None and want_title:
         title_context, detected_audience, audience_error = _apply_ai_audience_to_title_context(
-            title_context, product, assets, gateway, connection, title_overrides, hints
+            title_context, product, assets, gateway, connection, title_overrides, hints,
+            enabled=want_title,
         )
         stages["audience"] = "done" if detected_audience else ("failed" if audience_error else "skipped")
         if detected_audience:

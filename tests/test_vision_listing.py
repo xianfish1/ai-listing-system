@@ -153,7 +153,7 @@ def test_color_translations_are_returned_for_filename_color_hints(tmp_path: Path
 
 def test_snap_color_to_palette_maps_only_known_colors() -> None:
     """AI 颜色名归到 9 个固定色板：色板名、同义色、修饰前缀/多词写法都能认；
-    套装标签和色板外的颜色（灰/黄/卡其）保持原样，不能被悄悄改成别的颜色。"""
+    套装标签和色板外的颜色（灰/黄/卡其/奶油/浅棕）保持原样，不能被悄悄改成别的颜色。"""
     assert vision_listing.FIXED_PRODUCT_COLORS == (
         "Apricot", "Purple", "Blue", "Red", "Black", "White", "Pink", "Brown", "Green",
     )
@@ -166,6 +166,45 @@ def test_snap_color_to_palette_maps_only_known_colors() -> None:
     assert vision_listing.snap_color_to_palette("Costume + Wig") == ""
     assert vision_listing.snap_color_to_palette("Gray") == ""
     assert vision_listing.snap_color_to_palette("") == ""
+
+
+def test_warm_neutral_hedges_are_not_forced_into_white_or_brown() -> None:
+    """模型对浅杏色谨慎地答 Cream/Tan/Camel 时，不能再被改写成 White/Brown。
+
+    现场症状「杏色被填成白色 / 棕色」正是这张同义词表造成的：Cream→White、
+    Tan/Camel→Brown。现在认不出就保留原话（操作员看得见、能改），不再猜。"""
+    for hedge in ("Cream", "Ivory", "Pearl", "Eggshell", "Tan", "Camel", "Beige", "Khaki"):
+        assert vision_listing.snap_color_to_palette(hedge) == ""
+    assert vision_listing._normalize_color_translations({"1 (1).png": "Tan"}) == {"1 (1).png": "Tan"}
+    assert vision_listing._normalize_color_translations({"1 (2).png": "Cream"}) == {"1 (2).png": "Cream"}
+    # 明确的棕色/杏色仍然照常归板。
+    assert vision_listing.snap_color_to_palette("Chocolate") == "Brown"
+    assert vision_listing.snap_color_to_palette("Coffee") == "Brown"
+    assert vision_listing.snap_color_to_palette("Peach") == "Apricot"
+
+
+def test_color_pass_uses_a_dedicated_color_prompt(tmp_path: Path) -> None:
+    """颜色那一趟有自己的短提示词：只讲布面颜色、杏/白/棕的边界和「同一批互相比较」，
+    不再复用写标题/详情的长提示词（文案会挤占配色的注意力）。"""
+    variant = _write_image(tmp_path, "1 (1).png")
+    assets = [{"file_name": variant.name, "file_path": str(variant), "asset_type": "variant"}]
+    product = {"main_image": variant.name, "recognized_colors": [], "variant_count": 1}
+
+    gateway = _StubGateway('{"title": "", "description": "", "color_translations": {}}')
+    vision_listing.generate_listing_from_images(
+        gateway=gateway, connection={"id": "c"}, base_product=product, assets=assets,
+        want_title=False, want_description=False,
+    )
+    system = gateway.last_request.system
+    assert "garment FABRIC" in system
+    assert "Apricot = pale warm cream/peach" in system
+    assert "darker than Apricot" in system
+    assert "compare them" in system
+    assert "use ONLY these fixed color names" in system
+    # 套装/假发这类「按内容命名」的例外必须保留，否则 BF20 那类商品会退化成按颜色命名。
+    assert "Costume + Wig" in system
+    # 写标题/详情的长提示词不会出现在颜色趟。
+    assert "copywriter" not in system
 
 
 def test_color_translation_normalization_keeps_set_labels_and_off_palette_colors() -> None:

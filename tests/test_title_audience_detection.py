@@ -65,3 +65,17 @@ def test_detection_failure_keeps_default_context(monkeypatch):
     assert out is context
     assert detected == ""
     assert "图片" in error
+
+
+def test_title_generation_disabled_skips_audience_classification(monkeypatch):
+    """AI 标题没开时整步跳过人群（类目）归类：不发请求、不改上下文（2026-11-20）。"""
+    calls = []
+    monkeypatch.setattr(vision_listing, "detect_product_audience", lambda **kw: calls.append(kw) or ("girls", ""))
+
+    context = _context()
+    out, detected, error = main._apply_ai_audience_to_title_context(
+        context, {"title_category": "tshirt"}, [], object(), {"id": "c"}, {}, enabled=False
+    )
+
+    assert (out, detected, error) == (context, "", "")
+    assert calls == []

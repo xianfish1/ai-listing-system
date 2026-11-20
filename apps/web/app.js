@@ -8373,18 +8373,33 @@ function renderNasBrowserSelection() {
 
 // AI 识别分阶段轮播：导入请求是同步的，等待期间无法拿到服务端真实阶段边界，
 // 所以按固定顺序轮播阶段文案；请求返回后用 ai_stages 显示真实结果。
+// 文案按设置里实际开启的项筛：AI 标题没开就不会跑「判断款式人群」，也不该显示
+// 这一步（否则操作员会以为系统还在做人群/类目归类）。
 const AI_IMPORT_STAGE_MESSAGES = [
   "AI 识别中：正在判断款式适合的人群…",
   "AI 识别中：正在识别标题和详情…",
   "AI 识别中：正在识别颜色图…",
 ];
 
+function aiImportStageMessages() {
+  const aiGen = state.runtimeConfiguration?.ai_listing_generation || {};
+  const messages = [];
+  if (aiGen.generate_title_on_import === true) {
+    messages.push(AI_IMPORT_STAGE_MESSAGES[0], AI_IMPORT_STAGE_MESSAGES[1]);
+  } else if (aiGen.generate_description_on_import === true) {
+    messages.push(AI_IMPORT_STAGE_MESSAGES[1]);
+  }
+  messages.push(AI_IMPORT_STAGE_MESSAGES[2]);
+  return messages;
+}
+
 function startAiImportStageTicker(renderFn) {
+  const messages = aiImportStageMessages();
   let index = 0;
-  renderFn(AI_IMPORT_STAGE_MESSAGES[0]);
+  renderFn(messages[0]);
   return setInterval(() => {
-    index = (index + 1) % AI_IMPORT_STAGE_MESSAGES.length;
-    renderFn(AI_IMPORT_STAGE_MESSAGES[index]);
+    index = (index + 1) % messages.length;
+    renderFn(messages[index]);
   }, 4000);
 }
 
