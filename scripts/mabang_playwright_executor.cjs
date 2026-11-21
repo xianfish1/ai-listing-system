@@ -5790,7 +5790,7 @@ async function pickVideoLibraryRow(frame, wanted) {
     const searched = await clickVideoAdminSearch(frame);
     if (!searched) return { ok: false, why: 'search_button_not_found' };
     await sleep(i === 0 ? 1500 : 1200);
-    clicked = await frame.evaluate(({ title, wantedId, wantedName, chooseLabel, requireUploaded }) => {
+    clicked = await frame.evaluate(({ title, wantedId, wantedName, chooseLabel, requireUploaded, acceptSingleRow }) => {
       const norm = (value) => String(value || '').replace(/\s+/g, '');
       const dialog = Array.from(document.querySelectorAll('.el-dialog'))
         .find((node) => norm((node.querySelector('.el-dialog__title') || {}).textContent) === norm(title));
@@ -5804,7 +5804,15 @@ async function pickVideoLibraryRow(frame, wanted) {
         const button = Array.from(row.querySelectorAll('button,a,.el-button')).find((node) => norm(node.textContent) === norm(chooseLabel));
         if (button) { button.click(); return { ok: true }; }
       }
-      return { ok: false, why: 'row_not_found' };
+      // 3PF（CNSC 页）的视频库表格不把 videoId 渲染进行文本：搜索已按「视频ID」过滤，
+      // 结果只剩 1 行时就是这条视频。此时直接点该行「选择」，由调用方回读表单视频
+      // 校验（URL 里必须带这个 ID 的尾段），认错也不会写错视频。
+      if (acceptSingleRow && wantedId && rows.length === 1) {
+        const button = Array.from(rows[0].querySelectorAll('button,a,.el-button')).find((node) => norm(node.textContent) === norm(chooseLabel));
+        if (button) { button.click(); return { ok: true, via: 'only_row' }; }
+        return { ok: false, why: 'choose_button_not_found', rows: rows.length };
+      }
+      return { ok: false, why: 'row_not_found', rows: rows.length };
     }, wanted);
   }
   return clicked;
@@ -5887,11 +5895,18 @@ async function videoLibrarySummary(frame, videoId, videoTitle) {
     if (!dialog) return { error: 'no_dialog' };
     const pager = Array.from(dialog.querySelectorAll('.el-pagination, .vxe-pager')).map((node) => norm(node.textContent)).join(' ');
     const total = (pager.match(/\u5171\s*(\d+)\s*\u6761/) || [])[1] || '';
+    const rows = Array.from(dialog.querySelectorAll('table.vxe-table--body tbody tr'));
     return {
       video_id: wantedId || '',
       video_title: wantedTitle || '',
       library_total: total,
-      rows_on_page: dialog.querySelectorAll('table.vxe-table--body tbody tr').length,
+      rows_on_page: rows.length,
+      // 现场样本：行文本里到底有没有视频 ID、行内有哪些按钮 —— 判断是"ID 没渲染"
+      // 还是"选择按钮不在行里"。
+      row_samples: rows.slice(0, 3).map((row) => ({
+        text: norm(row.textContent).slice(0, 120),
+        buttons: Array.from(row.querySelectorAll('button,a,.el-button')).map((node) => norm(node.textContent)).filter(Boolean).slice(0, 6),
+      })),
     };
   }, { title: VIDEO_TEXT_TITLE, wantedId: videoId, wantedTitle: videoTitle }).catch(() => ({ error: 'evaluate_failed' }));
 }
@@ -5900,7 +5915,8 @@ async function videoLibrarySummary(frame, videoId, videoTitle) {
 // 操作员手工路径即自动化路径：打开 视频管理 → 搜索类型下拉（默认 视频标题）改选
 // 「视频ID」→ 搜索框键入 videoId → 搜索 → 点该行「选择」。element-ui 的选中值存在
 // input.value 里（不在 textContent），搜索框的 Vue 绑定要逐字键入（见 typeIntoField）。
-async function selectTemplateVideoById(frame, videoId, videoTitle = '') {
+async function selectTemplateVideoById(frame, videoId, videoTitle = '', options = {}) {
+  const allowUniqueRow = options.allowUniqueRow === true;
   if (!(await openVideoAdmin(frame))) throw new Error('video_admin_dialog_not_open');
   try {
     // 1) 搜索类型切到「视频ID」（DOM 点击 + 回读确认；Playwright 的 actionability 会被整屏 overlay 挡住）。
@@ -5913,6 +5929,7 @@ async function selectTemplateVideoById(frame, videoId, videoTitle = '') {
       if (String(typed).startsWith('typed')) {
         clicked = await pickVideoLibraryRow(frame, {
           title: VIDEO_TEXT_TITLE, wantedId: videoId, wantedName: '', chooseLabel: VIDEO_TEXT.choose, requireUploaded: false,
+          acceptSingleRow: allowUniqueRow,
         });
       }
     }
@@ -5936,6 +5953,11 @@ async function selectTemplateVideoById(frame, videoId, videoTitle = '') {
     await sleep(1500);
     const attached = await attachedFormVideo(frame);
     if (!attached.url) throw new Error('video_attach_not_verified');
+    // 「只剩一行就直接选」这条兜底必须回读确认选中的就是目标视频：马帮的 Shopee
+    // 视频 URL 里带 videoId 本身，认错/选错都会在这里暴露，不会写进草稿。
+    if (clicked.via === 'only_row' && !compactText(attached.url).includes(compactText(videoId))) {
+      throw new Error(`video_attach_mismatch:${clicked.why || 'only_row'}`);
+    }
     return { status: 'attached', video_id: videoId, video_url: attached.url, source: 'template_default' };
   } finally {
     await closeVideoAdminDialog(frame);
@@ -5950,7 +5972,12 @@ async function uploadProductVideo(frame, task, page) {
   // 模板默认视频（本土）：副本带 default_video_id 时直接按 ID 选择，不再上传。
   const defaultVideoId = cleanText(video.default_video_id);
   if (video.select_by_id && defaultVideoId) {
-    return selectTemplateVideoById(frame, defaultVideoId, cleanText(video.video_title));
+    // 3PF 页面的视频库表格不渲染 videoId 文本（本土/纯跨境照旧）：只对 3PF 打开
+    // 「搜索后只剩一行就直接选」的兜底，选完仍回读表单 URL 校验。
+    const threePfVideoMode = normalizeListingMode((task.store || {}).listing_mode) === 'cnsc_3pf';
+    return selectTemplateVideoById(frame, defaultVideoId, cleanText(video.video_title), {
+      allowUniqueRow: threePfVideoMode,
+    });
   }
   const uploadPath = cleanFilePath(video.upload_path);
   if (!uploadPath || !fs.existsSync(uploadPath)) throw new Error('video_file_missing');
