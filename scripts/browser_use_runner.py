@@ -41,7 +41,10 @@ from services.api.subprocess_utils import no_console_window_kwargs  # noqa: E402
 SAVE_BUTTON_TEXT = "保存"
 PUBLISH_BUTTON_TEXTS = ["保存并刊登", "刊登", "发布", "提交审核"]
 FORBIDDEN_BUTTON_TEXTS = [SAVE_BUTTON_TEXT, *PUBLISH_BUTTON_TEXTS]
-SHOPEE_TITLE_MAX_LENGTH = 100
+# Shopee 商品标题上限按 120 字符（2026-11-21 由 100 上调）：泰国站点泰文标题
+# 100 字符很容易写满，按 100 裁会把尾巴整段砍掉（现场：106 字符泰文标题被
+# 词边界回退到 98）；Shopee 后台本身允许 120。
+SHOPEE_TITLE_MAX_LENGTH = 120
 
 # Executor prints progress events as MABANG_PLAYWRIGHT_EVENT {json} lines while it
 # fills the form. Each line carries {event, ...data}; we keep the ordered stage

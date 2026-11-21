@@ -447,9 +447,25 @@ def test_browser_use_task_plan_limits_shopee_title_at_a_word_boundary(tmp_path: 
     task = browser_use_runner.build_browser_use_task_plan(payload, tmp_path / "uploads", allow_save=True)
 
     title = task["basic_info"]["title"]
-    assert len(title) <= 100
+    assert len(title) <= browser_use_runner.SHOPEE_TITLE_MAX_LENGTH
     assert source_title.startswith(title)
     assert title.endswith("AnimeGraphicCottonTee")
+
+
+def test_browser_use_task_plan_keeps_thai_title_under_120_chars_intact(tmp_path: Path) -> None:
+    # 现场（2026-11-21）：106 字符泰文标题被 100 字符上限按词边界砍到 98，
+    # 马帮草稿只剩半截。上限 120 后这类标题必须原样进任务计划。
+    payload = _ready_payload()
+    thai_title = (
+        "เสื้อยืดเด็กผู้ชาย ผ้าฝ้าย แขนสั้น Lightning McQueen Cars "
+        "พิมพ์หน้าหลัง ผ้านุ่ม ใส่สบาย สำหรับเด็ก 1-12 ปี"
+    )
+    assert 100 < len(thai_title) <= browser_use_runner.SHOPEE_TITLE_MAX_LENGTH
+    payload["browser_inputs"]["title"] = thai_title
+
+    task = browser_use_runner.build_browser_use_task_plan(payload, tmp_path / "uploads", allow_save=True)
+
+    assert task["basic_info"]["title"] == thai_title
 
 
 def test_browser_task_plan_blocks_explicit_missing_upload_file(tmp_path: Path) -> None:
