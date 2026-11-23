@@ -1642,6 +1642,40 @@ async function isFillableControl(locator, timeoutMs = 5000) {
   }
 }
 
+// 页面控件自己带 maxLength 时（商品标题的 input 就是），超长值会被浏览器/页面直接
+// 截断，回读必然和期望值不同，整单白跑一次再报 field_value_not_verified。
+// 只对明确要求 fitToMaxLength 的字段（标题）生效：描述等长文本宁可报错，也不能被
+// 悄悄截掉后半段。
+async function fitValueToControl(field, value) {
+  const text = String(value ?? '');
+  const maxLength = await field
+    .evaluate((node) => {
+      const limit = Number(node && node.maxLength);
+      return Number.isFinite(limit) && limit > 0 ? limit : 0;
+    })
+    .catch(() => 0);
+  if (!maxLength || text.length <= maxLength) return { value: text, maxLength, truncated: false };
+  let clipped = text.slice(0, maxLength);
+  // 按词边界裁，别把最后一个单词劈成两半；边界太靠前就按硬截断处理。
+  const boundary = clipped.lastIndexOf(' ');
+  if (boundary >= Math.floor(maxLength / 2)) clipped = clipped.slice(0, boundary);
+  return { value: clipped.trim(), maxLength, truncated: true };
+}
+
+// 马帮的 Element UI 表单在 fill() 之后是异步回写的：同一次事件循环里读 value 可能
+// 还是旧值（页面重渲染时甚至是空值），原来只读一次就判 field_value_not_verified。
+// 这里给页面最多 2.5s 把值渲染出来，正常情况第一轮就命中，不会拖慢成功路径。
+async function waitForFieldValue(field, expected, timeoutMs = 2500) {
+  const wanted = cleanText(expected);
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    const actual = await field.inputValue().catch(() => field.innerText().catch(() => ''));
+    if (cleanText(actual) === wanted) return true;
+    if (Date.now() >= deadline) return false;
+    await sleep(150);
+  }
+}
+
 async function setField(frame, labels, value, options = {}) {
   const field = await uniqueField(frame, labels, undefined, options);
   if ((await field.getAttribute('contenteditable')) === 'true') {
@@ -1654,16 +1688,65 @@ async function setField(frame, labels, value, options = {}) {
       throw new BlockedError('field_value_not_verified', { field: labels[0] });
     }
     return;
-  } else {
-    if (!(await isFillableControl(field))) {
-      throw new BlockedError('field_not_editable', { field: labels[0] });
+  }
+  if (!(await isFillableControl(field))) {
+    throw new BlockedError('field_not_editable', { field: labels[0] });
+  }
+  let expected = String(value ?? '');
+  if (options.fitToMaxLength) {
+    const fitted = await fitValueToControl(field, expected);
+    if (fitted.truncated) {
+      attrPickDebug({
+        phase: 'field_value_fitted_to_maxlength',
+        field: labels[0],
+        expected_length: expected.length,
+        filled_length: fitted.value.length,
+        max_length: fitted.maxLength,
+      });
+      expected = fitted.value;
     }
-    await field.fill(String(value));
   }
+  await field.fill(expected);
+  if (await waitForFieldValue(field, expected, options.verifyTimeoutMs)) return;
   const actual = await field.inputValue().catch(() => field.innerText().catch(() => ''));
-  if (cleanText(actual) !== cleanText(value)) {
-    throw new BlockedError('field_value_not_verified', { field: labels[0] });
+  const control = await field
+    .evaluate((node) => ({
+      tag: node && node.tagName ? String(node.tagName).toLowerCase() : '',
+      type: node && node.getAttribute ? String(node.getAttribute('type') || '') : '',
+      max_length: node && Number.isFinite(Number(node.maxLength)) ? Number(node.maxLength) : 0,
+      readonly: Boolean(node && node.hasAttribute && node.hasAttribute('readonly')),
+      disabled: Boolean(node && node.hasAttribute && node.hasAttribute('disabled')),
+    }))
+    .catch(() => null);
+  attrPickDebug({
+    phase: 'field_value_mismatch',
+    field: labels[0],
+    expected: cleanText(expected).slice(0, 200),
+    actual: cleanText(actual).slice(0, 200),
+    expected_length: cleanText(expected).length,
+    actual_length: cleanText(actual).length,
+    control,
+  });
+  // 页面按自己的 maxLength 截断（attr 读不到、但 JS 里 slice）时，回读会变成期望值
+  // 的前缀。标题这类"平台限长"字段按页面实际能存下的值放行，别为几个字符整单 blocked；
+  // 其它字段仍然报错，避免把被截断的描述当成保存成功。
+  const actualText = cleanText(actual);
+  const expectedText = cleanText(expected);
+  if (
+    options.fitToMaxLength &&
+    actualText &&
+    actualText.length >= 20 &&
+    expectedText.startsWith(actualText)
+  ) {
+    attrPickDebug({
+      phase: 'field_value_truncated_by_page',
+      field: labels[0],
+      expected_length: expectedText.length,
+      actual_length: actualText.length,
+    });
+    return;
   }
+  throw new BlockedError('field_value_not_verified', { field: labels[0] });
 }
 
 // 马帮/Element UI 的下拉是 toggle：已经展开时再点一次 trigger 会把它关掉。
@@ -3616,7 +3699,7 @@ async function setCategoryAttributes(frame, task, page) {
 async function fillBasicInfo(frame, task) {
   const basic = task.basic_info || {};
   await setField(frame, ['Parent SKU'], basic.parent_sku);
-  await setField(frame, [TEXT.title], basic.title);
+  await setField(frame, [TEXT.title], basic.title, { fitToMaxLength: true });
   await setField(frame, [TEXT.description], basic.description);
   emit('stage', { stage: 'fill_basic_info', ok: true });
   return { parent_sku: true, title: true, description: true };

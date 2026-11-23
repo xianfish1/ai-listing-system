@@ -3557,3 +3557,21 @@ test('视频上传不再固定睡 1 秒，改成等上传弹窗从布局消失',
   assert.match(fn, /const uploadDialogGoneAt = Date\.now\(\) \+ 1000;/);
   assert.match(fn, /getComputedStyle\(ud\)\.display === 'none'/);
 });
+
+test('商品标题超长时按控件 maxLength 裁剪，回读等 Element UI 异步写回', () => {
+  const source = fs.readFileSync(path.join(__dirname, '../scripts/mabang_playwright_executor.cjs'), 'utf8');
+  const fitFn = source.slice(
+    source.indexOf('async function fitValueToControl('),
+    source.indexOf('async function waitForFieldValue('),
+  );
+  assert.match(fitFn, /Number\(node && node\.maxLength\)/);
+  assert.match(fitFn, /clipped\.lastIndexOf\(' '\)/);
+  assert.match(source, /setField\(frame, \[TEXT\.title\], basic\.title, \{ fitToMaxLength: true \}\)/);
+  const waitFn = source.slice(
+    source.indexOf('async function waitForFieldValue('),
+    source.indexOf('async function setField('),
+  );
+  assert.match(waitFn, /await sleep\(150\)/);
+  assert.match(source, /field_value_fitted_to_maxlength/);
+  assert.match(source, /field_value_mismatch/);
+});
