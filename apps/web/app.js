@@ -10701,6 +10701,8 @@ function renderMabangImportPreview(run) {
   };
   const store = snapshot.store || {};
   const category = snapshot.category || {};
+  const priceCurrency = ({ PH: "PHP", MY: "MYR", TH: "THB", ID: "IDR", SG: "SGD", TW: "TWD", VN: "VND", BR: "BRL", MX: "MXN" })[String(store.country || "").toUpperCase()] || "";
+  const priceSuffix = priceCurrency ? `(${priceCurrency})` : "";
   setGroup(
     "mabang-import-store-category",
     `<p>${escapeHtml(store.name || "未识别店铺")} · ${escapeHtml(category.path || "未识别类目")}</p>`,
@@ -10728,8 +10730,8 @@ function renderMabangImportPreview(run) {
     package_length_cm: "包裹长度(cm)",
     package_width_cm: "包裹宽度(cm)",
     package_height_cm: "包裹高度(cm)",
-    normal_price: "原价(PHP)",
-    sale_price: "售价(PHP)",
+    normal_price: `原价${priceSuffix}`,
+    sale_price: `售价${priceSuffix}`,
   };
   const transactionPreview = { ...transaction, ...priceDefaults };
   if (cnsc) {
@@ -13125,7 +13127,7 @@ const AUTOMATION_ERROR_LABELS = {
   description_media_position_unrepaired: "描述图片位置没修好（撤销没把图撤回去），本次插图已停止，请人工调整描述末尾",
   description_media_existing_position_not_at_tail: "描述里已有的图片不在末尾（可能在正文中间），请人工调整描述末尾",
   description_media_order_unexpected: "描述插图顺序不对，已尝试撤回本次插入，请检查描述末尾",
-  description_media_over_limit: "描述里已有的图片超过该站点上限（马来站最多 3 张），请手动删掉多余的图",
+  description_media_over_limit: "描述里已有的图片超过该站点上限，请手动删掉多余的图",
   description_size_chart_not_inserted: "尺码图没插进描述，已尝试撤回本次插入",
   description_product_images_not_inserted: "产品图没插进描述，已尝试撤回本次插入",
   description_caret_not_at_end: "描述正文没滚到底，本次未插图（描述未改动）",

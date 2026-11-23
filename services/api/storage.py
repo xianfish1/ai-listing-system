@@ -50,6 +50,13 @@ from services.api.category_profile_service import (
     reject_version,
 )
 from services.api.db_store import PostgresJsonStore
+from services.api.site_rules import currency_for_country
+from services.api.store_migrations import (
+    drop_unsupported_collar_type,
+    normalize_store_option_currency,
+    normalize_template_currency,
+    repair_local_category_profile_sources,
+)
 from services.api.marketplace_category_catalog import (
     complete_catalog_run,
     create_catalog_run,
@@ -1413,6 +1420,18 @@ def _normalize_legacy_store_shape(data: dict[str, Any], *, migrate_job_snapshots
     if migrate_job_snapshots and _migrate_automation_job_snapshots_out(data):
         changed = True
     if migrate_job_snapshots and _migrate_automation_job_snapshot_rows(data):
+        changed = True
+    # 跨设备统一修复：马来店采集被写进本土类目方案后，所有本地部署都会在冷加载时
+    # 自己把方案恢复成同国家的本土采集，并把本土模板改绑过去（幂等，见 store_migrations）。
+    if repair_local_category_profile_sources(data, now=utc_now()):
+        changed = True
+    # 「衣领类型=Crew Neck」是页面枚举里不存在的自选值，马帮下拉选不到；清掉。
+    if drop_unsupported_collar_type(data, now=utc_now()):
+        changed = True
+    # 存量模板币种按站点纠正（历史缺省 MYR）。
+    if normalize_template_currency(data, now=utc_now()):
+        changed = True
+    if normalize_store_option_currency(data, now=utc_now()):
         changed = True
     return changed
 
@@ -3402,7 +3421,10 @@ def _copy_store_template_payload(
         "store_name": str(target_store.get("store_name") or "").strip(),
         "platform": str(target_store.get("platform") or source.get("platform") or "shopee").strip().lower(),
         "country": str(target_store.get("country") or target_store.get("site") or "").strip().upper(),
-        "currency": str(target_store.get("currency") or "").strip(),
+        "currency": str(
+            target_store.get("currency")
+            or currency_for_country(target_store.get("country") or target_store.get("site"))
+        ).strip().upper(),
         "mabang_store_id": str(target_store.get("mabang_store_id") or "").strip(),
         # 另存模板也换账号：副本跟着目标店铺的账号走（跨账号搬模板因此不需要额外配置）。
         "account_id": str(target_store.get("account_id") or "").strip(),
@@ -6995,6 +7017,19 @@ def _build_automation_job_in_store(
             "missing_fields": ["listing_copy"],
             "error": "Listing copy not found",
         }
+    # 模板新增的类目属性值按设计不会改早先创建的副本；如果直接开跑，执行器只拿得到副本
+    # 旧值，模板里新配的字段就会在草稿里空着（现场：模板补了条件/定制产品/型号/尺寸，
+    # 任务跑完马帮里这些格还是空）。建任务时按「从模板补全缺失属性」同一口径补齐并落盘，
+    # 只补缺失字段，副本里已有的值一律不动。
+    missing_before_job = _missing_template_attribute_fields(data, listing_copy)
+    if missing_before_job:
+        template_values = _template_attribute_values_for_copy(data, listing_copy)
+        values = dict(listing_copy.get("attribute_values") or listing_copy.get("category_attributes") or {})
+        for field_id in missing_before_job:
+            values[field_id] = deepcopy(template_values[field_id])
+        listing_copy["attribute_values"] = values
+        listing_copy["category_attributes"] = deepcopy(values)
+        listing_copy["updated_at"] = now
     skus = _listing_skus_in_store(data, listing_copy_id)
     prices = _listing_prices_in_store(data, listing_copy_id)
     readiness = _check_automation_readiness(
@@ -7743,8 +7778,8 @@ def replace_product_prices(product_id: str, rows: list[dict[str, Any]]) -> dict[
             "sku_code": sku_code,
             "platform": row.get("platform") or product.get("platform") or "shopee",
             "store": row.get("store") or product.get("store") or "",
-            "country": row.get("country") or "MY",
-            "currency": row.get("currency") or "MYR",
+            "country": row.get("country") or "",
+            "currency": row.get("currency") or currency_for_country(row.get("country")),
             "cost_price": _float_or_empty(row.get("cost_price") or default_cost),
             "shipping_cost": _float_or_empty(row.get("shipping_cost") or price_rule.get("shipping_cost") or 0),
             "fee_rate": _float_or_empty(row.get("fee_rate") or 0.08),
@@ -9401,12 +9436,17 @@ def _normalize_store_template_payload(payload: dict[str, Any], *, now: str) -> d
     package_length_cm = _float_or_empty(payload.get("package_length_cm"))
     package_width_cm = _float_or_empty(payload.get("package_width_cm"))
     package_height_cm = _float_or_empty(payload.get("package_height_cm"))
+    # 币种跟着站点走：以前缺省写死 MYR，泰/印尼/新加坡店新建模板都会记错币种。
+    country = str(_value_or_default(payload, profile_defaults, "country", "") or "").strip().upper()
+    currency = str(
+        _value_or_default(payload, profile_defaults, "currency", "") or currency_for_country(country)
+    ).strip().upper()
     return {
         "id": payload.get("id") or str(uuid.uuid4()),
         "store_name": str(payload.get("store_name") or "").strip(),
         "platform": str(payload.get("platform") or "shopee").strip().lower(),
-        "country": str(_value_or_default(payload, profile_defaults, "country", "MY") or "MY").strip().upper(),
-        "currency": str(_value_or_default(payload, profile_defaults, "currency", "MYR") or "MYR").strip(),
+        "country": country,
+        "currency": currency,
         "template_name": str(payload.get("template_name") or "").strip(),
         "category_profile_id": str(_value_or_default(payload, profile_defaults, "category_profile_id", "") or "").strip(),
         "category_profile_version_id": requested_version_id or published_version_id,
@@ -9750,7 +9790,7 @@ def _build_store_listing_copy(
             copy_category_id,
             data or {},
             platform=template.get("platform") or "shopee",
-            country=template.get("country") or "MY",
+            country=template.get("country") or "",
         )
         attribute_values = {
             str(field.get("field_id")): deepcopy(field.get("default_value"))
@@ -9774,8 +9814,8 @@ def _build_store_listing_copy(
         "store_name": template.get("store_name") or "",
         "platform": template.get("platform") or "shopee",
         "listing_mode": normalize_listing_mode(template.get("listing_mode")),
-        "country": template.get("country") or "MY",
-        "currency": template.get("currency") or "MYR",
+        "country": template.get("country") or "",
+        "currency": template.get("currency") or currency_for_country(template.get("country")),
         "category": template.get("product_line") or base.get("category") or "",
         # Category rule: base product filled a product_category → use it and
         # ignore the store template's category; base has none → template default.
@@ -10390,8 +10430,8 @@ def _generate_listing_prices(
             "sku_code": sku.get("sku_code") or "",
             "platform": template.get("platform") or "shopee",
             "store": template.get("store_name") or "",
-            "country": template.get("country") or "MY",
-            "currency": template.get("currency") or "MYR",
+            "country": template.get("country") or "",
+            "currency": template.get("currency") or currency_for_country(template.get("country")),
             "normal_price": normal_price,
             "sale_price": sale_price,
             "cost_price": "" if cost_price in ("", None) else float(cost_price),
@@ -10444,8 +10484,8 @@ def _sync_listing_prices_from_template(prices: list[dict[str, Any]], template: d
         price.update({
             "platform": template.get("platform") or "shopee",
             "store": template.get("store_name") or "",
-            "country": template.get("country") or "MY",
-            "currency": template.get("currency") or "MYR",
+            "country": template.get("country") or "",
+            "currency": template.get("currency") or currency_for_country(template.get("country")),
             "normal_price": "" if global_mode else _float_or_empty(template.get("normal_price")),
             "sale_price": "" if global_mode else _float_or_empty(template.get("sale_price")),
             "discount_label": "" if global_mode else (template.get("discount_label") or ""),
@@ -11123,8 +11163,8 @@ def _generate_prices_from_skus(product: dict[str, Any], skus: list[dict[str, Any
             "sku_code": sku.get("sku_code") or "",
             "platform": product.get("platform") or "shopee",
             "store": product.get("store") or "",
-            "country": "MY",
-            "currency": "MYR",
+            "country": product.get("country") or "",
+            "currency": product.get("currency") or currency_for_country(product.get("country")),
             "cost_price": price.get("large_cost") if is_large else price.get("cost"),
             "shipping_cost": price.get("shipping_cost") or 0,
             "fee_rate": 0.08,

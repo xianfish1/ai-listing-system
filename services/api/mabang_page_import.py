@@ -8,6 +8,7 @@ from services.api.category_profile_service import create_candidate_from_capture
 from services.api import settings
 from services.api.listing_modes import category_profile_country, is_cnsc_page, normalize_listing_mode
 from services.api.mabang_size_chart_import import import_mabang_size_chart
+from services.api.site_rules import currency_for_country
 from services.api.mabang_import_snapshot import (
     MabangImportSnapshotError,
     cnsc_missing_configuration,
@@ -50,6 +51,11 @@ def stage_page_import(
     captured_store_id = str((snapshot.get("store") or {}).get("id") or "").strip()
     if expected_store_id and captured_store_id != expected_store_id:
         raise MabangPageImportError("当前马帮页面店铺与目标店铺不一致")
+    # 马帮页面本身不提供站点字段，操作员在导入弹窗选的站点才是权威值：
+    # 快照里的 store.country 可能只是页面默认值（历史上就把 MY 店记成了 PH）。
+    selected_country = str(run.get("country") or "").strip().upper()
+    if selected_country:
+        snapshot.setdefault("store", {})["country"] = selected_country
     run.update(
         {
             "status": "collected" if snapshot["coverage"]["complete"] else "collected_with_warnings",
@@ -151,6 +157,12 @@ def confirm_page_import(
             )
     store = payload["store"]
     category = payload["category"]
+    _assert_store_country_consistent(
+        staged,
+        store,
+        account_id=account_id,
+        allow_change=payload.get("allow_country_change") is True,
+    )
     _upsert_store_option(staged, store, now=now, account_id=account_id)
     if is_cnsc_page(payload.get("listing_mode")):
         for target in payload.get("target_site_stores") or []:
@@ -295,6 +307,45 @@ def _ensure_confirmation_collections(data: dict[str, Any]) -> None:
         data.setdefault(collection, [])
 
 
+def _assert_store_country_consistent(
+    data: dict[str, Any],
+    store: dict[str, Any],
+    *,
+    account_id: str = "",
+    allow_change: bool = False,
+) -> None:
+    """同一家马帮店铺的站点不允许靠重新导入静默改写。
+
+    站点决定类目方案作用域、币种和描述配图上限；历史上本土JunsMY 就是被一次
+    「站点默认 PH」的导入覆盖成 PH，后来 6 个本土模板全部绑错方案。现在导入必须
+    手选站点，若与库里已有记录不一致就直接拦住，要求先做显式的站点迁移。
+    """
+
+    wanted = str(store.get("country") or "").strip().upper()
+    if not wanted:
+        return
+    wanted_account = str(account_id or store.get("account_id") or "").strip()
+    existing = next(
+        (
+            item
+            for item in data.get("mabang_store_options") or []
+            if str(item.get("account_id") or "").strip() == wanted_account
+            and str(item.get("platform") or "").lower() == str(store.get("platform") or "").lower()
+            and str(item.get("mabang_store_id") or "") == str(store.get("id") or "")
+        ),
+        None,
+    )
+    if not existing:
+        return
+    recorded = str(existing.get("country") or "").strip().upper()
+    if recorded and recorded != wanted and not allow_change:
+        raise MabangPageImportError(
+            f"店铺「{store.get('name') or store.get('id')}」已记录为站点 {recorded}，"
+            f"与本次导入选择的 {wanted} 不一致。请把页面切到正确站点后重新导入；"
+            "站点变更会牵动类目方案/币种/模板与副本，必须单独迁移，不能靠重新导入覆盖。"
+        )
+
+
 def _upsert_store_option(
     data: dict[str, Any],
     store: dict[str, Any],
@@ -318,6 +369,7 @@ def _upsert_store_option(
         "id": (existing or {}).get("id") or str(uuid.uuid4()),
         "platform": store["platform"],
         "country": store["country"],
+        "currency": currency_for_country(store["country"]),
         "store_name": store["name"],
         "mabang_store_id": store["id"],
         "account_id": wanted_account,
@@ -429,6 +481,7 @@ def _upsert_template(
             "template_name": f"{store['name']} - {category['path']}",
             "platform": store["platform"],
             "country": store["country"],
+            "currency": currency_for_country(store["country"]),
             "category_profile_id": category_result["profile"]["id"],
             "category_profile_version_id": category_result["version"]["id"],
             "marketplace_category_path": category["path"],
