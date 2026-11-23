@@ -50,7 +50,7 @@ from services.api.category_profile_service import (
     reject_version,
 )
 from services.api.db_store import PostgresJsonStore
-from services.api.site_rules import currency_for_country
+from services.api.site_rules import currency_for_country, title_max_chars_for_sites
 from services.api.store_migrations import (
     drop_unsupported_collar_type,
     normalize_store_option_currency,
@@ -5562,6 +5562,9 @@ def list_store_listing_copies() -> list[dict[str, Any]]:
     for copy in copies:
         copy["sku_count"] = int(sku_counts.get(copy.get("id") or "", 0))
         copy["price_count"] = int(price_counts.get(copy.get("id") or "", 0))
+        # 标题长度提醒用：多站点取最严上限（PH 实测 100，其余 120）。页面最终仍以
+        # 马帮输入框实际 maxLength 为准，执行器会再兜底裁剪。
+        copy["title_max_chars"] = title_max_chars_for_sites(copy.get("target_site_stores"), copy.get("country"))
     return sorted(copies, key=lambda item: item.get("updated_at") or item.get("created_at") or "", reverse=True)
 
 
@@ -5890,6 +5893,7 @@ def _store_listing_copy_detail(data: dict[str, Any], item: dict[str, Any]) -> di
     detail["skus"] = skus
     detail["prices"] = prices
     detail["readiness"] = readiness
+    detail["title_max_chars"] = title_max_chars_for_sites(item.get("target_site_stores"), item.get("country"))
     return detail
 
 

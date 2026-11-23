@@ -1411,7 +1411,14 @@
         <section id="listing-copy-basic-section" class="listing-editor-section">
           <h3>基本信息</h3>
           <div class="listing-editor-grid">
-            <label class="wide">商品标题<input id="listing-copy-title" /></label>
+            <div class="wide listing-title-field">
+              <label for="listing-copy-title">商品标题</label>
+              <input id="listing-copy-title" />
+              <div class="listing-title-length-row">
+                <span class="listing-title-length-hint" id="listing-copy-title-hint"></span>
+                <button type="button" class="chip" id="listing-copy-title-trim" data-trim-listing-copy-title hidden>按词边界裁剪</button>
+              </div>
+            </div>
             <label>描述生成方案<select id="listing-copy-description-profile"><option value="">请选择描述生成方案</option></select></label>
             <label id="listing-copy-promotion-section">店铺促销活动<select id="listing-copy-promotion"><option value="">活动未配置</option></select></label>
             <label class="wide">商品描述<textarea id="listing-copy-description" rows="12"></textarea></label>

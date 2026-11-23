@@ -155,3 +155,38 @@ def test_copy_images_resolve_from_its_own_import_folder() -> None:
     lookup = lookup[: lookup.index(chr(10) + marker)]
     assert "copy.asset_root" in lookup, "副本编辑器按副本自己的 asset_root 取图"
     assert "path === root || path.startsWith(" in lookup
+
+
+def test_over_limit_title_is_marked_and_can_be_trimmed() -> None:
+    """标题超过站点预估上限时：列表标红 + 编辑器实时计数 + 一键按词边界裁剪。
+
+    只提醒不拦截保存；最终仍由执行器按马帮页面 maxLength 兜底。
+    """
+
+    script = APP.read_text(encoding="utf-8")
+    html = INDEX.read_text(encoding="utf-8")
+    styles = STYLES.read_text(encoding="utf-8")
+
+    # 列表：超限标题整格标红，并在标题前显示「超 N」徽标。
+    assert (
+        "const titleOverBy = Math.max(0, titleCharCount(titleText) - listingCopyTitleMaxChars(copy));"
+        in script
+    )
+    assert 'class="listing-copy-title-cell${titleOverBy ? " is-over-limit" : ""}"' in script
+    assert '<span class="listing-copy-title-over">超 ${titleOverBy}</span>' in script
+
+    # 编辑器：标题下方有计数提示和裁剪按钮。
+    assert 'id="listing-copy-title-hint"' in html
+    assert "data-trim-listing-copy-title" in html
+    assert "function updateListingCopyTitleHint()" in script
+    assert "function listingCopyTitleMaxChars(copy)" in script
+    assert "function clipListingCopyTitle(value, limit)" in script
+    assert "updateListingCopyTitleHint();" in script
+    assert "titleInput.value = clipListingCopyTitle(" in script, "裁剪只改输入值，不拦截保存"
+    assert 'target.closest("[data-trim-listing-copy-title]")' in script
+
+    # 样式：超限红色提示 + 列表徽标。
+    assert ".listing-title-length-hint.is-over" in styles
+    assert ".listing-copy-title-cell.is-over-limit" in styles
+    assert ".listing-copy-title-over" in styles
+

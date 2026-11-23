@@ -112,6 +112,12 @@ const state = {
 };
 
 const STANDARD_SIZES = ["100", "110", "120", "130", "140", "150", "S", "M", "L", "XL", "XXL", "XXXL"];
+
+// 马帮「商品标题」输入框的站点预估上限：PH 2026-11-24 实测 maxLength=100，其余站点
+// 先按 Shopee 120 预估。后端副本详情/列表会带 title_max_chars；这里保留同口径兜底，
+// 兼容旧缓存数据。最终以马帮页面实际 maxLength 为准，执行器会再按控件限长裁剪。
+const TITLE_MAX_CHARS_BY_COUNTRY = Object.freeze({ PH: 100 });
+const DEFAULT_TITLE_MAX_CHARS = 120;
 const TASK_STATUS_LABELS = {
   ready: "待领取", claimed: "已领取", running: "执行中", saved: "已保存", saved_with_warnings: "已保存（有提醒）", failed: "执行失败",
   needs_confirmation: "需要人工确认", needs_regeneration: "需要重新生成", canceled: "已取消",
@@ -7331,6 +7337,8 @@ function appendListingCopyRow(tbody, copy, jobs) {
   const thumbCell = thumbUrl
     ? `<img class="listing-copy-thumb" src="${escapeHtml(thumbUrl)}" alt="${escapeHtml(copy.listing_title || copy.main_sku || copy.group_id || "缩略图")}" loading="lazy" />`
     : `<span class="listing-copy-thumb listing-copy-thumb--empty" aria-hidden="true"></span>`;
+  const titleText = copy.listing_title || "";
+  const titleOverBy = Math.max(0, titleCharCount(titleText) - listingCopyTitleMaxChars(copy));
   const tr = document.createElement("tr");
   tr.innerHTML = `
       <td><input type="checkbox" data-listing-copy-select="${escapeHtml(copy.id)}" ${state.selectedListingCopies.has(copy.id) ? "checked" : ""} /></td>
@@ -7338,7 +7346,7 @@ function appendListingCopyRow(tbody, copy, jobs) {
       <td>${escapeHtml(copy.main_sku || copy.group_id || "")}</td>
       <td class="listing-copy-store-cell" title="${escapeHtml(copy.store_name || "")}"><small class="listing-copy-mode-label${isPureCnscMode(copy) ? "" : (isCnscPageMode(copy) ? " is-3pf" : " is-site")}">${escapeHtml(listingModeText(copy))}</small> ${escapeHtml(copy.store_name || "")}</td>
       <td class="listing-copy-template-cell" title="${escapeHtml(template.template_name || copy.template_id || "")}">${escapeHtml(template.template_name || copy.template_id || "")}</td>
-      <td class="listing-copy-title-cell" title="${escapeHtml(copy.listing_title || "")}">${escapeHtml(copy.listing_title || "")}</td>
+      <td class="listing-copy-title-cell${titleOverBy ? " is-over-limit" : ""}" title="${escapeHtml(titleOverBy ? `${titleText}（超出 ${titleOverBy} 字符）` : titleText)}">${titleOverBy ? `<span class="listing-copy-title-over">超 ${titleOverBy}</span>` : ""}${escapeHtml(titleText)}</td>
       <td class="listing-copy-num-cell">${escapeHtml(copy.sku_count || 0)}</td>
       <td class="listing-copy-num-cell">${escapeHtml(copy.price_count || 0)}</td>
       <td><span class="status ${escapeHtml(copy.status || "")}">${escapeHtml(copyStatusLabel)}</span></td>
@@ -11192,11 +11200,62 @@ async function openListingCopyEditor(copyId) {
   if (dialog) dialog.scrollTop = 0;
 }
 
+function titleCharCount(value) {
+  // 与马帮 input.maxLength / 执行器一致：按 UTF-16 长度算，不按码点。
+  return String(value ?? "").length;
+}
+
+function listingCopyTitleMaxChars(copy) {
+  const explicit = Number(copy?.title_max_chars);
+  if (Number.isFinite(explicit) && explicit > 0) return Math.floor(explicit);
+  // 多站点副本取最严上限；没有目标站点时按副本国家。
+  const sites = Array.isArray(copy?.target_site_stores)
+    ? copy.target_site_stores
+      .map((site) => (site && typeof site === "object" ? (site.site_code || site.country || "") : site))
+      .map((site) => String(site || "").trim().toUpperCase())
+      .filter(Boolean)
+    : [];
+  if (sites.length) {
+    return Math.min(...sites.map((site) => TITLE_MAX_CHARS_BY_COUNTRY[site] || DEFAULT_TITLE_MAX_CHARS));
+  }
+  const country = String(copy?.country || "").trim().toUpperCase();
+  return TITLE_MAX_CHARS_BY_COUNTRY[country] || DEFAULT_TITLE_MAX_CHARS;
+}
+
+function clipListingCopyTitle(value, limit) {
+  const text = String(value ?? "");
+  if (text.length <= limit) return text;
+  let clipped = text.slice(0, limit);
+  // 与执行器同口径：按词边界裁，边界太靠前就硬截断。
+  const boundary = clipped.lastIndexOf(" ");
+  if (boundary >= Math.floor(limit / 2)) clipped = clipped.slice(0, boundary);
+  return clipped.trim();
+}
+
+function updateListingCopyTitleHint() {
+  const input = $("listing-copy-title");
+  const hint = $("listing-copy-title-hint");
+  const trim = $("listing-copy-title-trim");
+  if (!input || !hint) return;
+  const copy = state.editingListingCopy || {};
+  const limit = listingCopyTitleMaxChars(copy);
+  const used = titleCharCount(input.value);
+  const country = String(copy.country || "").trim().toUpperCase();
+  const site = country ? `${country} ` : "";
+  const over = used > limit;
+  hint.textContent = over
+    ? `已用 ${used} / ${site}预估上限 ${limit} 字符，超出 ${used - limit} 字符（最终以马帮页面为准）`
+    : `已用 ${used} / ${site}预估上限 ${limit} 字符（最终以马帮页面为准）`;
+  hint.classList.toggle("is-over", over);
+  if (trim) trim.hidden = !over;
+}
+
 function renderListingCopyEditor(copy) {
   const cnsc = isCNSCListingCopy(copy);
   const modeText = cnsc ? (isPureCnscMode(copy) ? "跨境 CNSC" : "跨境本土 3PF") : "本土店铺";
   $("listing-copy-editor-meta").textContent = [modeText, copy.store_name, copy.main_sku || copy.group_id, copy.marketplace_category_path].filter(Boolean).join(" · ");
   $("listing-copy-title").value = copy.listing_title || copy.title || "";
+  updateListingCopyTitleHint();
   $("listing-copy-description").value = copy.description || "";
   $("listing-copy-stock").value = copy.stock ?? "";
   $("listing-copy-weight-kg").value = copy.weight_kg ?? "";
@@ -13754,6 +13813,15 @@ document.addEventListener("click", async (event) => {
     await fillListingCopyMissingAttributes(fillMissing.dataset.fillMissingAttributes || "").catch((error) => operationError(error, "从模板补全属性失败"));
     return;
   }
+  const trimListingCopyTitle = target.closest("[data-trim-listing-copy-title]");
+  if (trimListingCopyTitle) {
+    const titleInput = $("listing-copy-title");
+    if (titleInput) {
+      titleInput.value = clipListingCopyTitle(titleInput.value, listingCopyTitleMaxChars(state.editingListingCopy || {}));
+      updateListingCopyTitleHint();
+    }
+    return;
+  }
   const editListingCopy = target.closest("[data-edit-listing-copy]");
   if (editListingCopy instanceof HTMLElement) {
     await openListingCopyEditor(editListingCopy.dataset.editListingCopy || "").catch((error) => {
@@ -14191,6 +14259,10 @@ document.addEventListener("input", (event) => {
   const target = event.target;
   if (target instanceof HTMLElement && target.matches("#description-profile-dialog [data-section-body], #description-profile-dialog [data-section-hint], #description-profile-dialog [data-section-title], #description-profile-dialog [data-section-emoji], #description-profile-dialog [data-row-emoji], #description-profile-dialog [data-row-label], #description-profile-dialog [data-row-value], #description-profile-dialog [data-row-hint], #description-profile-dialog [data-row-slot], #description-profile-dialog [data-row-field], #description-profile-dialog [data-row-source]")) {
     renderProfilePreview();
+    return;
+  }
+  if (target instanceof HTMLInputElement && target.id === "listing-copy-title") {
+    updateListingCopyTitleHint();
     return;
   }
   if (target instanceof HTMLInputElement && target.id === "nas-browser-filter") {
