@@ -1220,15 +1220,17 @@
                     <label for="base-maintenance-title-input">标题</label>
                     <div class="base-title-row">
                       <input id="base-maintenance-title-input" />
-                      <select id="base-maintenance-audience" aria-label="适用人群" title="AI 生成标题时使用的适用人群；选择后会随「保存维护内容」写入商品">
+                      <!-- AI 标题暂时停用：保留节点与事件，恢复时去掉下面两个 hidden 即可。 -->
+                      <select id="base-maintenance-audience" aria-label="适用人群" title="AI 生成标题时使用的适用人群；选择后会随「保存维护内容」写入商品" hidden>
                         <option value="">适用人群：按商品</option>
                         <option value="boys">男童</option>
                         <option value="girls">女童</option>
                         <option value="men">男装</option>
                         <option value="women">女装</option>
                       </select>
-                      <button id="base-maintenance-ai-title" type="button" class="secondary-button">AI 生成标题</button>
+                      <button id="base-maintenance-ai-title" type="button" class="secondary-button" hidden>AI 生成标题</button>
                     </div>
+                    <div id="base-maintenance-title-hint" class="base-title-length-hint" aria-live="polite"></div>
                     <div id="base-maintenance-title-suggestions" class="base-title-suggestions" role="status" aria-live="polite" hidden></div>
                   </div>
                   <label class="wide">详情<textarea id="base-maintenance-description"></textarea></label>

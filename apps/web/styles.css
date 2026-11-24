@@ -4453,16 +4453,38 @@ dialog:not([open]) { display: none; }
 .maintenance-summary-copies {
   display: grid;
   gap: 6px;
+  padding: 0;
   font-size: 12.5px;
   color: var(--text-soft);
 }
 
 .maintenance-summary-copies li {
   display: flex;
-  align-items: center;
+  align-items: flex-start;
   gap: 8px;
+  min-width: 0;
   list-style: none;
 }
+
+/* 副本行：店名一行、状态一行。店名可以折行，状态永远整块不拆开，
+   避免窄侧栏里「已保存（有提醒）」被拆成「（有提 / 醒）」。 */
+.maintenance-summary-copy-body {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+
+.maintenance-summary-copy-name {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.maintenance-summary-copy-status {
+  white-space: nowrap;
+  font-size: 12px;
+}
+
+.maintenance-summary-copies li > .row-glyph { margin-top: 4px; }
 
 .maintenance-summary-copies ul { margin: 0; padding: 0; display: grid; gap: 6px; }
 
@@ -7679,6 +7701,17 @@ button.mini {
   flex: 0 0 auto;
   white-space: nowrap;
 }
+
+/* 基础商品标题长度提醒：基础商品没有站点，按最严站点（PH 100）先提醒，
+   101–120 只提示 PH 超限，超过 120 才算所有站点都超。 */
+.base-title-length-hint {
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.base-title-length-hint.is-warn { color: #8a5a00; font-weight: 600; }
+.base-title-length-hint.is-over { color: var(--red); font-weight: 600; }
 
 .base-title-suggestions {
   display: grid;

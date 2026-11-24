@@ -5724,6 +5724,7 @@ function openBaseProductMaintenance(productId) {
   $("base-maintenance-main-sku").value = product.main_sku || product.group_id || "";
   $("base-maintenance-status").value = product.status || "base_ready";
   $("base-maintenance-title-input").value = product.listing_title || "";
+  updateBaseTitleLengthHint();
   // 适用人群只影响 AI 生成标题；选中的值会在「保存维护内容」时写入商品。
   const titleAudienceSelect = $("base-maintenance-audience");
   if (titleAudienceSelect) titleAudienceSelect.value = baseProductAudienceValue(product);
@@ -5847,7 +5848,8 @@ function renderBaseMaintenanceSummary(product) {
         const job = jobsByCopy.get(copy.id);
         const tone = jobGlyphTone(copy, job);
         const label = jobGlyphLabel(copy, job);
-        return `<li><span class="row-glyph row-glyph--${tone}" aria-hidden="true"></span><span>${escapeHtml(copy.store_name || copy.template_id || "店铺副本")}</span><span class="muted">· ${escapeHtml(label)}</span></li>`;
+        const storeName = copy.store_name || copy.template_id || "店铺副本";
+        return `<li><span class="row-glyph row-glyph--${tone}" aria-hidden="true"></span><div class="maintenance-summary-copy-body"><span class="maintenance-summary-copy-name" title="${escapeHtml(storeName)}">${escapeHtml(storeName)}</span><span class="maintenance-summary-copy-status muted">${escapeHtml(label)}</span></div></li>`;
       }).join("")}</ul>`;
     }
   }
@@ -6553,6 +6555,7 @@ async function retryBaseProductAiListing() {
       if (!nextError) setTimeout(() => { aiErrorEl.hidden = true; }, 4000);
     }
     if (product?.listing_title) $("base-maintenance-title-input").value = product.listing_title;
+    updateBaseTitleLengthHint();
     if (product?.description) $("base-maintenance-description").value = product.description;
     renderBaseMaintenanceSummary(product);
     renderBaseProducts();
@@ -11232,6 +11235,24 @@ function clipListingCopyTitle(value, limit) {
   return clipped.trim();
 }
 
+function updateBaseTitleLengthHint() {
+  const input = $("base-maintenance-title-input");
+  const hint = $("base-maintenance-title-hint");
+  if (!input || !hint) return;
+  const used = String(input.value || "").length;
+  const phLimit = TITLE_MAX_CHARS_BY_COUNTRY.PH || 100;
+  const maxLimit = DEFAULT_TITLE_MAX_CHARS || 120;
+  hint.classList.toggle("is-warn", used > phLimit && used <= maxLimit);
+  hint.classList.toggle("is-over", used > maxLimit);
+  if (used > maxLimit) {
+    hint.textContent = `已用 ${used} 字符 · 超过所有站点预估上限（PH ${phLimit} / 其他 ${maxLimit}）`;
+  } else if (used > phLimit) {
+    hint.textContent = `已用 ${used} 字符 · 超过 PH 预估上限 ${phLimit}（其他站点 ${maxLimit} 可能仍可用）`;
+  } else {
+    hint.textContent = `已用 ${used} 字符 · 站点预估上限：PH ${phLimit} / 其他 ${maxLimit}（最终以马帮页面为准）`;
+  }
+}
+
 function updateListingCopyTitleHint() {
   const input = $("listing-copy-title");
   const hint = $("listing-copy-title-hint");
@@ -14263,6 +14284,10 @@ document.addEventListener("input", (event) => {
   }
   if (target instanceof HTMLInputElement && target.id === "listing-copy-title") {
     updateListingCopyTitleHint();
+    return;
+  }
+  if (target instanceof HTMLInputElement && target.id === "base-maintenance-title-input") {
+    updateBaseTitleLengthHint();
     return;
   }
   if (target instanceof HTMLInputElement && target.id === "nas-browser-filter") {
