@@ -168,20 +168,31 @@ def test_over_limit_title_is_marked_and_can_be_trimmed() -> None:
     styles = STYLES.read_text(encoding="utf-8")
 
     # 列表：超限标题整格标红，并在标题前显示「超 N」徽标。
+    # 2026-11-24 口径：只有目标站点含 PH（实测 100）才提醒；其他站点 120 只是预估，不标红。
+    assert "function listingCopyTitleSites(copy)" in script
+    assert "function listingCopyTitleWarns(copy)" in script
+    assert 'return listingCopyTitleSites(copy).includes("PH");' in script
     assert (
-        "const titleOverBy = Math.max(0, titleCharCount(titleText) - listingCopyTitleMaxChars(copy));"
+        "const titleOverBy = listingCopyTitleWarns(copy)"
         in script
+        and "? Math.max(0, titleCharCount(titleText) - listingCopyTitleMaxChars(copy))"
+        in script
+        and ": 0;" in script
     )
     assert 'class="listing-copy-title-cell${titleOverBy ? " is-over-limit" : ""}"' in script
     assert '<span class="listing-copy-title-over">超 ${titleOverBy}</span>' in script
 
-    # 编辑器：标题下方有计数提示和裁剪按钮。
+    # 编辑器：标题下方有计数提示和裁剪按钮；非 PH 站点不提醒、不裁剪。
     assert 'id="listing-copy-title-hint"' in html
     assert "data-trim-listing-copy-title" in html
     assert "function updateListingCopyTitleHint()" in script
     assert "function listingCopyTitleMaxChars(copy)" in script
     assert "function clipListingCopyTitle(value, limit)" in script
     assert "updateListingCopyTitleHint();" in script
+    assert "if (!listingCopyTitleWarns(copy)) {" in script, "非 PH 副本不给长度提醒"
+    assert (
+        "if (titleInput && listingCopyTitleWarns(copy)) {" in script
+    ), "裁剪按钮只对 PH 副本生效"
     assert "titleInput.value = clipListingCopyTitle(" in script, "裁剪只改输入值，不拦截保存"
     assert 'target.closest("[data-trim-listing-copy-title]")' in script
 

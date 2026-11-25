@@ -116,6 +116,7 @@ const STANDARD_SIZES = ["100", "110", "120", "130", "140", "150", "S", "M", "L",
 // 马帮「商品标题」输入框的站点预估上限：PH 2026-11-24 实测 maxLength=100，其余站点
 // 先按 Shopee 120 预估。后端副本详情/列表会带 title_max_chars；这里保留同口径兜底，
 // 兼容旧缓存数据。最终以马帮页面实际 maxLength 为准，执行器会再按控件限长裁剪。
+// 刊登副本的长度提醒只对含 PH 的副本出现（其他站点 120 只是预估，不提醒）。
 const TITLE_MAX_CHARS_BY_COUNTRY = Object.freeze({ PH: 100 });
 const DEFAULT_TITLE_MAX_CHARS = 120;
 const TASK_STATUS_LABELS = {
@@ -7341,7 +7342,10 @@ function appendListingCopyRow(tbody, copy, jobs) {
     ? `<img class="listing-copy-thumb" src="${escapeHtml(thumbUrl)}" alt="${escapeHtml(copy.listing_title || copy.main_sku || copy.group_id || "缩略图")}" loading="lazy" />`
     : `<span class="listing-copy-thumb listing-copy-thumb--empty" aria-hidden="true"></span>`;
   const titleText = copy.listing_title || "";
-  const titleOverBy = Math.max(0, titleCharCount(titleText) - listingCopyTitleMaxChars(copy));
+  // 长度提醒只在目标站点含 PH 时出现，其他站点（按 120 预估）不标超限。
+  const titleOverBy = listingCopyTitleWarns(copy)
+    ? Math.max(0, titleCharCount(titleText) - listingCopyTitleMaxChars(copy))
+    : 0;
   const tr = document.createElement("tr");
   tr.innerHTML = `
       <td><input type="checkbox" data-listing-copy-select="${escapeHtml(copy.id)}" ${state.selectedListingCopies.has(copy.id) ? "checked" : ""} /></td>
@@ -11208,21 +11212,33 @@ function titleCharCount(value) {
   return String(value ?? "").length;
 }
 
-function listingCopyTitleMaxChars(copy) {
-  const explicit = Number(copy?.title_max_chars);
-  if (Number.isFinite(explicit) && explicit > 0) return Math.floor(explicit);
-  // 多站点副本取最严上限；没有目标站点时按副本国家。
+function listingCopyTitleSites(copy) {
   const sites = Array.isArray(copy?.target_site_stores)
     ? copy.target_site_stores
       .map((site) => (site && typeof site === "object" ? (site.site_code || site.country || "") : site))
       .map((site) => String(site || "").trim().toUpperCase())
       .filter(Boolean)
     : [];
+  if (sites.length) return sites;
+  const country = String(copy?.country || "").trim().toUpperCase();
+  return country ? [country] : [];
+}
+
+function listingCopyTitleMaxChars(copy) {
+  const explicit = Number(copy?.title_max_chars);
+  if (Number.isFinite(explicit) && explicit > 0) return Math.floor(explicit);
+  // 多站点副本取最严上限；没有目标站点时按副本国家。
+  const sites = listingCopyTitleSites(copy);
   if (sites.length) {
     return Math.min(...sites.map((site) => TITLE_MAX_CHARS_BY_COUNTRY[site] || DEFAULT_TITLE_MAX_CHARS));
   }
-  const country = String(copy?.country || "").trim().toUpperCase();
-  return TITLE_MAX_CHARS_BY_COUNTRY[country] || DEFAULT_TITLE_MAX_CHARS;
+  return DEFAULT_TITLE_MAX_CHARS;
+}
+
+function listingCopyTitleWarns(copy) {
+  // 只有 PH 在页面实测过 maxLength=100；其余站点只是按 120 预估，报了也是噪音。
+  // 2026-11-24 口径：长度提醒只在目标站点含 PH 时出现（列表徽标/编辑器提示同口径）。
+  return listingCopyTitleSites(copy).includes("PH");
 }
 
 function clipListingCopyTitle(value, limit) {
@@ -11259,14 +11275,22 @@ function updateListingCopyTitleHint() {
   const trim = $("listing-copy-title-trim");
   if (!input || !hint) return;
   const copy = state.editingListingCopy || {};
+  if (!listingCopyTitleWarns(copy)) {
+    // 非 PH 站点不提醒标题长度（120 只是预估，最终以马帮页面为准）。
+    hint.textContent = "";
+    hint.classList.remove("is-over");
+    if (trim) trim.hidden = true;
+    return;
+  }
+  const sites = listingCopyTitleSites(copy);
   const limit = listingCopyTitleMaxChars(copy);
   const used = titleCharCount(input.value);
-  const country = String(copy.country || "").trim().toUpperCase();
-  const site = country ? `${country} ` : "";
+  // 多站点副本可能因 PH 才收紧，标签点名真正卡住上限的站点，避免「MY 上限 100」的误会。
+  const site = sites.find((code) => (TITLE_MAX_CHARS_BY_COUNTRY[code] || DEFAULT_TITLE_MAX_CHARS) === limit) || sites[0] || "PH";
   const over = used > limit;
   hint.textContent = over
-    ? `已用 ${used} / ${site}预估上限 ${limit} 字符，超出 ${used - limit} 字符（最终以马帮页面为准）`
-    : `已用 ${used} / ${site}预估上限 ${limit} 字符（最终以马帮页面为准）`;
+    ? `已用 ${used} / ${site} 预估上限 ${limit} 字符，超出 ${used - limit} 字符（最终以马帮页面为准）`
+    : `已用 ${used} / ${site} 预估上限 ${limit} 字符（最终以马帮页面为准）`;
   hint.classList.toggle("is-over", over);
   if (trim) trim.hidden = !over;
 }
@@ -13836,9 +13860,11 @@ document.addEventListener("click", async (event) => {
   }
   const trimListingCopyTitle = target.closest("[data-trim-listing-copy-title]");
   if (trimListingCopyTitle) {
+    const copy = state.editingListingCopy || {};
     const titleInput = $("listing-copy-title");
-    if (titleInput) {
-      titleInput.value = clipListingCopyTitle(titleInput.value, listingCopyTitleMaxChars(state.editingListingCopy || {}));
+    // 只有 PH 提醒/裁剪；其他站点 120 只是预估，不改动标题。
+    if (titleInput && listingCopyTitleWarns(copy)) {
+      titleInput.value = clipListingCopyTitle(titleInput.value, listingCopyTitleMaxChars(copy));
       updateListingCopyTitleHint();
     }
     return;
