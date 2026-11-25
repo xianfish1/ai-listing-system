@@ -74,6 +74,7 @@ def launch_mabang_browser(
     headless: bool = False,
     require_mode: bool = False,
     reuse_running_only: bool = False,
+    force_restart: bool = False,
     urlopen_fn: Callable[..., Any] = urlopen,
     popen_fn: Callable[..., Any] = subprocess.Popen,
     sleep_fn: Callable[[float], None] = time.sleep,
@@ -93,10 +94,16 @@ def launch_mabang_browser(
     reuse_running_only 用在「这只浏览器正在被别人用」的场景（页面导入期间：它可能
     是操作员正在填的可见窗口）。此时同一个 profile 的浏览器无论什么窗口模式都直接
     复用，没有可复用的就报错——绝不为了「模式跟设置一致」把它杀掉重起。
+
+    force_restart 用在「这个端口上的浏览器已经不可信」的场景（Worker 探活发现 CDP
+    命令不再应答的假死浏览器）。它必须存在，因为探活只看 ``/json/version`` 时假死
+    Chrome 照样 200：不带它，复用分支永远把那只坏浏览器原样交回去。
     """
 
     base_url, port = _validated_local_cdp_url(cdp_url)
     requested_mode = BROWSER_MODE_HEADLESS if headless else BROWSER_MODE_HEADED
+    # 页面导入窗口不能被杀：那是操作员正在填的可见窗口，宁可不重启也不动它。
+    force_restart = bool(force_restart and not reuse_running_only)
     if _cdp_is_available(base_url, urlopen_fn):
         running_mode, running_profile_matches = _collection_browser_identity(
             profile_dir, port, process_query_fn=process_query_fn
@@ -110,6 +117,8 @@ def launch_mabang_browser(
         if reuse_running_only and running_profile_matches:
             # 同一个登录态（profile 一致）就够用：模式不同也复用，不动这只浏览器。
             can_reuse = True
+        if force_restart:
+            can_reuse = False
         if can_reuse:
             _close_mabang_browser_pages(base_url, urlopen_fn)
             _open_mabang_new_product_page(base_url, urlopen_fn)

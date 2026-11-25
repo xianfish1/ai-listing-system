@@ -69,8 +69,13 @@ const CDP_DEFAULT = 'http://127.0.0.1:18223';
 // Playwright 默认 30s 的连接预算对「已经开了几小时、DOM 很大的马帮刊登页」不够：
 // 现场 2026-09-27 19:0x 实测 connectOverCDP 要 34s，30s 直接报
 // 「browserType.connectOverCDP: Timeout 30000ms exceeded」——这是连接超时，不是页面问题。
-// 放宽到 90s，让慢浏览器也能接上；失败仍然照原样终止。
-const CDP_CONNECT_TIMEOUT_MS = 90000;
+//
+// 但把预算拉到 90s 又把另一种现场放大了：2026-11-25 有一只 Chrome 假死（TCP/HTTP 都
+// 正常应答，CDP 命令一个字不回），29 单各自白等 90s，半小时全废。现在的分工是
+// 「这里快速失败、Worker 负责换一只浏览器」——超时会被 automation_worker 判成
+// 「浏览器假死」并在下一单前杀掉重起，重起后连接通常只要百毫秒级，所以 25s 足够
+// 覆盖慢浏览器、又不会让假死浏览器把整轮任务拖死。
+const CDP_CONNECT_TIMEOUT_MS = 25000;
 const RESULT_MARKER = 'MABANG_PLAYWRIGHT_RESULT ';
 const EVENT_MARKER = 'MABANG_PLAYWRIGHT_EVENT ';
 const ACTION_SELECTOR = 'button,[role="button"],a,.el-button,input[type="button"],input[type="submit"]';

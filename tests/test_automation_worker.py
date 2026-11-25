@@ -1,5 +1,10 @@
 from __future__ import annotations
 
+import json
+import socket
+import socketserver
+import threading
+import time
 from pathlib import Path
 
 import pytest
@@ -40,6 +45,7 @@ class FakeClient:
         self.heartbeats = []
         self.finishes = []
         self.auto_login_count = 0
+        self.auto_login_restarts = []
         self.page_import_run = page_import_run
         self.page_import_queries = 0
 
@@ -63,8 +69,9 @@ class FakeClient:
         self.finishes.append({"status": status, "result": result, "error": error})
         return {"id": job_id, "status": status, "result": result, "last_error": error}
 
-    def auto_login_mabang(self) -> dict:
+    def auto_login_mabang(self, account_id: str | None = None, slot: int = 0, *, restart: bool = False) -> dict:
         self.auto_login_count += 1
+        self.auto_login_restarts.append(bool(restart))
         return {"ok": True, "auto_login": {"status": "already_logged_in", "error": ""}}
 
     def page_import_session(self, account_id: str | None = None, slot: int = 0) -> dict:
@@ -74,6 +81,16 @@ class FakeClient:
         return {"active": run is not None, "run": run}
 
 
+def _stub_cdp_health(worker, monkeypatch, health: str) -> None:
+    """把 Worker 的 CDP 探活钉成指定三态，别让它去连真实浏览器。
+
+    探活现在是「HTTP + WebSocket 上真跑一条 Browser.getVersion」的三态结果
+    （``ok`` / ``down`` / ``wedged``），只 stub HTTP 那一层已经不够了。
+    """
+
+    monkeypatch.setattr(worker, "_cdp_health", lambda **_: health)
+
+
 def test_worker_run_once_returns_idle_without_ready_job(tmp_path: Path, monkeypatch) -> None:
     worker = automation_worker.AutomationWorker(
         FakeClient(claimed=False),
@@ -81,7 +98,7 @@ def test_worker_run_once_returns_idle_without_ready_job(tmp_path: Path, monkeypa
         upload_root=tmp_path,
         heartbeat_interval=0,
     )
-    monkeypatch.setattr(worker, "_cdp_is_reachable", lambda **_: True)
+    _stub_cdp_health(worker, monkeypatch, automation_worker.CDP_PROBE_OK)
 
     result = worker.run_once()
 
@@ -121,7 +138,7 @@ def test_worker_waits_for_browser_without_claiming_when_cdp_is_unreachable(tmp_p
         upload_root=tmp_path,
         heartbeat_interval=0,
     )
-    monkeypatch.setattr(worker, "_cdp_is_reachable", lambda **_: False)
+    _stub_cdp_health(worker, monkeypatch, automation_worker.CDP_PROBE_DOWN)
 
     result = worker.run_once()
 
@@ -156,7 +173,7 @@ def test_worker_stands_by_while_a_page_import_uses_the_browser(tmp_path: Path, m
         "_recover_browser_before_wait",
         lambda **kwargs: recovered.append(True) or {"auto_login": {"status": "already_logged_in"}},
     )
-    monkeypatch.setattr(worker, "_cdp_is_reachable", lambda **_: False)
+    _stub_cdp_health(worker, monkeypatch, automation_worker.CDP_PROBE_DOWN)
 
     result = worker.run_once()
 
@@ -172,7 +189,7 @@ def test_worker_stands_by_while_a_page_import_uses_the_browser(tmp_path: Path, m
     client.page_import_run = None
     client.claimed = False
     worker._page_import_session_cache = None
-    monkeypatch.setattr(worker, "_cdp_is_reachable", lambda **_: True)
+    _stub_cdp_health(worker, monkeypatch, automation_worker.CDP_PROBE_OK)
     assert worker.run_once() == {"ok": True, "status": "idle", "job_id": ""}
 
 
@@ -671,8 +688,9 @@ class AutoLoginClient(FakeClient):
         self.auto_login_calls = 0
         self.auto_login_status = status
 
-    def auto_login_mabang(self) -> dict:
+    def auto_login_mabang(self, account_id=None, slot=0, *, restart=False) -> dict:
         self.auto_login_calls += 1
+        self.auto_login_restarts.append(bool(restart))
         return {"ok": self.auto_login_status in ("logged_in", "already_logged_in"), "auto_login": {"status": self.auto_login_status, "error": ""}}
 
 
@@ -740,7 +758,7 @@ def test_worker_preflight_recovers_browser_within_cooldown(monkeypatch, tmp_path
     worker = automation_worker.AutomationWorker(
         client, worker_id="worker-test", upload_root=tmp_path, heartbeat_interval=0,
     )
-    monkeypatch.setattr(worker, "_cdp_is_reachable", lambda **_: False)
+    _stub_cdp_health(worker, monkeypatch, automation_worker.CDP_PROBE_DOWN)
 
     first = worker.run_once()
     second = worker.run_once()
@@ -757,26 +775,29 @@ def test_worker_preflight_auto_started_browser_claims_next_job(monkeypatch, tmp_
     state = {"reachable": False}
     client = AutoLoginClient(status="logged_in")
 
-    def auto_login_mabang() -> dict:
+    def auto_login_mabang(account_id=None, slot=0, *, restart=False) -> dict:
         state["reachable"] = True
+        state["restart"] = restart
         client.auto_login_calls += 1
         return {"ok": True, "auto_login": {"status": "logged_in", "error": ""}}
 
     client.auto_login_mabang = auto_login_mabang
 
-    def reach(**_) -> bool:
-        return state["reachable"]
+    def health(**_) -> str:
+        return automation_worker.CDP_PROBE_OK if state["reachable"] else automation_worker.CDP_PROBE_DOWN
 
     worker = automation_worker.AutomationWorker(
         client, worker_id="worker-test", upload_root=tmp_path, heartbeat_interval=0,
     )
-    monkeypatch.setattr(worker, "_cdp_is_reachable", reach)
+    monkeypatch.setattr(worker, "_cdp_health", health)
     monkeypatch.setattr(worker, "_invoke_executor", lambda plan: dict(_SAVED_EXECUTION))
 
     result = worker.run_once()
 
     assert state["reachable"] is True
     assert client.auto_login_calls == 1
+    # 浏览器探活不通 → 恢复必须要求 API 杀掉重起，而不是复用那只坏的
+    assert state["restart"] is True
     assert result["status"] == "saved"
     assert client.finishes[0]["status"] == "saved"
 
@@ -791,7 +812,7 @@ def test_worker_startup_login_failure_does_not_claim_even_when_cdp_is_reachable(
         upload_root=tmp_path,
         heartbeat_interval=0,
     )
-    monkeypatch.setattr(worker, "_cdp_is_reachable", lambda **_: True)
+    _stub_cdp_health(worker, monkeypatch, automation_worker.CDP_PROBE_OK)
 
     result = worker.run_once()
 
@@ -808,7 +829,7 @@ def test_worker_startup_login_success_claims_after_gate(monkeypatch, tmp_path: P
         upload_root=tmp_path,
         heartbeat_interval=0,
     )
-    monkeypatch.setattr(worker, "_cdp_is_reachable", lambda **_: True)
+    _stub_cdp_health(worker, monkeypatch, automation_worker.CDP_PROBE_OK)
     monkeypatch.setattr(worker, "_invoke_executor", lambda plan: dict(_SAVED_EXECUTION))
 
     result = worker.run_once()
@@ -826,7 +847,7 @@ def test_worker_passes_its_slot_to_login_recovery_and_page_import_probe(
     client = AutoLoginClient(status="logged_in", claimed=False)
     seen: list[tuple] = []
 
-    def auto_login_mabang(account_id=None, slot=0) -> dict:
+    def auto_login_mabang(account_id=None, slot=0, *, restart=False) -> dict:
         seen.append(("login", account_id, slot))
         client.auto_login_calls += 1
         return {"ok": True, "auto_login": {"status": "logged_in", "error": ""}}
@@ -842,7 +863,7 @@ def test_worker_passes_its_slot_to_login_recovery_and_page_import_probe(
         account_id="acct-a",
         slot=1,
     )
-    monkeypatch.setattr(worker, "_cdp_is_reachable", lambda **_: True)
+    _stub_cdp_health(worker, monkeypatch, automation_worker.CDP_PROBE_OK)
 
     assert worker.run_once() == {"ok": True, "status": "idle", "job_id": ""}
 
@@ -931,11 +952,104 @@ def test_lease_heartbeat_stops_when_the_lease_is_lost() -> None:
     assert "HTTP 409" in lease.last_error
 
 
-def test_cdp_probe_requires_a_real_cdp_endpoint(monkeypatch: pytest.MonkeyPatch) -> None:
-    worker = automation_worker.AutomationWorker(
-        FakeClient(claimed=False), worker_id="w-cdp", upload_root=Path(".")
+class _FakeCdpHandler(socketserver.StreamRequestHandler):
+    """最小 CDP 端点：/json/version + WebSocket 升级 + 一条 Browser.getVersion 回应。
+
+    ``reply`` 设成 False 时只完成升级、对命令一个字都不回——这正是 2026-11-25 那只
+    假死 Chrome 的行为（DevTools HTTP 线程活着，浏览器不再处理 CDP 命令）。
+    """
+
+    def handle(self) -> None:
+        request_line = self.rfile.readline(65536).decode("latin-1")
+        while True:
+            line = self.rfile.readline(65536)
+            if line in (b"\r\n", b"\n", b""):
+                break
+        path = request_line.split(" ")[1] if " " in request_line else "/"
+        if path.startswith("/json/version"):
+            body = json.dumps(
+                {
+                    "Browser": "Chrome/149.0.7827.55",
+                    "Protocol-Version": "1.3",
+                    "webSocketDebuggerUrl": f"ws://127.0.0.1:{self.server.server_address[1]}/devtools/browser/fake",
+                }
+            ).encode("utf-8")
+            self.wfile.write(
+                b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n"
+                b"Content-Length: " + str(len(body)).encode() + b"\r\n\r\n" + body
+            )
+            self.wfile.flush()
+            return
+        self.wfile.write(
+            b"HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\n"
+            b"Connection: Upgrade\r\nSec-WebSocket-Accept: fake\r\n\r\n"
+        )
+        self.wfile.flush()
+        if not self.server.reply:
+            time.sleep(2.0)
+            return
+        header = self.rfile.read(2)
+        if len(header) < 2:
+            return
+        length = header[1] & 0x7F
+        self.rfile.read(length + 4)  # 客户端帧必须带 4 字节掩码
+        payload = b'{"id":1,"result":{"protocolVersion":"1.3"}}'
+        self.wfile.write(b"\x81" + bytes([len(payload)]) + payload)
+        self.wfile.flush()
+
+
+class _FakeCdpServer(socketserver.ThreadingTCPServer):
+    allow_reuse_address = True
+    daemon_threads = True
+    reply = True
+
+
+def _fake_cdp_server(reply: bool = True) -> tuple[_FakeCdpServer, str]:
+    server = _FakeCdpServer(("127.0.0.1", 0), _FakeCdpHandler)
+    server.reply = reply
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    return server, f"http://127.0.0.1:{server.server_address[1]}"
+
+
+def _closed_port() -> int:
+    sock = socket.socket()
+    sock.bind(("127.0.0.1", 0))
+    port = sock.getsockname()[1]
+    sock.close()
+    return port
+
+
+def test_cdp_probe_ok_requires_a_cdp_command_answer() -> None:
+    server, cdp_url = _fake_cdp_server()
+    try:
+        assert automation_worker.probe_cdp_endpoint(cdp_url) == automation_worker.CDP_PROBE_OK
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+def test_cdp_probe_treats_http_ok_but_silent_cdp_as_wedged() -> None:
+    """HTTP 应答、ws 也连上，但不回命令 = 假死（不能当可用）。"""
+
+    server, cdp_url = _fake_cdp_server(reply=False)
+    try:
+        assert (
+            automation_worker.probe_cdp_endpoint(cdp_url, timeout_seconds=0.5)
+            == automation_worker.CDP_PROBE_WEDGED
+        )
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+def test_cdp_probe_reports_down_when_nothing_listens() -> None:
+    assert (
+        automation_worker.probe_cdp_endpoint(f"http://127.0.0.1:{_closed_port()}")
+        == automation_worker.CDP_PROBE_DOWN
     )
 
+
+def test_cdp_probe_treats_missing_ws_url_as_wedged(monkeypatch: pytest.MonkeyPatch) -> None:
     class Response:
         def __init__(self, payload: bytes) -> None:
             self.payload = payload
@@ -954,17 +1068,80 @@ def test_cdp_probe_requires_a_real_cdp_endpoint(monkeypatch: pytest.MonkeyPatch)
         "urlopen",
         lambda url, timeout=None: Response(b'{"Browser": "Chrome/157.0"}'),
     )
-    assert worker._cdp_is_reachable() is True
-
-    monkeypatch.setattr(
-        automation_worker.urllib.request,
-        "urlopen",
-        lambda url, timeout=None: Response(b"{}"),
-    )
-    assert worker._cdp_is_reachable() is False, "端口上有东西但不是 CDP 服务时不能当成可用"
+    assert (
+        automation_worker.probe_cdp_endpoint("http://127.0.0.1:1")
+        == automation_worker.CDP_PROBE_WEDGED
+    ), "端口上有东西但不是 CDP 服务时不能当成可用"
 
     def refuse(url, timeout=None):
         raise OSError("connection refused")
 
     monkeypatch.setattr(automation_worker.urllib.request, "urlopen", refuse)
-    assert worker._cdp_is_reachable() is False
+    assert automation_worker.probe_cdp_endpoint("http://127.0.0.1:1") == automation_worker.CDP_PROBE_DOWN
+
+
+def test_cdp_health_caches_probe_results(monkeypatch: pytest.MonkeyPatch) -> None:
+    worker = automation_worker.AutomationWorker(
+        FakeClient(claimed=False), worker_id="w-cdp-cache", upload_root=Path(".")
+    )
+    calls: list[str] = []
+
+    def probe(cdp_url: str, **kwargs) -> str:
+        calls.append(cdp_url)
+        return automation_worker.CDP_PROBE_OK
+
+    monkeypatch.setattr(automation_worker, "probe_cdp_endpoint", probe)
+
+    assert worker._cdp_health() == automation_worker.CDP_PROBE_OK
+    assert worker._cdp_health() == automation_worker.CDP_PROBE_OK
+    assert len(calls) == 1, "同一轮询里的多次探活应命中缓存"
+
+    worker._cdp_health(force=True)
+    assert len(calls) == 2
+
+
+def test_worker_flags_browser_restart_after_cdp_connect_timeout(tmp_path: Path, monkeypatch) -> None:
+    """执行器报 CDP 连接超时 → 下一单领取前必须重启那只浏览器。"""
+
+    client = FakeClient(claimed=True)
+    worker = automation_worker.AutomationWorker(
+        client, worker_id="worker-test", upload_root=tmp_path, heartbeat_interval=0
+    )
+    _stub_cdp_health(worker, monkeypatch, automation_worker.CDP_PROBE_OK)
+    monkeypatch.setattr(
+        worker,
+        "_invoke_executor",
+        lambda plan: {
+            "ok": False,
+            "status": "failed",
+            "error": "browserType.connectOverCDP: Timeout 25000ms exceeded. Call log: ...",
+            "save_clicked": False,
+            "publish_clicked": False,
+        },
+    )
+
+    result = worker.run_once()
+
+    assert result["status"] == "failed"
+    assert worker._browser_restart_pending is True
+
+    client.claimed = False
+    client.auto_login_restarts.clear()
+    assert worker.run_once() == {"ok": True, "status": "idle", "job_id": ""}
+    assert client.auto_login_restarts == [True], "重起请求必须带 restart=true"
+    assert worker._browser_restart_pending is False
+
+
+@pytest.mark.parametrize(
+    ("error", "expected"),
+    [
+        ("browserType.connectOverCDP: Timeout 25000ms exceeded.", True),
+        ("Playwright executor did not return a structured result (0xC0000409 STATUS_STACK_BUFFER_OVERRUN)", True),
+        ("Playwright save-draft executor timed out", True),
+        ("browser_context_missing", True),
+        ("select_value_not_verified", False),
+        ("category_dialog_not_visible", False),
+    ],
+)
+def test_worker_classifies_browser_side_failures(error: str, expected: bool) -> None:
+    assert automation_worker.AutomationWorker._execution_suggests_unhealthy_browser({"error": error}) is expected

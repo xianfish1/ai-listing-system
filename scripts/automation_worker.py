@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import base64
 import json
 import os
 import signal
@@ -56,6 +57,25 @@ LOGIN_RECOVERY_STATUSES = {"logged_in", "already_logged_in"}
 # 预检发现 CDP 浏览器未启动时，通过 API 自动拉起浏览器并登录的冷却时间，
 # 避免 Chrome 无法启动时每个轮询周期都反复拉起。
 BROWSER_RECOVERY_COOLDOWN_SECONDS = 60.0
+# CDP 探活结果。只看 /json/version 是不够的：假死的 Chrome 由 DevTools HTTP 线程
+# 应答，浏览器主线程已经不处理 CDP 命令了（2026-11-25 现场：29 单各白等 90s）。
+CDP_PROBE_OK = "ok"          # HTTP 应答 + WebSocket 上真跑通一条 CDP 命令
+CDP_PROBE_DOWN = "down"      # 端口/HTTP 都没有：浏览器没起来
+CDP_PROBE_WEDGED = "wedged"  # HTTP 活着、CDP 没人应答：浏览器假死，必须杀掉重起
+CDP_PROBE_TIMEOUT_SECONDS = 5.0
+# 一次轮询里探活会问好几遍，缓存几秒，免得每次轮询都连一遍 WebSocket。
+# 不健康的结果缓存更久：假死浏览器每次探活都要耗满超时，没必要 5s 问一遍。
+CDP_HEALTH_CACHE_SECONDS = 5.0
+CDP_UNHEALTHY_CACHE_SECONDS = 15.0
+# 这些报错说明「浏览器这一侧已经不健康」而不是页面/字段问题：下一单领取前必须
+# 先杀掉重起浏览器。connectOverCDP 超时与 0xC0000409（执行器进程崩溃）都属于
+# 上一次执行把那只 Chrome 弄坏了，继续用只会一单接一单地失败。
+BROWSER_UNHEALTHY_ERROR_MARKERS = (
+    "connectOverCDP",
+    "browser_context_missing",
+    "Playwright save-draft executor timed out",
+    "0xC0000409",
+)
 # 「这个账号是否正在做页面导入」的查询缓存：轮询间隔 3s，缓存 2s 既够用又
 # 不会在弹窗打开的瞬间漏掉（导入刚开始时最多晚 2s 让路）。
 PAGE_IMPORT_SESSION_CACHE_SECONDS = 2.0
@@ -79,6 +99,104 @@ def execution_has_media_warnings(execution: dict[str, Any]) -> bool:
         for name, stage in (execution.get("stages") or {}).items()
         if name != "warnings"
     )
+
+
+def _cdp_ws_url(base_url: str, timeout_seconds: float) -> str | None:
+    """GET /json/version 取 webSocketDebuggerUrl；None 表示 DevTools HTTP 都不应答。
+
+    返回空字符串表示 HTTP 通但没给 ws 地址——那也已经是不健康状态，按假死处理。
+    """
+
+    try:
+        with urllib.request.urlopen(f"{base_url}/json/version", timeout=timeout_seconds) as response:
+            payload = json.loads(response.read().decode("utf-8"))
+    except (urllib.error.URLError, TimeoutError, OSError, ValueError, json.JSONDecodeError):
+        return None
+    if not isinstance(payload, dict) or not str(payload.get("Browser") or "").strip():
+        return None
+    return str(payload.get("webSocketDebuggerUrl") or "").strip()
+
+
+def _send_ws_text(sock: socket.socket, text: bytes) -> None:
+    """发一帧客户端文本帧（客户端必须掩码；探活用的报文远小于 126 字节）。"""
+
+    mask = os.urandom(4)
+    masked = bytes(byte ^ mask[index % 4] for index, byte in enumerate(text))
+    sock.sendall(b"\x81" + bytes([0x80 | len(text)]) + mask + masked)
+
+
+def _cdp_ws_command_responds(ws_url: str, timeout_seconds: float) -> bool:
+    """连上 CDP WebSocket 并真跑一条 ``Browser.getVersion``，收到回应才算通。
+
+    这一步才是真正的探活：假死的 Chrome 会完成 TCP 连接与 ws 握手（DevTools HTTP
+    线程还在），然后对浏览器级 CDP 命令一个字都不回——正是执行器
+    ``connectOverCDP`` 白等 90s 的那个状态（2026-11-25 现场）。
+    """
+
+    parsed = urllib.parse.urlparse(ws_url)
+    host = parsed.hostname or "127.0.0.1"
+    port = parsed.port or 80
+    path = parsed.path or "/"
+    if parsed.query:
+        path = f"{path}?{parsed.query}"
+    key = base64.b64encode(os.urandom(16)).decode("ascii")
+    deadline = time.monotonic() + timeout_seconds
+    try:
+        with socket.create_connection((host, port), timeout=timeout_seconds) as sock:
+            sock.settimeout(timeout_seconds)
+            sock.sendall(
+                (
+                    f"GET {path} HTTP/1.1\r\n"
+                    f"Host: {host}:{port}\r\n"
+                    "Upgrade: websocket\r\n"
+                    "Connection: Upgrade\r\n"
+                    f"Sec-WebSocket-Key: {key}\r\n"
+                    "Sec-WebSocket-Version: 13\r\n\r\n"
+                ).encode("ascii")
+            )
+            handshake = b""
+            while b"\r\n\r\n" not in handshake:
+                if time.monotonic() >= deadline:
+                    return False
+                chunk = sock.recv(4096)
+                if not chunk:
+                    return False
+                handshake += chunk
+            if b" 101 " not in handshake.split(b"\r\n", 1)[0]:
+                return False
+            _send_ws_text(sock, b'{"id":1,"method":"Browser.getVersion","params":{}}')
+            received = handshake.split(b"\r\n\r\n", 1)[1]
+            while time.monotonic() < deadline:
+                try:
+                    chunk = sock.recv(4096)
+                except (socket.timeout, TimeoutError):
+                    break
+                if not chunk:
+                    break
+                received += chunk
+                compact = received.replace(b" ", b"")
+                if b'"id":1' in compact and b'"result"' in compact:
+                    return True
+            return False
+    except (OSError, TimeoutError, UnicodeError):
+        return False
+
+
+def probe_cdp_endpoint(
+    cdp_url: str, *, timeout_seconds: float = CDP_PROBE_TIMEOUT_SECONDS
+) -> str:
+    """探活一只 CDP 浏览器：``ok`` / ``down`` / ``wedged``。"""
+
+    parsed = urllib.parse.urlparse(str(cdp_url or "").strip())
+    if parsed.scheme != "http" or not parsed.hostname or not parsed.port:
+        return CDP_PROBE_DOWN
+    base_url = f"http://{parsed.hostname}:{parsed.port}"
+    ws_url = _cdp_ws_url(base_url, timeout_seconds)
+    if ws_url is None:
+        return CDP_PROBE_DOWN
+    if not ws_url:
+        return CDP_PROBE_WEDGED
+    return CDP_PROBE_OK if _cdp_ws_command_responds(ws_url, timeout_seconds) else CDP_PROBE_WEDGED
 
 
 class AutomationApiClient:
@@ -193,12 +311,18 @@ class AutomationApiClient:
             },
         )
 
-    def auto_login_mabang(self, account_id: str | None = None, slot: int = 0) -> dict[str, Any]:
+    def auto_login_mabang(
+        self, account_id: str | None = None, slot: int = 0, *, restart: bool = False
+    ) -> dict[str, Any]:
         """Ask the API to start (if needed) one account's browser and auto-login Mabang.
 
         `slot` 指向同一个账号的哪一只浏览器（0 = 账号自己的那只）：同账号多槽位并行时
         每个 Worker 只能恢复自己那个槽位的浏览器，否则会把别人的页面顶掉。
         Omitting the account id keeps the legacy single-account behaviour.
+
+        `restart=True` 要求 API 先杀掉这只浏览器再拉起。CDP 探活判成假死时必须带上：
+        复用逻辑看到 ``/json/version`` 正常就不会动它，不带 restart 等于对着假死的
+        Chrome 再念一遍登录流程。
         """
 
         payload: dict[str, Any] = {}
@@ -206,6 +330,8 @@ class AutomationApiClient:
             payload["account_id"] = account_id
         if int(slot or 0) > 0:
             payload["slot"] = int(slot)
+        if restart:
+            payload["restart"] = True
         # 这条链路包含「启动 Chrome + 跑自动登录」，实测可到 60s；沿用 30s 的默认
         # 超时会被误判成「API unavailable」，然后进入冷却反复等浏览器。
         return self._request(
@@ -429,6 +555,14 @@ class AutomationWorker:
         self._last_browser_recovery_result: dict[str, Any] | None = None
         self._startup_browser_recovery_done = False
         self._startup_login_ready = False
+        # 上一单把浏览器弄坏了（CDP 连接超时 / 执行器崩溃 / 执行器超时）时置位：
+        # 下一单领取前必须先杀掉重起这只 Chrome，否则会一单接一单地重复同一个失败。
+        self._browser_restart_pending = False
+        # 连续重启次数：第一次立刻重起，之后退回 60s 冷却，避免起不来的浏览器
+        # 每个轮询周期（3s）都被 taskkill 一次。
+        self._browser_restart_attempts = 0
+        # CDP 探活缓存：一次轮询里会问好几遍，短缓存避免反复连 WebSocket。
+        self._cdp_health_cache: tuple[float, str] | None = None
         self._page_import_session_cache: tuple[float, dict[str, Any] | None] | None = None
 
         # 初始化混合执行器。playwright_executor 显式传入 self.executor，
@@ -524,36 +658,32 @@ class AutomationWorker:
             self.lease_seconds,
         )
 
-    def _cdp_is_reachable(self, *, timeout_seconds: float = 2.0) -> bool:
-        """Return whether the dedicated automation browser is a usable CDP endpoint.
+    def _cdp_health(self, *, force: bool = False) -> str:
+        """缓存版三态探活（``CDP_PROBE_*``）。
 
-        The worker attaches to an already-running Chrome via ``connectOverCDP``.
-        A TCP-only probe is not enough: a hung Chrome, or *another* Chrome squatting
-        on the port with a foreign profile, still accepts connections but cannot
-        drive Mabang. Probing ``/json/version`` requires a real CDP server, so a
-        bad browser gets treated as "not ready" and the API's recovery path
-        (which kills a same-port squatter and relaunches) runs.
+        只探 ``/json/version`` 是 2026-11-25 那次连败的直接原因：假死的 Chrome 由
+        DevTools HTTP 线程照常应答，探活一直判「正常」，于是不恢复、不重启，每个
+        任务白等 90s。这里改成「HTTP + WebSocket 上真跑一条命令」。
         """
 
-        parsed = urllib.parse.urlparse(self.cdp_url)
-        scheme = parsed.scheme or "http"
-        host = parsed.hostname or "127.0.0.1"
-        port = parsed.port or 18223
-        try:
-            with urllib.request.urlopen(
-                f"{scheme}://{host}:{port}/json/version", timeout=timeout_seconds
-            ) as response:
-                payload = json.loads(response.read().decode("utf-8"))
-        except (urllib.error.URLError, TimeoutError, OSError, ValueError, json.JSONDecodeError):
-            return False
-        return isinstance(payload, dict) and bool(str(payload.get("Browser") or "").strip())
+        now = time.monotonic()
+        if not force and self._cdp_health_cache is not None:
+            measured_at, cached = self._cdp_health_cache
+            ttl = CDP_HEALTH_CACHE_SECONDS if cached == CDP_PROBE_OK else CDP_UNHEALTHY_CACHE_SECONDS
+            if now - measured_at < ttl:
+                return cached
+        health = probe_cdp_endpoint(self.cdp_url)
+        self._cdp_health_cache = (now, health)
+        if health == CDP_PROBE_OK:
+            self._browser_restart_attempts = 0
+        return health
 
-    def _auto_login_for_current_account(self) -> dict[str, Any]:
+    def _auto_login_for_current_account(self, *, restart: bool = False) -> dict[str, Any]:
         """自动登录当前账号；没绑定账号实体时完全走旧调用形态（单账号兼容）。"""
 
         if self.account_id:
-            return self.client.auto_login_mabang(self.account_id, self.slot)
-        return self.client.auto_login_mabang()
+            return self.client.auto_login_mabang(self.account_id, self.slot, restart=restart)
+        return self.client.auto_login_mabang(restart=restart)
 
     def _activate_account(self, account_id: str, runtime: dict[str, Any]) -> None:
         """把 Worker 切到某个马帮账号的浏览器。
@@ -575,6 +705,10 @@ class AutomationWorker:
         self._startup_browser_recovery_done = False
         self._last_browser_recovery_result = None
         self._page_import_session_cache = None
+        # 换了浏览器：上一个槽位的「假死待重启」与探活缓存都不再适用。
+        self._browser_restart_pending = False
+        self._browser_restart_attempts = 0
+        self._cdp_health_cache = None
         label = str((runtime or {}).get("login_account") or wanted or "默认账号")
         print(f"→ 切换到马帮账号 {label}（CDP {self.cdp_url}）")
 
@@ -645,7 +779,9 @@ class AutomationWorker:
             runtime if isinstance(runtime, dict) else {},
         )
 
-    def _recover_browser_before_wait(self, *, force: bool = False) -> dict[str, Any] | None:
+    def _recover_browser_before_wait(
+        self, *, force: bool = False, restart: bool = False
+    ) -> dict[str, Any] | None:
         """Try to bring the automation browser back via the API auto-login endpoint.
 
         The endpoint launches Chrome when the CDP port is closed and signs in to
@@ -653,6 +789,9 @@ class AutomationWorker:
         broken Chrome setup from being respawned on every poll cycle. The worker
         startup uses ``force=True`` so every fresh worker starts from a clean
         browser window instead of reusing stale tabs.
+
+        ``restart=True`` 让 API 先杀掉这只浏览器再拉起：探活判成假死时，路由里的
+        「复用」分支看到 ``/json/version`` 正常就不会动它，只有这里能真正重起。
         """
 
         now = time.monotonic()
@@ -660,10 +799,12 @@ class AutomationWorker:
             return None
         self._last_browser_recovery_at = now
         try:
-            result = self._auto_login_for_current_account()
+            result = self._auto_login_for_current_account(restart=restart)
         except Exception as exc:  # noqa: BLE001
             result = {"ok": False, "auto_login": {"status": "failed", "error": str(exc)[:200]}}
         self._last_browser_recovery_result = result
+        # 浏览器可能已经被换了一只，探活缓存立即作废。
+        self._cdp_health_cache = None
         return result
 
     def _auto_login_mabang(self) -> dict[str, Any]:
@@ -695,18 +836,86 @@ class AutomationWorker:
             "error": f"马帮登录未确认：{status}{detail}",
         }
 
-    def _waiting_for_browser(self, recovery: dict[str, Any] | None) -> dict[str, Any]:
+    def _waiting_for_browser(
+        self, recovery: dict[str, Any] | None, *, health: str = ""
+    ) -> dict[str, Any]:
         recovery_status = self._recovery_login_status(recovery)
+        if health == CDP_PROBE_WEDGED:
+            detail = "（浏览器假死：端口还应答，但 CDP 命令不再响应；已尝试杀掉重起）"
+        else:
+            detail = ""
         return {
             "ok": False,
             "status": "waiting_for_browser",
             "job_id": "",
             "error": (
-                f"自动化浏览器未就绪：{self.cdp_url} 无法连接。"
+                f"自动化浏览器未就绪：{self.cdp_url} {detail or '无法连接'}。"
                 f"已尝试自动启动并登录马帮（结果：{recovery_status}）。"
                 "请在 设置 → 马帮连接 绑定自动登录账号，或手动启动自动化浏览器。"
             ),
         }
+
+    def _ensure_collection_browser_ready(self) -> dict[str, Any] | None:
+        """领取任务前的浏览器闸门：``None`` = 可以领取，否则返回本轮等待结果。
+
+        三种情况都收在这里：
+        1. 上一单把浏览器弄坏了（``_browser_restart_pending``）→ 杀掉重起；
+        2. 探活不是 ok（假死或根本没起）→ 杀掉重起（假死时复用逻辑不会动它）；
+        3. 刚启动 / 登录态未知 → 按原逻辑复用一次、确认登录。
+
+        重启第一次立即执行，之后退回 60s 冷却：Chrome 起不来时不能每个轮询周期
+        都 taskkill 一次。
+        """
+
+        restart_pending = self._browser_restart_pending
+        health = self._cdp_health()
+        if health == CDP_PROBE_OK and not restart_pending and self._startup_login_ready:
+            return None
+        if health != CDP_PROBE_OK or restart_pending:
+            self._startup_login_ready = False
+            force = self._browser_restart_attempts == 0
+            self._browser_restart_attempts += 1
+            self._startup_browser_recovery_done = True
+            recovery = self._recover_browser_before_wait(force=force, restart=True)
+            self._browser_restart_pending = False
+            if recovery is None:
+                # 冷却中拿不到新一轮结果：退回上一次的，别把「没试」说成「失败」。
+                recovery = self._last_browser_recovery_result
+            else:
+                # 刚重起过一只浏览器，之前的假死结论已经作废，必须重新探。
+                health = self._cdp_health(force=True)
+            if health != CDP_PROBE_OK:
+                self.heartbeat.set(status="waiting_for_browser", phase="browser_recovery")
+                return self._waiting_for_browser(recovery, health=health)
+            if self._recovery_login_status(recovery) not in LOGIN_RECOVERY_STATUSES:
+                self.heartbeat.set(status="waiting_for_login", phase="login")
+                return self._waiting_for_login(recovery)
+            self._startup_login_ready = True
+            return None
+        # 浏览器探活正常，但还没确认过登录（启动后 / 换账号后）：复用并确认登录。
+        force = not self._startup_browser_recovery_done
+        self._startup_browser_recovery_done = True
+        recovery = self._recover_browser_before_wait(force=force)
+        if recovery is None:
+            recovery = self._last_browser_recovery_result
+        if self._recovery_login_status(recovery) not in LOGIN_RECOVERY_STATUSES:
+            health = self._cdp_health(force=True)
+            if health != CDP_PROBE_OK:
+                self.heartbeat.set(status="waiting_for_browser", phase="browser_recovery")
+                return self._waiting_for_browser(recovery, health=health)
+            self.heartbeat.set(status="waiting_for_login", phase="login")
+            return self._waiting_for_login(recovery)
+        self._startup_login_ready = True
+        return None
+
+    @staticmethod
+    def _execution_suggests_unhealthy_browser(execution: dict[str, Any] | None) -> bool:
+        """这一单的失败是不是「浏览器坏了」造成的（而不是页面/字段问题）。"""
+
+        if not execution:
+            return False
+        error = str(execution.get("error") or "")
+        return any(marker in error for marker in BROWSER_UNHEALTHY_ERROR_MARKERS)
 
     def _invoke_executor(self, task_plan: dict[str, Any]) -> dict[str, Any]:
         if self.enable_hybrid and self.hybrid_executor:
@@ -770,41 +979,13 @@ class AutomationWorker:
         if page_import_session is not None:
             self.heartbeat.set(status="waiting_for_page_import", phase="page_import")
             return self._waiting_for_page_import(page_import_session)
-        # 每次 Worker 进程启动先主动清理浏览器窗口并打开登录页，不等到浏览器掉线
-        # 才恢复。预检逻辑只针对真实 Playwright 执行器，注入的测试执行器不接触 CDP。
+        # 浏览器闸门：探活（HTTP + 真跑一条 CDP 命令）、必要时杀掉重起、确认登录。
+        # 预检逻辑只针对真实 Playwright 执行器，注入的测试执行器不接触 CDP。
         uses_collection_browser = self.executor is browser_use_runner.run_playwright_save_draft
-        if uses_collection_browser and not self._startup_login_ready:
-            force = not self._startup_browser_recovery_done
-            self._startup_browser_recovery_done = True
-            recovery = self._recover_browser_before_wait(force=force)
-            if recovery is None:
-                recovery = self._last_browser_recovery_result
-            if self._recovery_login_status(recovery) not in LOGIN_RECOVERY_STATUSES:
-                if not self._cdp_is_reachable():
-                    self.heartbeat.set(status="waiting_for_browser", phase="browser_recovery")
-                    return self._waiting_for_browser(recovery)
-                self.heartbeat.set(status="waiting_for_login", phase="login")
-                return self._waiting_for_login(recovery)
-            self._startup_login_ready = True
-        # Preflight only guards the real Playwright executor, which attaches to a
-        # running Chrome over CDP. Injected executors (tests / custom drivers) do
-        # not open that browser, so they must not be gated on the CDP port.
-        if (
-            uses_collection_browser
-            and not self._cdp_is_reachable()
-        ):
-            self._startup_login_ready = False
-            # 浏览器不在时先尝试通过 API 自动拉起并登录（带冷却），失败才继续等待。
-            recovery = self._recover_browser_before_wait()
-            if recovery is None and self._last_browser_recovery_result is not None:
-                recovery = self._last_browser_recovery_result
-            if not self._cdp_is_reachable():
-                self.heartbeat.set(status="waiting_for_browser", phase="browser_recovery")
-                return self._waiting_for_browser(recovery)
-            if self._recovery_login_status(recovery) not in LOGIN_RECOVERY_STATUSES:
-                self.heartbeat.set(status="waiting_for_login", phase="login")
-                return self._waiting_for_login(recovery)
-            self._startup_login_ready = True
+        if uses_collection_browser:
+            gate = self._ensure_collection_browser_ready()
+            if gate is not None:
+                return gate
         # 领取按当前账号过滤：绝不把 A 账号的店铺任务交给登录着 B 账号的浏览器。
         # 没有账号（旧单账号库）时保持原调用形态。
         claimed = (
@@ -868,6 +1049,12 @@ class AutomationWorker:
                 execution = self._invoke_executor(task_plan)
                 if self._is_login_blocked(execution):
                     execution = self._retry_after_auto_login(task_plan, execution)
+                if self._execution_suggests_unhealthy_browser(execution):
+                    # 连接超时 / 执行器崩溃 / 执行器整体卡死：这只 Chrome 已经不可信，
+                    # 下一单领取前必须杀掉重起，否则会像 2026-11-25 那样一单接一单地
+                    # 撞同一个 90s 超时。
+                    self._browser_restart_pending = True
+                    print("⚠️ 执行器报浏览器侧异常，下一单领取前会重启自动化浏览器")
             finally:
                 lease.stop()
             if lease.last_error:

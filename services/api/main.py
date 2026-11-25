@@ -2132,6 +2132,7 @@ def _launch_collection_browser(
     *,
     headless: bool | None = None,
     slot: int = 0,
+    force_restart: bool = False,
 ) -> tuple[dict[str, Any], str]:
     """Start the automation/Worker browser for one 马帮账号（某个槽位）.
 
@@ -2167,6 +2168,9 @@ def _launch_collection_browser(
         # 探测不到正在运行的模式就重启，保证请求的模式真的生效。
         require_mode=headless is not None,
         reuse_running_only=page_import_session is not None,
+        # 假死浏览器：复用分支看到 /json/version 正常就不会动它，只能靠这个杀掉重起。
+        # 页面导入期间（reuse_running_only）launch_mabang_browser 会忽略它。
+        force_restart=force_restart,
     )
     result["account_id"] = str(runtime.get("account_id") or "")
     result["login_account"] = str(runtime.get("login_account") or "")
@@ -4620,12 +4624,20 @@ class ApiHandler(BaseHTTPRequestHandler):
 
         if path == "/api/mabang-browser/auto-login":
             # Worker 预检/登录恢复入口：浏览器未启动时先拉起，再用该账号登录马帮。
+            # restart=true 表示「这个端口上的浏览器已不可信」（Worker 探活发现 CDP
+            # 命令不再应答的假死状态）：必须先杀掉再起，否则复用分支会把那只假死的
+            # Chrome 原样交回来，登录脚本接着连不上（2026-11-25 连续 29 单）。
             account_id = str(payload.get("account_id") or "").strip() or None
             slot = _payload_slot(payload)
+            restart = bool(payload.get("restart"))
             try:
-                result, cdp_url = _launch_collection_browser(account_id, slot=slot)
+                result, cdp_url = _launch_collection_browser(
+                    account_id, slot=slot, force_restart=restart
+                )
             except MabangBrowserError as exc:
                 raise ApiRequestError(str(exc), 422) from exc
+            if restart:
+                result["restarted"] = True
             _attach_mabang_auto_login(result, cdp_url, account_id)
             self._json(result)
             return
