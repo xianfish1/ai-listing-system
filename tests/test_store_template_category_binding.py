@@ -156,6 +156,11 @@ def test_mabang_store_options_normalize_site_fallback_country():
 
 
 def test_store_template_rejects_profile_from_another_store_country():
+    """模板站点和绑定的类目方案必须同国家：TH 站点不能绑 PH 的必填项规则。
+
+    多站点隔离是「一店多站点、每站点一套类目方案」，不是「可以跨站点借方案」：
+    站点可以新增，但属性规则仍必须来自该站点自己采集的方案。
+    """
     _seed_catalog_and_profile()
     data = storage.load_store()
     data["mabang_store_options"].append(
@@ -170,11 +175,12 @@ def test_store_template_rejects_profile_from_another_store_country():
     )
     storage.save_store(data)
 
-    with pytest.raises(CategoryProfileConflict, match="selected store scope"):
+    with pytest.raises(CategoryProfileConflict, match="published category profile"):
         storage.create_store_template(
             {
                 "store_name": "TH Store",
                 "platform": "shopee",
+                "country": "TH",
                 "mabang_store_id": "store-th",
                 "template_name": "Wrong Country Rules",
                 "category_profile_id": "shopee-ph-100244",
@@ -629,7 +635,11 @@ def test_second_store_in_the_same_country_can_save_before_its_own_catalog_is_col
 
 
 def test_shared_country_tree_still_rejects_a_category_from_another_country():
-    """跨国家不共用：ID 店铺的模板不能拿 PH 的类目/方案。"""
+    """跨国家不共用：ID 店铺的 PH 站点模板不能拿 PH 的树/方案顶上。
+
+    多站点允许同一家店同时挂 PH / ID，但每个站点只认自己国家的类目树与方案；
+    站点没登记过（或类目树不是这个国家的）一律拦下，不能混用。
+    """
     _seed_catalog_and_profile()
     data = storage.load_store()
     data["mabang_store_options"].append(
@@ -642,6 +652,19 @@ def test_shared_country_tree_still_rejects_a_category_from_another_country():
             "status": "active",
         }
     )
+    # 印尼店只采集过 ID 的类目树
+    data["marketplace_categories"].append(
+        {
+            "id": "category-id-100244",
+            "platform": "shopee",
+            "country": "ID",
+            "store_id": "store-id",
+            "category_id": "100244",
+            "path": "Men Clothes > Tops > T-Shirts",
+            "is_leaf": True,
+            "active": True,
+        }
+    )
     storage.save_store(data)
     data = storage.load_store()
 
@@ -650,3 +673,200 @@ def test_shared_country_tree_still_rejects_a_category_from_another_country():
             data,
             _binding_template(mabang_store_id="store-id"),
         )
+
+
+def _seed_id_profile_and_tree() -> None:
+    """给多站点测试准备 ID 的类目方案与类目树（节点 id 与 PH 同名类目一致）。"""
+
+    data = storage.load_store()
+    data["category_profiles"].append(
+        {
+            "id": "shopee-id-100244",
+            "platform": "shopee",
+            "country": "ID",
+            "marketplace_category_id": "100244",
+            "published_version_id": "version-id-1",
+        }
+    )
+    data["category_profile_versions"].append(
+        {
+            "id": "version-id-1",
+            "profile_id": "shopee-id-100244",
+            "status": "published",
+            "version": 1,
+            "fields": [],
+        }
+    )
+    data.setdefault("marketplace_categories", []).append(
+        {
+            "id": "category-id-store-1-100244",
+            "platform": "shopee",
+            "country": "ID",
+            "store_id": "store-1",
+            "category_id": "100244",
+            "path": "Men Clothes > Tops > T-Shirts",
+            "is_leaf": True,
+            "active": True,
+        }
+    )
+    storage.save_store(data)
+
+
+def test_same_store_keeps_ph_and_id_templates_isolated():
+    """一家店同时挂 PH / ID：站点登记各一条，模板与类目方案互不覆盖。"""
+    _seed_catalog_and_profile()
+    _seed_id_profile_and_tree()
+
+    ph_template = storage.create_store_template(
+        {
+            "store_name": "POD菲律宾",
+            "platform": "shopee",
+            "country": "PH",
+            "mabang_store_id": "store-1",
+            "template_name": "PH Mens Tee",
+            "category_profile_id": "shopee-ph-100244",
+            "category_profile_version_id": "version-1",
+            "mabang_category_id": "100244",
+            "marketplace_category_path": "Men Clothes > Tops > T-Shirts",
+            "attribute_values": {"100134": ["PH-MATERIAL"]},
+        }
+    )
+    id_template = storage.create_store_template(
+        {
+            "store_name": "POD菲律宾",
+            "platform": "shopee",
+            "country": "ID",
+            "mabang_store_id": "store-1",
+            "template_name": "ID Mens Tee",
+            "category_profile_id": "shopee-id-100244",
+            "category_profile_version_id": "version-id-1",
+            "mabang_category_id": "100244",
+            "marketplace_category_path": "Men Clothes > Tops > T-Shirts",
+            "attribute_values": {"100134": ["ID-MATERIAL"]},
+        }
+    )
+
+    assert ph_template["id"] != id_template["id"]
+    data = storage.load_store()
+    sites = sorted(
+        {
+            item["country"]
+            for item in data["mabang_store_options"]
+            if item["mabang_store_id"] == "store-1"
+        }
+    )
+    assert sites == ["ID", "PH"]
+    stored = {item["id"]: item for item in data["store_templates"]}
+    assert stored[ph_template["id"]]["country"] == "PH"
+    assert stored[ph_template["id"]]["attribute_values"] == {"100134": ["PH-MATERIAL"]}
+    assert stored[id_template["id"]]["country"] == "ID"
+    assert stored[id_template["id"]]["category_profile_id"] == "shopee-id-100244"
+
+
+def test_delete_store_site_option_only_removes_that_site():
+    storage.upsert_mabang_store_options(
+        [
+            {"platform": "shopee", "country": "PH", "mabang_store_id": "store-1", "store_name": "POD菲律宾"},
+            {"platform": "shopee", "country": "ID", "mabang_store_id": "store-1", "store_name": "POD菲律宾"},
+        ]
+    )
+    data = storage.load_store()
+    ph_option = next(item for item in data["mabang_store_options"] if item["country"] == "PH")
+
+    result = storage.delete_mabang_store_option(ph_option["id"])
+
+    assert result["deleted"] is True
+    remaining = storage.list_mabang_store_options("shopee")
+    assert [item["country"] for item in remaining] == ["ID"]
+
+
+def test_update_store_template_switches_site_and_registers_it():
+    """模板编辑器切换「记录站点」：换成该站点的方案/属性，并把站点登记进店铺。"""
+    _seed_catalog_and_profile()
+    _seed_id_profile_and_tree()
+    ph_template = storage.create_store_template(
+        {
+            "store_name": "POD菲律宾",
+            "platform": "shopee",
+            "country": "PH",
+            "mabang_store_id": "store-1",
+            "template_name": "Mens Tee",
+            "category_profile_id": "shopee-ph-100244",
+            "category_profile_version_id": "version-1",
+            "mabang_category_id": "100244",
+            "marketplace_category_path": "Men Clothes > Tops > T-Shirts",
+            "attribute_values": {"100134": ["PH-MATERIAL"]},
+        }
+    )
+
+    updated = storage.update_store_template(
+        ph_template["id"],
+        {
+            "country": "ID",
+            "category_profile_id": "shopee-id-100244",
+            "category_profile_version_id": "version-id-1",
+            "mabang_category_id": "100244",
+            "marketplace_category_path": "Men Clothes > Tops > T-Shirts",
+            "attribute_values": {"100134": ["ID-MATERIAL"]},
+        },
+    )
+
+    assert updated["country"] == "ID"
+    assert updated["currency"] == "IDR"
+    assert updated["category_profile_id"] == "shopee-id-100244"
+    assert updated["attribute_values"] == {"100134": ["ID-MATERIAL"]}
+    data = storage.load_store()
+    sites = sorted(
+        {
+            item["country"]
+            for item in data["mabang_store_options"]
+            if item["mabang_store_id"] == "store-1"
+        }
+    )
+    assert sites == ["ID", "PH"]
+
+
+def test_cnsc_store_with_only_a_global_record_can_save_its_template():
+    """纯跨境店铺只有一条 GLOBAL 登记时，跨境模板仍可保存（不能因为多站点改造变红）。"""
+    data = storage._empty_store()
+    data["mabang_store_options"] = [
+        {
+            "id": "store-option-cnsc",
+            "platform": "shopee",
+            "country": "GLOBAL",
+            "store_name": "广州小苗服饰有限公司",
+            "mabang_store_id": "cnsc-store-1",
+            "status": "active",
+        }
+    ]
+    data["category_profiles"] = [
+        {
+            "id": "shopee-global-100244",
+            "platform": "shopee",
+            "country": "GLOBAL",
+            "marketplace_category_id": "100244",
+            "published_version_id": "version-global",
+        }
+    ]
+    data["category_profile_versions"] = [
+        {
+            "id": "version-global",
+            "profile_id": "shopee-global-100244",
+            "status": "published",
+            "version": 1,
+            "fields": [],
+        }
+    ]
+    storage.save_store(data)
+    data = storage.load_store()
+
+    storage._validate_store_template_category_binding(
+        data,
+        _binding_template(
+            mabang_store_id="cnsc-store-1",
+            country="GLOBAL",
+            listing_mode="cnsc_global",
+            category_profile_id="shopee-global-100244",
+            category_profile_version_id="version-global",
+        ),
+    )

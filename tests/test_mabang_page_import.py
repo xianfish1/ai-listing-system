@@ -659,3 +659,50 @@ def test_3pf_import_keeps_store_country_but_binds_the_global_profile_scope() -> 
     assert template["country"] == "PH"
     assert template["category_profile_id"] == "shopee-global-100244"
     assert data["category_profiles"][0]["country"] == "GLOBAL"
+
+
+def test_same_store_under_another_site_creates_an_isolated_site_record_and_template() -> None:
+    """同一家店按新站点导入：新增独立站点登记与模板，不覆盖原站点的数据。
+
+    现场（2026-11-25）：ID-Pod 2 早前被记成 PH，选 ID 导入时被整单拦下。多站点
+    隔离后，新站点只新增一套站点登记/类目方案/模板，PH 那份原样保留。
+    """
+    data = _store()
+    stage_page_import(data, "run-1", _capture(), now="2026-11-25T00:01:00Z")
+    ph_result = confirm_page_import(data, "run-1", now="2026-11-25T00:02:00Z")
+    ph_template = ph_result["template"]
+    assert ph_template["country"] == "PH"
+    ph_attributes = deepcopy(ph_template["attribute_values"])
+
+    data["mabang_page_import_runs"].append({
+        "id": "run-2",
+        "status": "pending",
+        "platform": "shopee",
+        "country": "ID",
+        "conflict_action": "update",
+        "created_at": "2026-11-25T00:03:00Z",
+        "updated_at": "2026-11-25T00:03:00Z",
+    })
+    stage_page_import(data, "run-2", _capture(), now="2026-11-25T00:04:00Z")
+    id_result = confirm_page_import(data, "run-2", now="2026-11-25T00:05:00Z")
+
+    id_template = id_result["template"]
+    assert id_template["country"] == "ID"
+    assert id_template["id"] != ph_template["id"]
+    assert id_template["category_profile_id"] != ph_template["category_profile_id"]
+
+    store_id = id_template["mabang_store_id"]
+    sites = sorted(
+        {item["country"] for item in data["mabang_store_options"] if item["mabang_store_id"] == store_id}
+    )
+    assert sites == ["ID", "PH"]
+    assert {item["country"] for item in data["category_profiles"]} == {"PH", "ID"}
+
+    # 原 PH 模板原样保留，没被 ID 的属性覆盖。
+    stored_ph = next(item for item in data["store_templates"] if item["id"] == ph_template["id"])
+    assert stored_ph["country"] == "PH"
+    assert stored_ph["attribute_values"] == ph_attributes
+
+    # 换站点要在导入结果里提示（不再硬拦），让操作员确认没选错站点。
+    warnings = id_result["run"].get("import_warnings") or []
+    assert any("已记录站点 PH" in item for item in warnings)

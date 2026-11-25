@@ -6,7 +6,7 @@ from typing import Any
 
 from services.api.category_profile_service import create_candidate_from_capture
 from services.api import settings
-from services.api.listing_modes import category_profile_country, is_cnsc_page, normalize_listing_mode
+from services.api.listing_modes import category_profile_country, is_cnsc_page, is_pure_cnsc, normalize_listing_mode
 from services.api.mabang_size_chart_import import import_mabang_size_chart
 from services.api.site_rules import currency_for_country
 from services.api.mabang_import_snapshot import (
@@ -53,8 +53,9 @@ def stage_page_import(
         raise MabangPageImportError("当前马帮页面店铺与目标店铺不一致")
     # 马帮页面本身不提供站点字段，操作员在导入弹窗选的站点才是权威值：
     # 快照里的 store.country 可能只是页面默认值（历史上就把 MY 店记成了 PH）。
+    # 纯跨境（cnsc_global）例外：它的站点口径固定是 GLOBAL，操作员选的站点不覆盖。
     selected_country = str(run.get("country") or "").strip().upper()
-    if selected_country:
+    if selected_country and not is_pure_cnsc(snapshot.get("listing_mode")):
         snapshot.setdefault("store", {})["country"] = selected_country
     run.update(
         {
@@ -157,12 +158,8 @@ def confirm_page_import(
             )
     store = payload["store"]
     category = payload["category"]
-    _assert_store_country_consistent(
-        staged,
-        store,
-        account_id=account_id,
-        allow_change=payload.get("allow_country_change") is True,
-    )
+    # 店铺换站点不再拦（数据按站点隔离），只提示操作员核对。
+    import_warnings.extend(_store_country_change_notes(staged, store, account_id=account_id))
     _upsert_store_option(staged, store, now=now, account_id=account_id)
     if is_cnsc_page(payload.get("listing_mode")):
         for target in payload.get("target_site_stores") or []:
@@ -307,43 +304,44 @@ def _ensure_confirmation_collections(data: dict[str, Any]) -> None:
         data.setdefault(collection, [])
 
 
-def _assert_store_country_consistent(
+def _store_country_change_notes(
     data: dict[str, Any],
     store: dict[str, Any],
     *,
     account_id: str = "",
-    allow_change: bool = False,
-) -> None:
-    """同一家马帮店铺的站点不允许靠重新导入静默改写。
+) -> list[str]:
+    """同一家店铺换/加站点时给一条提示，而不是拦下导入。
 
-    站点决定类目方案作用域、币种和描述配图上限；历史上本土JunsMY 就是被一次
-    「站点默认 PH」的导入覆盖成 PH，后来 6 个本土模板全部绑错方案。现在导入必须
-    手选站点，若与库里已有记录不一致就直接拦住，要求先做显式的站点迁移。
+    站点决定类目方案作用域、币种、模板与描述配图上限，所以数据必须按站点隔离：
+    店铺登记（mabang_store_options）以「账号+平台+店铺+站点」为唯一键，店铺模板
+    也以站点为身份的一部分。同一家马帮店铺因此可以同时挂在多个站点上，新站点只
+    新增一条站点记录和一套独立模板/类目方案，**不会**覆盖已有站点的数据。
+
+    以前这里直接报错拦住（历史上本土 JunsMY 被一次「站点默认 PH」的导入覆盖），
+    现在隔离做到位了，只剩提示：让操作员确认不是选错站点。
     """
 
     wanted = str(store.get("country") or "").strip().upper()
     if not wanted:
-        return
+        return []
     wanted_account = str(account_id or store.get("account_id") or "").strip()
-    existing = next(
-        (
-            item
+    recorded = sorted(
+        {
+            str(item.get("country") or "").strip().upper()
             for item in data.get("mabang_store_options") or []
             if str(item.get("account_id") or "").strip() == wanted_account
             and str(item.get("platform") or "").lower() == str(store.get("platform") or "").lower()
             and str(item.get("mabang_store_id") or "") == str(store.get("id") or "")
-        ),
-        None,
+            and str(item.get("country") or "").strip()
+        }
     )
-    if not existing:
-        return
-    recorded = str(existing.get("country") or "").strip().upper()
-    if recorded and recorded != wanted and not allow_change:
-        raise MabangPageImportError(
-            f"店铺「{store.get('name') or store.get('id')}」已记录为站点 {recorded}，"
-            f"与本次导入选择的 {wanted} 不一致。请把页面切到正确站点后重新导入；"
-            "站点变更会牵动类目方案/币种/模板与副本，必须单独迁移，不能靠重新导入覆盖。"
-        )
+    if not recorded or wanted in recorded:
+        return []
+    return [
+        f"店铺「{store.get('name') or store.get('id')}」已记录站点 {'、'.join(recorded)}，"
+        f"本次按 {wanted} 导入：会新增一条独立的 {wanted} 站点记录，"
+        "类目方案/模板/副本按站点隔离，既有站点数据不受影响。请确认没有选错站点。"
+    ]
 
 
 def _upsert_store_option(
@@ -355,6 +353,8 @@ def _upsert_store_option(
 ) -> dict[str, Any]:
     options = data.setdefault("mabang_store_options", [])
     wanted_account = str(account_id or store.get("account_id") or "").strip()
+    wanted_country = str(store.get("country") or "").strip().upper()
+    # 站点是店铺登记的身份之一：同一家店可以同时记 PH / ID 等多条，互不覆盖。
     existing = next(
         (
             item
@@ -362,6 +362,7 @@ def _upsert_store_option(
             if str(item.get("account_id") or "").strip() == wanted_account
             and str(item.get("platform") or "").lower() == str(store["platform"]).lower()
             and str(item.get("mabang_store_id") or "") == str(store["id"])
+            and str(item.get("country") or "").strip().upper() == wanted_country
         ),
         None,
     )
@@ -401,16 +402,29 @@ def _upsert_template(
         raise MabangPageImportError("模板冲突操作必须是 update 或 save_as_new")
     templates = data.setdefault("store_templates", [])
     payload_mode = normalize_listing_mode(payload.get("listing_mode"))
+    payload_country = str(store.get("country") or "").strip().upper()
+    # 模板身份 = 刊登模式 + 店铺 + **站点** + 类目。类目 id 是平台级资产（同名类目各
+    # 站点 id 相同），不带站点就会让 PH / ID 两套属性互相覆盖——多站点必须隔离。
+    # 存量模板可能没写 country（早期版本）：只有唯一一条无站点记录时按它升级。
+    candidates = [
+        item
+        for item in templates
+        if normalize_listing_mode(item.get("listing_mode")) == payload_mode
+        and item.get("mabang_store_id") == store["id"]
+        and item.get("mabang_category_id") == category["id"]
+    ]
     existing = next(
         (
             item
-            for item in templates
-            if normalize_listing_mode(item.get("listing_mode")) == payload_mode
-            and item.get("mabang_store_id") == store["id"]
-            and item.get("mabang_category_id") == category["id"]
+            for item in candidates
+            if str(item.get("country") or "").strip().upper() == payload_country
         ),
         None,
     )
+    if existing is None:
+        legacy = [item for item in candidates if not str(item.get("country") or "").strip()]
+        if len(legacy) == 1:
+            existing = legacy[0]
     if existing is not None and conflict_action == "update":
         template = existing
         version = int(template.get("version") or 1) + 1

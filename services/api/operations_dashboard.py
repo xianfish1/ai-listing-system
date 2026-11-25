@@ -179,9 +179,14 @@ def _next_action(products: list[dict[str, Any]], copies: list[dict[str, Any]], j
 def _stale_store_catalogs(data: dict[str, Any], now: str) -> list[dict[str, str]]:
     collected = ((data.get("runtime_configuration") or {}).get("store_collection") or {}).get("last_collected_at") or {}
     stale: list[dict[str, str]] = []
+    seen: set[tuple[str, str]] = set()
     for item in data.get("mabang_store_options") or []:
         store_id = str(item.get("mabang_store_id") or "")
         account_id = str(item.get("account_id") or "")
+        # 多站点店铺每个站点一条登记，采集状态是店铺级的：同一 (账号, 店铺) 只报一次。
+        if (account_id, store_id) in seen:
+            continue
+        seen.add((account_id, store_id))
         # 先按账号+店铺找，再回退旧的「只按店铺」键，保证存量记录仍然算数。
         last = (
             collected.get(store_collection_key(account_id, store_id))

@@ -3264,6 +3264,8 @@ def create_store_template(payload: dict[str, Any]) -> dict[str, Any]:
             template["missing_configuration"] = _cnsc_configuration_problems(template)
             template["status"] = "needs_configuration" if template["missing_configuration"] else "active"
         _validate_store_template_category_binding(data, template)
+        # 模板选中的站点就是该店铺的站点声明：多站点店铺每个站点各一条登记。
+        _ensure_store_option_for_template(data, template, now=now)
         data.setdefault("store_templates", [])
         data.setdefault("store_template_versions", [])
         data["store_templates"].append(template)
@@ -3298,6 +3300,7 @@ def copy_store_template(template_id: str, target: dict[str, Any]) -> dict[str, A
         if not source:
             raise LookupError("Store template not found")
         target_account = str(target.get("account_id") or "").strip()
+        target_country = str(target.get("country") or target.get("site") or "").strip().upper()
         candidates = [
             item for item in data.get("mabang_store_options", [])
             if str(item.get("mabang_store_id") or "") == target_store_id
@@ -3313,9 +3316,23 @@ def copy_store_template(template_id: str, target: dict[str, Any]) -> dict[str, A
                 item for item in candidates
                 if str(item.get("account_id") or "") == wanted_default
             ]
-            if len(preferred) == 1:
+            if preferred:
                 candidates = preferred
-        if len(candidates) > 1:
+        # 多站点店铺每个站点各有一条登记：按站点筛掉别的站点，再按账号去重
+        # （同一账号的 PH / ID 两条是同一个登录态，不算冲突）。
+        countries = sorted({
+            str(item.get("country") or item.get("site") or "").strip().upper() for item in candidates
+        } - {""})
+        if target_country:
+            candidates = [
+                item for item in candidates
+                if str(item.get("country") or item.get("site") or "").strip().upper() == target_country
+            ]
+            if not candidates:
+                raise ValueError(f"目标店铺没有记录站点 {target_country}，请先切到该站点采集一次")
+        elif len(countries) > 1:
+            raise ValueError(f"该店铺记录了多个站点（{'、'.join(countries)}），请指定要另存到哪个站点")
+        if len({str(item.get("account_id") or "") for item in candidates}) > 1:
             raise ValueError("该店铺 id 在多个马帮账号下存在，请指定账号")
         target_store = candidates[0] if candidates else None
         if not target_store:
@@ -3560,6 +3577,53 @@ def _resolve_store_template_account(
     if len(owners) > 1:
         raise ValueError("该店铺在多个马帮账号下存在，请先指定马帮账号")
     return _default_mabang_account_id(data) if fallback_default else ""
+
+
+def _ensure_store_option_for_template(data: dict[str, Any], template: dict[str, Any], *, now: str) -> bool:
+    """模板选了某个站点就把它登记到该店铺的站点记录里（多站点隔离的入口）。
+
+    站点记录（mabang_store_options）以「账号+平台+店铺+站点」为唯一键：一家店可以同时
+    记 PH / ID 等多条。操作员在模板编辑器里切换「记录站点」就是显式的站点声明，这里
+    把该站点补成一条登记（已存在则原样保留），后续导入预填、采集调度才有据可依。
+    纯跨境模板的 country 是 GLOBAL，不是真实站点，不登记。
+    """
+
+    store_id = str(template.get("mabang_store_id") or "").strip()
+    platform = str(template.get("platform") or "shopee").strip().lower()
+    country = str(template.get("country") or "").strip().upper()
+    if not store_id or not platform or not re.fullmatch(r"[A-Z]{2}", country):
+        return False
+    # 没有类目/类目方案的模板（示例模板、老数据）不登记：这类模板本来就不做站点级
+    # 类目校验，凭空加一条站点记录只会改变它们的保存行为。
+    if not str(template.get("category_profile_id") or "").strip():
+        return False
+    if not str(template.get("mabang_category_id") or "").strip():
+        return False
+    options = data.setdefault("mabang_store_options", [])
+    key = (
+        str(template.get("account_id") or "").strip(),
+        platform,
+        store_id,
+        country,
+    )
+    if any(_store_option_key(item) == key for item in options):
+        return False
+    options.append(
+        {
+            "id": str(uuid.uuid4()),
+            "platform": platform,
+            "country": country,
+            "currency": currency_for_country(country),
+            "store_name": str(template.get("store_name") or store_id),
+            "mabang_store_id": store_id,
+            "account_id": key[0],
+            "source": "store_template_site_switch",
+            "status": "active",
+            "created_at": now,
+            "updated_at": now,
+        }
+    )
+    return True
 
 
 def _migrate_store_template_accounts(data: dict[str, Any]) -> bool:
@@ -4246,30 +4310,36 @@ def _account_id_for_listing_copy_in_store(data: dict[str, Any], listing_copy: di
 
     店铺按账号归属且互不重叠，所以按 (platform, mabang_store_id) 唯一命中一个账号；
     命中不唯一时返回 ""，绝不猜——宁可让任务停在需要人工确认。
+
+    多站点店铺会有多条登记（每站点一条），所以按**账号去重**判断唯一性：同一账号
+    下的 PH / ID 两条登记仍然是同一个登录态，不能因为条数变多就判成不唯一。
     """
 
     store_id = str(listing_copy.get("mabang_store_id") or "").strip()
     platform = str(listing_copy.get("platform") or "shopee").strip().lower()
     if not store_id:
         return ""
-    matches = [
-        item
+    owners = {
+        str(item.get("account_id") or "").strip()
         for item in data.get("mabang_store_options") or []
         if str(item.get("mabang_store_id") or "").strip() == store_id
         and str(item.get("platform") or "").strip().lower() == platform
-    ]
+    }
     # 命中不唯一（同一个店铺 id 出现在多个账号下）时不猜：宁可让任务停在
     # 需要人工确认，也不能把 A 账号的店铺填进 B 账号的登录态里。
-    if len(matches) != 1:
+    if len(owners) != 1:
         return ""
-    return str(matches[0].get("account_id") or "")
+    return next(iter(owners))
 
 
-def _store_option_key(item: dict[str, Any]) -> tuple[str, str, str]:
+def _store_option_key(item: dict[str, Any]) -> tuple[str, str, str, str]:
+    # 站点（country）也是身份：同一家马帮店铺可以同时挂在多个站点上，
+    # 每个站点各有一条登记（类目方案 / 模板 / 副本按站点隔离）。
     return (
         str(item.get("account_id") or "").strip(),
         str(item.get("platform") or "").strip().lower(),
         str(item.get("mabang_store_id") or "").strip(),
+        str(item.get("country") or "").strip().upper(),
     )
 
 
@@ -4328,6 +4398,26 @@ def upsert_mabang_store_options(
         if normalized:
             save(data)
     return {"ok": True, "items": saved, "saved_count": len(saved)}
+
+
+def delete_mabang_store_option(option_id: str) -> dict[str, Any] | None:
+    """删掉一条店铺站点登记（多站点时删错站点用）。
+
+    只删登记本身，不动该站点的模板/类目方案/副本——那些数据按站点独立存在，
+    删登记后仍可在模板编辑器里重新登记（采集一次当前页即可）。
+    """
+
+    wanted = str(option_id or "").strip()
+    if not wanted:
+        return None
+    with locked_store() as (data, save):
+        options = data.setdefault("mabang_store_options", [])
+        index = next((i for i, item in enumerate(options) if str(item.get("id") or "") == wanted), None)
+        if index is None:
+            return None
+        removed = options.pop(index)
+        save(data)
+    return {"deleted": True, "item": dict(removed)}
 
 
 _AUTOMATION_READINESS_MUTABLE_STATUSES = {"ready", "needs_manual", "needs_regeneration"}
@@ -4626,6 +4716,8 @@ def update_store_template(template_id: str, payload: dict[str, Any]) -> dict[str
                 updated["missing_configuration"] = _cnsc_configuration_problems(updated)
                 updated["status"] = "needs_configuration" if updated["missing_configuration"] else "active"
             _validate_store_template_category_binding(data, updated)
+            # 换了站点就把该站点补成店铺的一条站点登记（多站点店铺各站点一条）。
+            _ensure_store_option_for_template(data, updated, now=now)
             # 归一化后再比较：老模板的存量配置缺少后来新增的子字段（如
             # size_price_overrides），直接比较会把"没改设置"误判成"配置变了"，
             # 从而无谓地重建副本的默认 SKU 行。
@@ -9579,26 +9671,34 @@ def _validate_store_template_category_binding(data: dict[str, Any], template: di
         raise CategoryProfileConflict("Store template category does not match the selected store scope")
     store_country = ""
     if store_options:
-        canonical_store = next(
-            (
-                item
+        # 多站点：一家店可以有多条登记（PH / ID …）。模板站点不要求先登记
+        # （模板编辑器切站点时由保存流程补登记），真正防串味的门槛是下面的
+        # 「类目方案必须同站点」+「类目树必须是该站点的」两项校验。
+        recorded_countries = sorted(
+            {
+                str(item.get("country") or "").strip().upper()
                 for item in store_options
                 if str(item.get("platform") or "").strip().lower() == platform
-            ),
-            None,
+                and str(item.get("country") or "").strip()
+            }
         )
-        canonical_country = str((canonical_store or {}).get("country") or "").strip().upper()
-        store_country = canonical_country
-        # 跨境页模板可以是 GLOBAL（纯跨境）或本店国家（3PF / 老数据），两者都合法。
-        country_matches = canonical_country == country if not cnsc_page else (
-            country in {canonical_country, GLOBAL_CATEGORY_SCOPE}
-        )
-        if not canonical_store or not canonical_country or not country_matches:
+        if not recorded_countries:
             raise CategoryProfileConflict("Store template category does not match the selected store scope")
+        site_countries = sorted(
+            code for code in recorded_countries if re.fullmatch(r"[A-Z]{2}", code)
+        )
+        if re.fullmatch(r"[A-Z]{2}", country):
+            store_country = country
+        else:
+            # GLOBAL（纯跨境）/ 空站点：只有唯一站点时才拿它校验类目树。
+            store_country = site_countries[0] if len(site_countries) == 1 else ""
 
     # 类目树按**国家**共用（本土口径，2026-11-19）：跨境模板的 country 可能是 GLOBAL，
     # 但树仍挂在店铺国家下，所以内容校验一律用店铺国家（拿不到才回落到模板 country）。
+    # 多站点 + 纯跨境（country=GLOBAL）且店铺记了多个国家时无法判定看哪棵树，跳过国家维度。
     catalog_country = store_country or country
+    if cnsc_page and not store_country:
+        catalog_country = ""
     store_categories = [
         item
         for item in all_categories
@@ -9622,7 +9722,7 @@ def _validate_store_template_category_binding(data: dict[str, Any], template: di
             )
             for item in store_categories
         }
-        if catalog_scopes and (platform, catalog_country) not in catalog_scopes:
+        if catalog_country and catalog_scopes and (platform, catalog_country) not in catalog_scopes:
             raise CategoryProfileConflict("Store template category does not match the selected store scope")
 
         scope_categories = [

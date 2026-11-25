@@ -30,7 +30,13 @@ def repair_import_pollution(
     changed = False
     changed |= _upsert_store_option(repaired, store, account_id=account_id)
     changed |= _repair_profiles(repaired, store=store, category=category, snapshot=snapshot)
-    changed |= _repair_templates(repaired, store_id=store_id, category_id=category_id, payload=payload)
+    changed |= _repair_templates(
+        repaired,
+        store_id=store_id,
+        category_id=category_id,
+        country=str(store.get("country") or "").strip().upper(),
+        payload=payload,
+    )
     return repaired, {
         "changed": changed,
         "store_id": store_id,
@@ -51,6 +57,8 @@ def _validate_snapshot(snapshot: dict[str, Any], *, store_id: str, category_id: 
 def _upsert_store_option(data: dict[str, Any], store: dict[str, Any], *, account_id: str = "") -> bool:
     options = data["mabang_store_options"]
     wanted_account = str(account_id or store.get("account_id") or "").strip()
+    wanted_country = str(store.get("country") or "").strip().upper()
+    # 站点是店铺登记的身份之一：同一家店多站点各一条，别把 PH 那条改成 ID。
     existing = next(
         (
             item
@@ -58,6 +66,7 @@ def _upsert_store_option(data: dict[str, Any], store: dict[str, Any], *, account
             if str(item.get("account_id") or "").strip() == wanted_account
             and item.get("mabang_store_id") == store["id"]
             and item.get("platform") == store["platform"]
+            and str(item.get("country") or "").strip().upper() == wanted_country
         ),
         None,
     )
@@ -96,10 +105,22 @@ def _repair_profiles(data: dict[str, Any], *, store: dict[str, Any], category: d
     return True
 
 
-def _repair_templates(data: dict[str, Any], *, store_id: str, category_id: str, payload: dict[str, Any]) -> bool:
+def _repair_templates(
+    data: dict[str, Any],
+    *,
+    store_id: str,
+    category_id: str,
+    country: str = "",
+    payload: dict[str, Any],
+) -> bool:
     changed = False
     for template in data["store_templates"]:
         if template.get("mabang_store_id") != store_id or template.get("mabang_category_id") != category_id:
+            continue
+        # 多站点：同名类目在不同站点是两套模板，只修快照那个站点的那套；
+        # 存量模板没写 country（早期版本）时照旧修，不能因为多了个站点字段就漏修。
+        template_country = str(template.get("country") or "").strip().upper()
+        if country and template_country and template_country != country:
             continue
         desired = {"attribute_values": payload["attribute_values"], "category_attributes": payload["attribute_values"], "sizes": payload["sizes"]}
         if all(template.get(key) == value for key, value in desired.items()):

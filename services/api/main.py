@@ -5447,6 +5447,14 @@ class ApiHandler(BaseHTTPRequestHandler):
                 return
             self._json(result)
             return
+        if path.startswith("/api/mabang/store-options/"):
+            option_id = path.rsplit("/", 1)[-1]
+            result = storage.delete_mabang_store_option(option_id)
+            if result is None:
+                self._json({"error": "Store option not found"}, status=404)
+                return
+            self._json(result)
+            return
         if path.startswith("/api/store-templates/"):
             template_id = path.rsplit("/", 1)[-1]
             result = storage.delete_store_template(template_id)

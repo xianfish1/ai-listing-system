@@ -1774,7 +1774,8 @@ function renderDescriptionProfileStoreOptions(selectedStoreId = "") {
   const select = $("description-profile-store");
   if (!select) return;
   select.innerHTML = `<option value="">全店通用（默认候选给所有店铺）</option>`;
-  for (const option of state.mabangStoreOptions || []) {
+  // 店铺登记按站点拆成多条：这里按店铺去重（描述方案是店铺级的，不分站点）。
+  for (const option of uniqueStoreOptions(state.mabangStoreOptions || [])) {
     const item = document.createElement("option");
     item.value = option.mabang_store_id || "";
     item.dataset.storeName = option.store_name || "";
@@ -3183,6 +3184,99 @@ function storeTemplateScopedStoreOptions() {
   return options.filter((option) => String(option.account_id || "") === accountId);
 }
 
+// 店铺登记按站点拆开（一店多站点，每站点一条）：店铺下拉要按店铺去重，
+// 站点交给「记录站点」下拉单独选。
+const STORE_TEMPLATE_SITE_OPTIONS = [
+  ["PH", "菲律宾"], ["MY", "马来西亚"], ["SG", "新加坡"], ["TH", "泰国"], ["TW", "台湾"],
+  ["ID", "印尼"], ["VN", "越南"], ["MX", "墨西哥"], ["BR", "巴西"],
+];
+const STORE_TEMPLATE_SITE_NAMES = Object.fromEntries(STORE_TEMPLATE_SITE_OPTIONS);
+
+function uniqueStoreOptions(options) {
+  const seen = new Map();
+  for (const option of options || []) {
+    const storeId = String(option.mabang_store_id || "").trim();
+    if (!storeId) continue;
+    const key = `${String(option.platform || "shopee").toLowerCase()}|${storeId}`;
+    if (!seen.has(key)) seen.set(key, option);
+  }
+  return [...seen.values()];
+}
+
+// 这家店已登记的站点（账号 + 平台 + 店铺 维度）。
+function storeTemplateStoreCountryRecords(storeId, accountId = currentStoreTemplateAccountId()) {
+  const wanted = String(storeId || "").trim();
+  if (!wanted) return [];
+  const wantedAccount = String(accountId || "").trim();
+  const records = [];
+  for (const option of state.mabangStoreOptions || []) {
+    if (String(option.mabang_store_id || "").trim() !== wanted) continue;
+    if (wantedAccount && String(option.account_id || "") !== wantedAccount) continue;
+    const code = String(option.country || "").trim().toUpperCase();
+    if (!/^[A-Z]{2}$/.test(code)) continue;
+    if (!records.some((item) => item.country === code)) {
+      records.push({ country: code, id: String(option.id || "") });
+    }
+  }
+  return records;
+}
+
+function storeTemplateStoreCountries(storeId, accountId) {
+  return storeTemplateStoreCountryRecords(storeId, accountId).map((item) => item.country);
+}
+
+function storeTemplateSiteValue() {
+  const code = String($("store-template-site")?.value || "").trim().toUpperCase();
+  return /^[A-Z]{2}$/.test(code) ? code : "";
+}
+
+// 模板的「记录站点」：全部站点都列出来，已登记的标「已记录」。切换站点会换用该站点
+// 的类目方案（属性/选项按平台+站点+类目分版本），不同国家不会混。
+// preferredValue 不传 = 保持当前选择；传 "" = 明确清回「跟随店铺记录」。
+function renderStoreTemplateSiteOptions(preferredValue) {
+  const select = $("store-template-site");
+  if (!select) return;
+  const storeId = $("store-template-store")?.value || "";
+  const recorded = storeTemplateStoreCountries(storeId);
+  const current = String(
+    preferredValue !== undefined ? preferredValue : (select.value || "")
+  ).trim().toUpperCase();
+  select.innerHTML = `<option value="">跟随店铺记录</option>`;
+  for (const [code, name] of STORE_TEMPLATE_SITE_OPTIONS) {
+    const option = document.createElement("option");
+    option.value = code;
+    option.textContent = `${code} ${name}${recorded.includes(code) ? "（已记录）" : ""}`;
+    select.appendChild(option);
+  }
+  if (/^[A-Z]{2}$/.test(current)) select.value = current;
+  syncStoreTemplateSiteUi();
+}
+
+function syncStoreTemplateSiteUi() {
+  const mode = normalizeListingMode($("store-template-listing-mode")?.value);
+  const cnscPage = isCnscPageMode(mode);
+  const pureCnsc = isPureCnscMode(mode);
+  const field = $("store-template-site-field");
+  // 纯跨境的站点是 GLOBAL，不存在「记录站点」。
+  if (field) field.hidden = pureCnsc;
+  const deleteBtn = $("store-template-site-delete");
+  const storeId = $("store-template-store")?.value || "";
+  const site = storeTemplateSiteValue();
+  const recorded = storeTemplateStoreCountries(storeId);
+  if (deleteBtn) deleteBtn.hidden = pureCnsc || !site || !recorded.includes(site);
+  const help = $("store-template-site-help");
+  if (help) {
+    if (pureCnsc) {
+      help.textContent = "";
+    } else if (recorded.length > 1 && !site) {
+      help.textContent = `该店铺记录了多个站点（${recorded.join("、")}）：请选本次模板用哪个站点，类目方案/模板按站点隔离。`;
+    } else {
+      help.textContent = "模板按站点隔离：切换站点会换用该站点已采集的类目方案（必填属性/选项），不同国家不会混。";
+    }
+  }
+  return cnscPage;
+}
+
 async function switchStoreTemplateAccount(accountId) {
   state.storeTemplateAccountId = String(accountId || "");
   state.selectedStoreTemplates.clear();
@@ -3237,17 +3331,20 @@ function renderReadiness(data) {
 function renderMabangStoreOptions() {
   const select = $("store-template-store");
   if (!select) return;
-  // 账号隔离：编辑器的店铺选择器只列当前账号的店铺。
-  const options = storeTemplateScopedStoreOptions();
+  // 账号隔离：编辑器的店铺选择器只列当前账号的店铺；店铺按站点拆成多条登记，
+  // 这里按店铺去重，站点另外用「记录站点」下拉选。
+  const options = uniqueStoreOptions(storeTemplateScopedStoreOptions());
   const current = select.value;
   select.innerHTML = `<option value="">选择马帮店铺</option>`;
   for (const option of options) {
     const item = document.createElement("option");
+    const sites = storeTemplateStoreCountries(option.mabang_store_id || "");
     item.value = option.mabang_store_id || "";
     item.dataset.storeName = option.store_name || "";
     item.dataset.platform = option.platform || "shopee";
     item.dataset.country = option.country || "";
-    item.textContent = option.store_name ? `${option.store_name} (${option.mabang_store_id || ""})` : option.mabang_store_id || "";
+    const storeLabel = option.store_name ? `${option.store_name} (${option.mabang_store_id || ""})` : option.mabang_store_id || "";
+    item.textContent = sites.length > 1 ? `${storeLabel} · 站点 ${sites.join("/")}` : storeLabel;
     select.appendChild(item);
   }
   if (current && [...select.options].some((option) => option.value === current)) {
@@ -3290,6 +3387,8 @@ function renderMabangStoreOptions() {
       `<option value="${escapeHtml(option.mabang_store_id || "")}">${escapeHtml(option.store_name || option.mabang_store_id || "")}</option>`
     ).join("");
   }
+  // 店铺登记变了 → 「记录站点」下拉的「已记录」标记跟着刷新。
+  renderStoreTemplateSiteOptions();
 }
 
 function storeTemplateSizeChartOptions(extraValue = "") {
@@ -3472,7 +3571,13 @@ function marketplaceCategoryScope() {
   const selectedCnscStore = cnscStoreSelect?.selectedOptions?.[0];
   // 纯跨境没有普通店铺下拉：店铺身份来自「CNSC 店铺」。
   const storeId = pureCnsc ? (cnscStoreSelect?.value || "") : (storeSelect?.value || "");
-  const storeCountry = (pureCnsc ? selectedCnscStore?.dataset.country : selectedStore?.dataset.country) || "";
+  // 站点以「记录站点」下拉为准（一店多站点，类目树/类目方案都按站点分）：
+  // 店铺登记里只剩一个站点时回落到它；多个站点且没选就留空，逼操作员明确选择。
+  const pickedSite = pureCnsc ? "" : storeTemplateSiteValue();
+  const recordedSites = pureCnsc ? [] : storeTemplateStoreCountries(storeId);
+  const storeCountry = pureCnsc
+    ? (selectedCnscStore?.dataset.country || "")
+    : (pickedSite || (recordedSites.length === 1 ? recordedSites[0] : "") || selectedStore?.dataset.country || "");
   return {
     platform: selectedStore?.dataset.platform || selectedCnscStore?.dataset.platform || "shopee",
     // 类目树查询用店铺自己的国家；跨境店铺没标国家时按 GLOBAL（纯跨境的目录口径）。
@@ -7163,6 +7268,9 @@ function renderStoreTemplateCards() {
       </div>
       <div class="template-card-meta">
         <span>类目 · <code>${escapeHtml(template.marketplace_category_path || "未选择")}</code></span>
+        ${/^[A-Z]{2}$/.test(String(template.country || "").toUpperCase())
+          ? `<span>记录站点 · <code>${escapeHtml(`${String(template.country).toUpperCase()} ${STORE_TEMPLATE_SITE_NAMES[String(template.country).toUpperCase()] || ""}`.trim())}</code></span>`
+          : ""}
         <span>价格 · <code>${escapeHtml(price || "未设置")}</code></span>
         <span>尺码 · <code>${escapeHtml(sizes)}</code></span>
         <span>${cnsc ? "站点" : "活动"} · ${escapeHtml(cnsc ? `${(template.target_site_stores || []).length} 个目标店铺` : promotion)}</span>
@@ -9462,6 +9570,18 @@ function validateStoreTemplateForm() {
     ["store-template-package-height-cm", "包裹高度"],
   ];
   const cnscPage = isCnscPageMode(listingMode);
+  // 站点必须明确：一家店记了多个站点时不许靠「第一个」猜，否则类目方案/属性会绑错国家。
+  if (!isPureCnscMode(listingMode)) {
+    const storeId = $("store-template-store")?.value || "";
+    const recordedSites = storeTemplateStoreCountries(storeId);
+    const site = storeTemplateSiteValue();
+    if (!site && recordedSites.length > 1) {
+      return `该店铺记录了多个站点（${recordedSites.join("、")}），请先在「记录站点」里选本次模板用哪个站点`;
+    }
+    if (!site && !recordedSites.length) {
+      return "请选择记录站点（本店是哪个 Shopee 站点）：类目方案/模板按站点隔离";
+    }
+  }
   if (cnscPage) {
     const pureCnsc = isPureCnscMode(listingMode);
     if (pureCnsc) {
@@ -9812,11 +9932,15 @@ async function createStoreTemplate() {
   const identityFromCnscStore = isPureCnscMode(listingMode);
   const effectiveStoreId = identityFromCnscStore ? (cnscStoreSelect?.value || "") : (storeSelect?.value || "");
   const effectiveStoreName = identityFromCnscStore ? (selectedCnscStore?.dataset.storeName || "") : (selectedStore?.dataset.storeName || "");
-  // 模板 country 跟店铺走（3PF 保留 PH 等店铺国家，跨境页也只按这里算描述配图上限等）；
-  // 纯跨境沿用 GLOBAL 口径。类目方案的作用域另由 profileCountry 决定（跨境=GLOBAL）。
+  // 模板 country 跟「记录站点」走（3PF 也保留真实店铺站点，跨境页只按它算描述配图
+  // 上限等）；纯跨境沿用 GLOBAL 口径。类目方案作用域另由 profileCountry 决定。
+  const effectiveRecordedSites = storeTemplateStoreCountries(effectiveStoreId);
   const effectiveCountry = identityFromCnscStore
     ? (selectedCnscStore?.dataset.country || "GLOBAL")
-    : (selectedStore?.dataset.country || "");
+    : (storeTemplateSiteValue()
+        || (effectiveRecordedSites.length === 1 ? effectiveRecordedSites[0] : "")
+        || selectedStore?.dataset.country
+        || "");
   const sizeChartSource = $("store-template-size-chart-source")?.value === "template" ? "template" : "upload";
   const selectedSizeChartTemplate = sizeChartSource === "template" ? selectedStoreSizeChartTemplate() : null;
   // 目录里没有当前选中的那张尺码图模板（店铺尺码图目录没采全/过期）时，select 里仍然
@@ -10032,6 +10156,8 @@ function updateCnscTemplateVisibility() {
   $("store-template-size-price-overrides")?.toggleAttribute("hidden", pureCnsc);
   $("store-template-sale-price")?.closest("label")?.toggleAttribute("hidden", pureCnsc);
   $("store-template-stock")?.closest("label")?.toggleAttribute("hidden", pureCnsc);
+  // 「记录站点」：纯跨境没有站点（GLOBAL），其余模式都要明确选。
+  syncStoreTemplateSiteUi();
 }
 
 const CNSC_KNOWN_SITES = ["TW", "PH", "SG", "TH", "MY", "MX", "VN", "BR"];
@@ -10225,26 +10351,58 @@ function openSaveAsStoreTemplateDialog() {
   if (!source) return;
   renderMabangStoreOptions();
   $("save-as-store-template-store").value = "";
+  renderSaveAsStoreTemplateSiteOptions("");
   $("save-as-store-template-name").value = `${source.template_name || "店铺模板"} - 副本`;
   $("save-as-store-template-summary").textContent = "切换店铺后会清空促销活动和水印；跨站点会保留类目，但会清空价格和必填属性（到目标店铺采集当前页即可补回类目方案）。";
   $("save-as-store-template-result").textContent = "";
   $("save-as-store-template-dialog")?.showModal();
 }
 
+// 另存为模板的「目标站点」：跟目标店铺已登记的站点走（多站点店铺必须明确选）。
+function renderSaveAsStoreTemplateSiteOptions(preferredValue = "") {
+  const select = $("save-as-store-template-site");
+  if (!select) return;
+  const storeId = $("save-as-store-template-store")?.value || "";
+  const recorded = storeTemplateStoreCountries(storeId);
+  for (const option of select.options) {
+    if (!option.value) {
+      option.textContent = recorded.length > 1
+        ? `跟随店铺记录（${recorded.join("、")}，请指定站点）`
+        : "跟随店铺记录";
+      continue;
+    }
+    option.textContent = `${option.value} ${STORE_TEMPLATE_SITE_NAMES[option.value] || ""}${recorded.includes(option.value) ? "（已记录）" : ""}`;
+  }
+  const current = String(preferredValue || select.value || "").trim().toUpperCase();
+  if (recorded.length === 1) {
+    select.value = recorded[0];
+  } else if (/^[A-Z]{2}$/.test(current) && recorded.includes(current)) {
+    select.value = current;
+  } else {
+    select.value = "";
+  }
+}
+
 async function saveStoreTemplateAsCopy() {
   const storeId = $("save-as-store-template-store")?.value || "";
+  const site = $("save-as-store-template-site")?.value || "";
   const templateName = $("save-as-store-template-name")?.value.trim() || "";
   const result = $("save-as-store-template-result");
   if (!storeId || !templateName) {
     if (result) result.textContent = "请选择目标店铺并填写新模板名";
     return false;
   }
+  const recorded = storeTemplateStoreCountries(storeId);
+  if (!site && recorded.length > 1) {
+    if (result) result.textContent = `该店铺记录了多个站点（${recorded.join("、")}），请选择要另存到哪个站点`;
+    return false;
+  }
   if (result) result.textContent = "正在另存模板...";
   const copied = await api(`/api/store-templates/${encodeURIComponent(state.editingStoreTemplateId)}/copy`, {
     method: "POST",
-    body: JSON.stringify({ mabang_store_id: storeId, template_name: templateName }),
+    body: JSON.stringify({ mabang_store_id: storeId, country: site, template_name: templateName }),
   });
-  await loadStoreTemplates();
+  await Promise.all([loadStoreTemplates(), loadMabangStoreOptions()]).catch(() => {});
   $("save-as-store-template-dialog")?.close();
   await openStoreTemplateEditor(copied.id);
   showOperationFeedback(`已另存模板 ${copied.store_name || ""} / ${copied.template_name || ""}`, "success");
@@ -10270,6 +10428,8 @@ async function openStoreTemplateEditor(templateId) {
   if ($("save-as-store-template-btn")) $("save-as-store-template-btn").disabled = false;
   $("store-template-store").value = template.mabang_store_id || "";
   $("store-template-listing-mode").value = template.listing_mode || "site";
+  // 记录站点：模板自己的站点优先（多站点店铺每个站点一套模板）。
+  renderStoreTemplateSiteOptions(template.country || "");
   await Promise.all([
     loadStorePromotions(template.promotion_activity_id || template.mabang_discount_id || ""),
     loadStoreWatermarks(),
@@ -10399,6 +10559,7 @@ async function openNewStoreTemplateEditor() {
   for (const id of resetInputs) { const el = $(id); if (el) el.value = ""; }
   const name = $("store-template-name"); if (name) name.value = "Mens Tee";
   $("store-template-listing-mode").value = "site";
+  renderStoreTemplateSiteOptions("");
   if ($("store-template-cnsc-store")) $("store-template-cnsc-store").value = "";
   if ($("store-template-default-site-discount-percent")) $("store-template-default-site-discount-percent").value = "40";
   state.cnscTargetStoreConfigs = new Map();
@@ -10432,6 +10593,26 @@ async function openNewStoreTemplateEditor() {
   applyWatermarkModeUi("product", "auto");
   const dialog = $("store-template-editor-dialog");
   if (dialog && typeof dialog.showModal === "function" && !dialog.open) dialog.showModal();
+}
+
+// 删除「该店铺 + 该站点」的登记（多站点店铺站点记错时清理）。只删登记，
+// 该站点的模板/类目方案/副本都不动。
+async function deleteStoreTemplateSiteRecord() {
+  const storeId = $("store-template-store")?.value || "";
+  const site = storeTemplateSiteValue();
+  if (!storeId || !site) return false;
+  const records = storeTemplateStoreCountryRecords(storeId).filter((item) => item.country === site);
+  if (!records.length) return false;
+  const storeName = $("store-template-store")?.selectedOptions?.[0]?.dataset.storeName || storeId;
+  if (!window.confirm(`删除「${storeName}」在站点 ${site} 的登记？\n\n只删这条站点登记；该站点的模板、类目方案和刊登副本都会保留。`)) return false;
+  for (const record of records) {
+    if (!record.id) continue;
+    await api(`/api/mabang/store-options/${encodeURIComponent(record.id)}`, { method: "DELETE" }).catch(() => null);
+  }
+  await loadMabangStoreOptions();
+  renderStoreTemplateSiteOptions("");
+  showOperationFeedback(`已删除站点记录 ${site}`, "success");
+  return true;
 }
 
 async function copyStoreTemplate(templateId) {
@@ -10480,15 +10661,17 @@ function syncMabangPageImportAccountOptions() {
 }
 
 // 预填导入弹窗的「站点」：只按**要导入的那家店**已记录的站点填，绝不按工作台随便
-// 当前选中的店铺填（那正是 MY 店被记成 PH 的来源）；不认识这家店就留空强制手选。
+// 当前选中的店铺填（那正是 MY 店被记成 PH 的来源）；不认识这家店或这家店记了多个
+// 站点时留空强制手选——多站点店铺每个站点一套类目方案/模板，猜错就等于数据串味。
 function preselectMabangPageImportCountry(expectedStoreId) {
   const select = $("mabang-page-import-country");
   if (!select) return;
   const wanted = String(expectedStoreId || "").trim();
-  const match = wanted
-    ? (state.mabangStoreOptions || []).find((item) => String(item.mabang_store_id || "").trim() === wanted)
-    : null;
-  const code = String((match || {}).country || "").trim().toUpperCase();
+  const code = wanted ? (() => {
+    // 导入弹窗有自己的账号下拉，这里不按模板页账号过滤。
+    const sites = storeTemplateStoreCountries(wanted, $("mabang-page-import-account")?.value || "");
+    return sites.length === 1 ? sites[0] : "";
+  })() : "";
   select.value = /^[A-Z]{2}$/.test(code) ? code : "";
 }
 
@@ -13934,6 +14117,9 @@ document.addEventListener("click", async (event) => {
   if (editStoreTemplate instanceof HTMLElement) {
     await openStoreTemplateEditor(editStoreTemplate.dataset.editStoreTemplate || "").catch((error) => operationError(error, "加载店铺模板失败"));
   }
+  if (target.id === "store-template-site-delete") {
+    await deleteStoreTemplateSiteRecord().catch((error) => operationError(error, "删除站点记录失败"));
+  }
   const copyStoreTemplateButton = target.closest("[data-copy-store-template]");
   if (copyStoreTemplateButton instanceof HTMLElement) {
     await copyStoreTemplate(copyStoreTemplateButton.dataset.copyStoreTemplate || "").catch((error) => operationError(error, "复制店铺模板失败"));
@@ -14137,9 +14323,15 @@ document.addEventListener("change", (event) => {
   }
   if (target instanceof HTMLSelectElement && target.id === "store-template-listing-mode") {
     updateCnscTemplateVisibility();
+    // 纯跨境没有「记录站点」（站点是 GLOBAL），切到纯跨境/切回来都要同步这一栏。
+    syncStoreTemplateSiteUi();
     // 切换刊登模式 → 类目方案作用域从「本土站点(店铺国家)」切到「跨境站点(GLOBAL)」
     // 或反过来：按当前类目重新绑定一次，绑不上只提示待补，不清掉已选类目。
     rebindStoreTemplateCategoryProfileForMode();
+    return;
+  }
+  if (target instanceof HTMLSelectElement && target.id === "save-as-store-template-store") {
+    renderSaveAsStoreTemplateSiteOptions("");
     return;
   }
   if (target instanceof HTMLSelectElement && target.id === "store-template-target-sites") {
@@ -14207,6 +14399,10 @@ document.addEventListener("change", (event) => {
       path: $("store-template-category-path")?.value || "",
       name: state.selectedMarketplaceCategory?.name || "",
     };
+    // 站点先定下来：新店铺只记录了一个站点就自动用它；多个站点则留空逼操作员选
+    // （绝不按「第一个」猜，否则类目方案/属性会绑到错的站点上）。
+    const nextRecordedSites = storeTemplateStoreCountries(target.value);
+    renderStoreTemplateSiteOptions(nextRecordedSites.length === 1 ? nextRecordedSites[0] : "");
     state.storeWatermarks = [];
     state.watermarkCatalogStatus = null;
     state.watermarkCatalogStoreId = "";
@@ -14222,6 +14418,31 @@ document.addEventListener("change", (event) => {
     loadStoreSizeChartTemplates().catch((err) => { $("store-template-result").textContent = err.message; });
     loadMarketplaceCategories("").catch((err) => {
       $("store-template-category-picker-status").textContent = err.message;
+    });
+    return;
+  }
+  if (target instanceof HTMLSelectElement && target.id === "store-template-site") {
+    // 切换「记录站点」= 换一套类目方案：必填属性/选项按平台+站点+类目分版本，
+    // 所以立即按新站点重绑，页面上的属性值换成该站点采集到的那套，绝不跨国家混用。
+    syncStoreTemplateSiteUi();
+    const categoryId = $("store-template-category-id")?.value || "";
+    const categoryPath = $("store-template-category-path")?.value || "";
+    if (categoryId || categoryPath) {
+      const rebound = restoreStoreTemplateCategoryForStore({
+        id: categoryId,
+        path: categoryPath,
+        name: state.selectedMarketplaceCategory?.name || "",
+      });
+      const result = $("store-template-result");
+      if (result) {
+        result.textContent = rebound.profile
+          ? `已切到站点 ${target.value}：类目方案已换成该站点的版本，请核对必填属性后保存`
+          : `已切到站点 ${target.value}：该站点还没有这个类目的方案，请先在该站点采集一次当前页（或另选类目）`;
+      }
+    }
+    loadMarketplaceCategories("").catch((err) => {
+      const status = $("store-template-category-picker-status");
+      if (status) status.textContent = err.message;
     });
     return;
   }

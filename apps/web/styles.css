@@ -2914,6 +2914,8 @@ dialog:not([open]) { display: none; }
 }
 
 .template-section-grid label { display: grid; gap: 7px; min-width: 0; }
+/* label 自身是 grid，[hidden] 会被上面的 display 压过：纯跨境要能藏掉「记录站点」 */
+.template-section-grid label[hidden] { display: none; }
 .template-section-grid .wide { grid-column: 1 / -1; }
 .transaction-grid { grid-template-columns: repeat(4, minmax(0, 1fr)); }
 .media-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
