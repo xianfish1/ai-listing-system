@@ -1760,6 +1760,87 @@ test('retryable pre-save failure closes detail pages before waiting for retry', 
   assert.equal(error.attempts, undefined);
 });
 
+test('workspace_frame_not_unique 重试前整页清场重开（等价于手动重启 Worker）', async () => {
+  // 现场 2026-09-27（任务 71181e90）：多开页残留让「待发布商品 / 新增刊登」在多个
+  // frame 同时命中，3 次 attempt 全在 open_workspace 秒挂。只关详情页修不好，
+  // 必须把马帮页面全关掉、按 source_url 重新打开。
+  const events = [];
+  const mabangPage = {
+    closed: false,
+    url() { return 'https://www.mabangerp.com/index.php?mod=main.gotoApp'; },
+    async close() { this.closed = true; events.push('closed-mabang'); },
+    isClosed() { return this.closed; },
+  };
+  const otherPage = {
+    url() { return 'https://example.com/keep'; },
+    async close() { events.push('closed-other'); },
+    isClosed() { return false; },
+  };
+  const newPage = {
+    async goto(url, options) { events.push(`goto:${url}:${options.waitUntil}`); },
+  };
+  const browser = {
+    contexts: () => [{ pages: () => [mabangPage, otherPage], async newPage() { events.push('new-page'); return newPage; } }],
+  };
+
+  const outcome = await executor.resetListingWorkspace(browser, {
+    source_url: 'https://www.mabangerp.com/index.php?mod=main.gotoApp&v=v3',
+  });
+
+  assert.deepEqual(events, [
+    'closed-mabang',
+    'new-page',
+    'goto:https://www.mabangerp.com/index.php?mod=main.gotoApp&v=v3:domcontentloaded',
+  ], '只关马帮页面，新开一页回到 source_url');
+  assert.equal(outcome.closed, 1);
+  assert.equal(outcome.reopened, true);
+  assert.deepEqual(outcome.kept, []);
+  assert.equal(mabangPage.closed, true);
+  assert.equal(otherPage.isClosed(), false, '非马帮页面不要动');
+});
+
+test('工作区类错误在重试前调用重置，而不是只等 600ms', async () => {
+  assert.deepEqual(
+    [...executor.WORKSPACE_RESET_ERRORS],
+    ['workspace_frame_not_unique', 'mabang_detail_iframe_not_found'],
+  );
+  const events = [];
+  const task = { source_url: 'https://www.mabangerp.com/index.php?mod=main.gotoApp' };
+
+  await executor.handleFailedPreSaveAttempt({}, new Error('workspace'), [{ attempt: 1 }], true, {
+    workspaceReset: task,
+    closeDetails: async () => { events.push('closed'); },
+    resetWorkspace: async (browser, received) => {
+      assert.equal(received, task, '重置要拿到本任务（source_url 在里面）');
+      events.push('reset');
+      return { closed: 2, reopened: true };
+    },
+    wait: async () => { events.push('waited'); },
+  });
+
+  assert.deepEqual(events, ['closed', 'reset', 'waited']);
+});
+
+test('其它可重试错误不触发整页重置（避免白丢已填好的工作区）', async () => {
+  const events = [];
+
+  await executor.handleFailedPreSaveAttempt({}, new Error('field'), [{ attempt: 1 }], true, {
+    closeDetails: async () => { events.push('closed'); },
+    resetWorkspace: async () => { events.push('reset'); },
+    wait: async () => { events.push('waited'); },
+  });
+
+  assert.deepEqual(events, ['closed', 'waited']);
+});
+
+test('重试循环把工作区重置接到 workspace_frame_not_unique 上', () => {
+  const source = fs.readFileSync(path.join(__dirname, '../scripts/mabang_playwright_executor.cjs'), 'utf8');
+  const fn = source.slice(source.indexOf('for (let attempt = 1; attempt <= MAX_PRE_SAVE_ATTEMPTS'), source.indexOf('if (!detail || !stages)'));
+  assert.match(fn, /workspaceReset: willRetry && WORKSPACE_RESET_ERRORS\.has\(reason\) \? task : null/, '只有工作区类错误才整体重开');
+  assert.match(source, /async function resetListingWorkspace\(browser, task\)/, '执行器要自带重置实现');
+  assert.match(source, /stage: 'reset_listing_workspace'/, '面板上要能看到「重开工作区」这一步');
+});
+
 test('terminal pre-save failure closes detail pages before rethrowing', async () => {
   const events = [];
   const attempts = [{ attempt: 1 }];

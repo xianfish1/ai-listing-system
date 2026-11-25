@@ -112,6 +112,10 @@ const RETRYABLE_ERRORS = new Set([
   'cnsc_site_picker_not_ready',
 ]);
 
+// 这两种错误说明工作区页面本身脏了（多开页/列表页残留），只关详情页救不回来：
+// 重试前必须把马帮页面全关掉、按 source_url 重新打开（见 resetListingWorkspace）。
+const WORKSPACE_RESET_ERRORS = new Set(['workspace_frame_not_unique', 'mabang_detail_iframe_not_found']);
+
 class BlockedError extends Error {
   constructor(reason, details = {}) {
     super(reason);
@@ -8142,9 +8146,18 @@ async function runPreSaveAttempt(browser, task, attempt, options = {}) {
   if (!cnscValidation.ok) throw new BlockedError('cnsc_payload_invalid', { errors: cnscValidation.errors });
   const stages = {};
   await installPublishGuard(browser);
-  const detail = options.existingDetail ? await waitForDetailFrame(browser) : await openListingWorkspace(browser, task);
-  await installPublishGuard(browser);
   let failedStage = 'open_workspace';
+  let detail;
+  try {
+    detail = options.existingDetail ? await waitForDetailFrame(browser) : await openListingWorkspace(browser, task);
+  } catch (error) {
+    // 打开工作区失败的 failedStage 要如实记成 open_workspace（原先在 try 外面，
+    // 面板上只会显示 unknown，看不出是「连列表页都没打开」）。
+    error.failedStage = error.failedStage || failedStage;
+    error.attempt = attempt;
+    throw error;
+  }
+  await installPublishGuard(browser);
   try {
     const startIndex = resolvePreSaveStartIndex(options.startStage);
     for (const [stageKey, runner] of PRE_SAVE_STAGES.slice(startIndex)) {
@@ -8200,6 +8213,35 @@ async function closeAllDetailPages(browser) {
   }
 }
 
+// 工作区整页重开：关掉浏览器里所有马帮页面，再新开一页回到 task.source_url。
+// 为什么需要它：workspace_frame_not_unique（「待发布商品 / 新增刊登」在多个 frame
+// 同时命中）是多开页面/列表页残留造成的，closeAllDetailPages 只关
+// productDetailShopee 详情页，清不掉列表页本身，于是 3 次 attempt 全在
+// open_workspace 秒挂（现场 2026-09-27 任务 71181e90：3 次都是 3~4 秒失败）。
+// 操作员手动「重启 Worker」之所以能好，就是因为 Worker 启动时把页面全关掉重开；
+// 这里把同一步搬进执行器，让重试自己在干净工作区上跑，不用人等、不用再点「再次尝试」。
+async function resetListingWorkspace(browser, task) {
+  const outcome = { closed: 0, kept: [], reopened: false };
+  for (const page of allPages(browser)) {
+    let pageUrl = '';
+    try {
+      pageUrl = page.url() || '';
+    } catch {
+      continue;
+    }
+    if (!/mabangerp\.com/i.test(pageUrl)) continue;
+    await page.close({ runBeforeUnload: false }).catch(() => {});
+    if (page.isClosed()) outcome.closed += 1;
+    else outcome.kept.push(cleanText(pageUrl).slice(0, 80));
+  }
+  const sourceUrl = String((task && task.source_url) || '').trim();
+  if (!sourceUrl) return outcome;
+  const page = await requireBrowserContext(browser).newPage();
+  await page.goto(sourceUrl, { waitUntil: 'domcontentloaded', timeout: 30000 });
+  outcome.reopened = true;
+  return outcome;
+}
+
 async function handleFailedPreSaveAttempt(browser, error, attempts, willRetry, options = {}) {
   const closeDetails = options.closeDetails || closeAllDetailPages;
   const wait = options.wait || sleep;
@@ -8207,6 +8249,15 @@ async function handleFailedPreSaveAttempt(browser, error, attempts, willRetry, o
   if (!willRetry) {
     error.attempts = attempts;
     throw error;
+  }
+  if (options.workspaceReset) {
+    // 重置失败（比如浏览器会话已断）不拦重试：下一次 attempt 会照常尝试并报出
+    // 真实原因（browser_context_missing / needs_manual_login_or_verification）。
+    const reset = options.resetWorkspace || resetListingWorkspace;
+    const outcome = await reset(browser, options.workspaceReset).catch((failure) => ({
+      error: cleanText(failure && failure.message).slice(0, 200),
+    }));
+    emit('stage', { stage: 'reset_listing_workspace', ok: !outcome.error, ...outcome });
   }
   await wait(600);
 }
@@ -8346,6 +8397,9 @@ async function run() {
       if (willRetry) emit('attempt_retrying', { attempt, next_attempt: attempt + 1, reason });
       await handleFailedPreSaveAttempt(browser, error, attempts, willRetry, {
         preserveDetails: args.preserveDetailOnFailure,
+        // 工作区脏了（「待发布商品 / 新增刊登」重复命中、详情页容器找不到）只关
+        // 详情页没用，重试前整页清场重开，等价于操作员手动重启 Worker。
+        workspaceReset: willRetry && WORKSPACE_RESET_ERRORS.has(reason) ? task : null,
       });
     }
   }
@@ -8527,6 +8581,8 @@ module.exports = {
   watchSaveResponses,
   waitForSavedDetailPageToClose,
   handleFailedPreSaveAttempt,
+  resetListingWorkspace,
+  WORKSPACE_RESET_ERRORS,
   resolvePreSaveStartIndex,
   detailPageMatchesTask,
 };
