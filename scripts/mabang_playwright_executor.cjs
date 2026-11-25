@@ -1216,7 +1216,79 @@ async function siteDiscountRegions(table, plan) {
   }));
 }
 
-async function selectCNSCSiteDiscountActivity(frame, header, site) {
+// 折扣活动弹窗里的行匹配：id 命中且唯一才算选中；否则把「弹窗里实际有什么」带回。
+// 行内店铺字段为空视为通用活动（老页面没有 shopId），有值时必须等于目标店铺 id。
+async function matchCNSCDiscountRowById(discountTable, wanted) {
+  return discountTable.evaluate((element, expected) => {
+    const clean = (value) => String(value ?? '').replace(/\s+/g, ' ').trim();
+    const rows = element.__vue__?.tableData || element.__vueParentComponent?.proxy?.tableData || [];
+    const usable = (row) => row && typeof row === 'object';
+    const idOf = (row) => String(row.discount_id || row.discountId || row.activity_id || row.id || '');
+    const nameOf = (row) => String(row.discount_name || row.discountName || row.name || '');
+    const storeOf = (row) => String(row.shopId || row.shop_id || row.store_id || '');
+    const scoped = rows.map((row, index) => ({ row, index }))
+      .filter(({ row }) => usable(row) && (!storeOf(row) || storeOf(row) === expected.storeId));
+    const byId = scoped.filter(({ row }) => idOf(row) === expected.id);
+    const available = scoped.slice(0, 10).map(({ row }) => ({ id: idOf(row), name: nameOf(row), store: storeOf(row) }));
+    if (byId.length !== 1) {
+      return { count: byId.length, matched_by: 'id', rows_total: rows.length, rows_scoped: scoped.length, available };
+    }
+    const { row, index } = byId[0];
+    return { count: 1, matched_by: 'id', index, id: idOf(row), name: clean(nameOf(row)), available };
+  }, wanted);
+}
+
+// id 兜底：活动到期后马帮重建活动会换新 id，但名字通常沿用（如「40%活动」）。
+// 只有「名字完全相等且唯一」才认，并且行里若带折扣率还必须与任务里的百分比一致，
+// 否则宁可不选——绝不在换了折扣力度的情况下悄悄绑定另一个活动。
+async function matchCNSCDiscountRowByName(discountTable, wanted) {
+  return discountTable.evaluate((element, expected) => {
+    const clean = (value) => String(value ?? '').replace(/\s+/g, ' ').trim();
+    const compact = (value) => clean(value).replace(/\s+/g, '');
+    const rows = element.__vue__?.tableData || element.__vueParentComponent?.proxy?.tableData || [];
+    const usable = (row) => row && typeof row === 'object';
+    const idOf = (row) => String(row.discount_id || row.discountId || row.activity_id || row.id || '');
+    const nameOf = (row) => String(row.discount_name || row.discountName || row.name || '');
+    const storeOf = (row) => String(row.shopId || row.shop_id || row.store_id || '');
+    const percentOf = (row) => {
+      const raw = row.discount_rate ?? row.discountRate ?? row.sale_ratio ?? row.saleRatio;
+      if (raw === undefined || raw === null || String(raw).trim() === '') return null;
+      const value = Number(raw);
+      if (!Number.isFinite(value) || value <= 0) return null;
+      // 页面可能给 0.6（比率）或 60（百分比）。
+      return value > 1 ? value : (1 - value) * 100;
+    };
+    const wantedName = compact(expected.name);
+    const scoped = rows.map((row, index) => ({ row, index }))
+      .filter(({ row }) => usable(row) && (!storeOf(row) || storeOf(row) === expected.storeId));
+    const available = scoped.slice(0, 10).map(({ row }) => ({ id: idOf(row), name: nameOf(row), store: storeOf(row) }));
+    if (!wantedName) return { count: 0, matched_by: 'name', reason: 'no_name', available };
+    const byName = scoped.filter(({ row }) => compact(nameOf(row)) === wantedName);
+    if (byName.length !== 1) {
+      return { count: byName.length, matched_by: 'name', reason: byName.length ? 'ambiguous' : 'not_found', available };
+    }
+    const { row, index } = byName[0];
+    const percent = percentOf(row);
+    const expectedPercent = Number(expected.percent);
+    if (percent !== null && Number.isFinite(expectedPercent) && Math.abs(percent - expectedPercent) > 1) {
+      return {
+        count: -1, matched_by: 'name', reason: 'percent_mismatch',
+        percent, expected_percent: expectedPercent, name: clean(nameOf(row)), available,
+      };
+    }
+    return { count: 1, matched_by: 'name', index, id: idOf(row), name: clean(nameOf(row)), percent, available };
+  }, wanted);
+}
+
+async function closeCNSCDiscountDialog(frame, dialog) {
+  await frame.keyboard.press('Escape').catch(() => {});
+  if (await dialog.waitFor({ state: 'hidden', timeout: 2000 }).then(() => true).catch(() => false)) return true;
+  const headerButton = dialog.locator('.el-dialog__headerbtn, .el-dialog__close, [aria-label="Close"], [aria-label="\u5173\u95ed"]').first();
+  if (await headerButton.count().catch(() => 0)) await headerButton.click({ timeout: 2000 }).catch(() => {});
+  return dialog.waitFor({ state: 'hidden', timeout: 1500 }).then(() => true).catch(() => false);
+}
+
+async function selectCNSCSiteDiscountActivity(frame, header, site, task) {
   if (!header) throw new BlockedError('cnsc_site_discount_header_missing', { site_code: site.site_code });
   const currentText = cleanText(await header.innerText().catch(() => ''));
   if (site.discount_name && currentText.includes(cleanText(site.discount_name))) {
@@ -1230,36 +1302,108 @@ async function selectCNSCSiteDiscountActivity(frame, header, site) {
   const fallback = header.locator('.change-discount');
   const trigger = await action.count() === 1 ? action : fallback;
   if (await trigger.count() !== 1) throw new BlockedError('cnsc_site_discount_select_action_not_unique', { site_code: site.site_code, count: await trigger.count() });
-  await trigger.click();
-  let dialogs = frame.locator('.el-dialog:visible').filter({ hasText: TEXT.selectDiscountActivity });
-  const deadline = Date.now() + 5000;
-  while (!(await dialogs.count()) && Date.now() < deadline) await sleep(100);
-  if (await dialogs.count() !== 1) throw new BlockedError('cnsc_site_discount_dialog_not_visible', { site_code: site.site_code });
-  const dialog = dialogs.first();
-  const discountTable = dialog.locator('.vxe-table:visible');
+  const openDialog = async () => {
+    await trigger.click();
+    const deadline = Date.now() + 5000;
+    while (!(await frame.locator('.el-dialog:visible').filter({ hasText: TEXT.selectDiscountActivity }).count()) && Date.now() < deadline) await sleep(100);
+    const dialogs = frame.locator('.el-dialog:visible').filter({ hasText: TEXT.selectDiscountActivity });
+    if (await dialogs.count() !== 1) throw new BlockedError('cnsc_site_discount_dialog_not_visible', { site_code: site.site_code });
+    return dialogs.first();
+  };
+  let dialog = await openDialog();
+  let discountTable = dialog.locator('.vxe-table:visible');
   if (await discountTable.count() !== 1) throw new BlockedError('cnsc_site_discount_table_not_unique', { site_code: site.site_code });
   // The dialog renders before its shop/list request fills tableData — reading it
   // immediately sees zero rows (a race, not an absence). Poll until the rows load
   // or the dialog proves empty.
-  const matchDeadline = Date.now() + 8000;
-  let match = { count: 0 };
-  while (Date.now() < matchDeadline) {
-    match = await discountTable.evaluate((element, expected) => {
-      const rows = element.__vue__?.tableData || element.__vueParentComponent?.proxy?.tableData || [];
-      const matches = rows.map((row, index) => ({ row, index })).filter(({ row }) => {
-        const id = String(row.discount_id || row.discountId || row.activity_id || row.id || '');
-        const store = String(row.shopId || row.shop_id || row.store_id || '');
-        return id === expected.id && (!store || store === expected.storeId);
+  const pollById = async (timeoutMs) => {
+    const deadline = Date.now() + timeoutMs;
+    let result = { count: 0 };
+    while (Date.now() < deadline) {
+      result = await matchCNSCDiscountRowById(discountTable, {
+        id: String(site.mabang_discount_id || ''),
+        storeId: String(site.store_id || ''),
       });
-      if (matches.length !== 1) return { count: matches.length };
-      const { row, index } = matches[0];
-      return { count: 1, index, name: String(row.discount_name || row.discountName || row.name || '') };
-    }, { id: site.mabang_discount_id, storeId: site.store_id });
-    if (match.count !== 0) break;
-    await sleep(200);
+      if (result.count !== 0) return result;
+      await sleep(200);
+    }
+    return result;
+  };
+  let match = await pollById(8000);
+  if (match.count === 0) {
+    // 一次空列表也可能是一次慢请求/空响应（现场 2026-11-25 3PF PH 站点）：
+    // 关掉重开弹窗再等一轮，能救掉"首次打开读到空表"的竞态。
+    await closeCNSCDiscountDialog(frame, dialog);
+    dialog = await openDialog();
+    discountTable = dialog.locator('.vxe-table:visible');
+    if (await discountTable.count() !== 1) throw new BlockedError('cnsc_site_discount_table_not_unique', { site_code: site.site_code });
+    match = await pollById(10000);
   }
-  if (match.count !== 1) throw new BlockedError('cnsc_site_discount_activity_not_unique', { site_code: site.site_code, count: match.count });
-  const row = discountTable.locator('.vxe-body--row').nth(match.index);
+  let chosen = match;
+  if (match.count === 0) {
+    // id 找不到时按活动名兜底：活动被重建换了 id，但名字和折扣力度没变就自动接上，
+    // 并把新 id 写回任务快照（回读按新 id 校验），运营不用手工重选。
+    const byName = await matchCNSCDiscountRowByName(discountTable, {
+      name: String(site.discount_name || site.discount_label || ''),
+      storeId: String(site.store_id || ''),
+      percent: Number(site.discount_percent),
+    });
+    if (byName.count !== 1) {
+      const reason = byName.reason === 'percent_mismatch'
+        ? 'cnsc_site_discount_activity_percent_changed'
+        : 'cnsc_site_discount_activity_not_found';
+      throw new BlockedError(reason, {
+        site_code: site.site_code,
+        expected_id: String(site.mabang_discount_id || ''),
+        expected_name: String(site.discount_name || ''),
+        expected_percent: Number(site.discount_percent),
+        store_id: String(site.store_id || ''),
+        rows_total: match.rows_total,
+        rows_scoped: match.rows_scoped,
+        available: match.available || [],
+        name_match: {
+          count: byName.count, reason: byName.reason || '',
+          percent: byName.percent ?? null, available: byName.available || [],
+        },
+      });
+    }
+    const previousId = String(site.mabang_discount_id || '');
+    const actualId = String(byName.id || '');
+    // 回读要按实际选中的 id 校验：同步更新 plan 与任务里的 target，别让
+    // validateCNSCSitePriceReadback 拿旧 id 判 activity_mismatch。
+    site.mabang_discount_id = actualId;
+    if (byName.name) site.discount_name = byName.name;
+    const target = ((task && task.store && task.store.target_site_stores) || [])
+      .find((item) => String(item.site_code || '').trim().toUpperCase() === String(site.site_code || '').trim().toUpperCase());
+    if (target) {
+      target.mabang_discount_id = actualId;
+      if (byName.name) {
+        target.discount_name = byName.name;
+        target.discount_label = byName.name;
+      }
+    }
+    attrPickDebug({
+      phase: 'cnsc_discount_activity_replaced', site_code: site.site_code,
+      previous_id: previousId, activity_id: actualId, name: byName.name || '', percent: byName.percent,
+    });
+    emit('stage', {
+      stage: 'cnsc_site_discount_activity_replaced',
+      site_code: site.site_code,
+      previous_id: previousId,
+      activity_id: actualId,
+      name: byName.name || '',
+    });
+    chosen = { ...byName, previous_id: previousId, replaced: true };
+  }
+  if (chosen.count !== 1) {
+    throw new BlockedError('cnsc_site_discount_activity_not_unique', {
+      site_code: site.site_code,
+      count: chosen.count,
+      expected_id: String(site.mabang_discount_id || ''),
+      available: chosen.available || [],
+    });
+  }
+  const row = discountTable.locator('.vxe-body--row').nth(chosen.index);
   const choose = row.getByText(TEXT.choose, { exact: true });
   if (await choose.count() !== 1) throw new BlockedError('cnsc_site_discount_choose_not_unique', { site_code: site.site_code });
   await choose.click();
@@ -1267,8 +1411,10 @@ async function selectCNSCSiteDiscountActivity(frame, header, site) {
   await frame.evaluate(({ code, id }) => {
     window.__AI_LISTING_CNSC_EXECUTION_STATE__ ||= { activities: {} };
     window.__AI_LISTING_CNSC_EXECUTION_STATE__.activities[code] = id;
-  }, { code: site.site_code, id: site.mabang_discount_id });
-  return { method: 'selected_by_id', name: match.name };
+  }, { code: site.site_code, id: chosen.id || site.mabang_discount_id });
+  return chosen.replaced
+    ? { method: 'selected_by_name', name: chosen.name, previous_id: chosen.previous_id, activity_id: chosen.id }
+    : { method: 'selected_by_id', name: chosen.name };
 }
 
 async function readCNSCSitePriceSnapshot(frame, table, plan) {
@@ -1349,8 +1495,10 @@ async function fillCNSCSitePricesAndDiscounts(frame, task) {
   // exposes (选择活动 → 选择折扣活动 dialog), and writing the price model
   // afterwards survives it; the reverse order risks the dialog resetting values.
   const regions = await siteDiscountRegions(table, plan);
+  const replacedActivities = [];
   for (const region of regions) {
-    await selectCNSCSiteDiscountActivity(frame, region.header, region.site);
+    const outcome = await selectCNSCSiteDiscountActivity(frame, region.header, region.site, task);
+    if (outcome && outcome.method === 'selected_by_name') replacedActivities.push({ site_code: region.site.site_code, ...outcome });
   }
   await writeCNSCSitePricesByModel(table, plan);
   await sleep(300);
@@ -1360,8 +1508,14 @@ async function fillCNSCSitePricesAndDiscounts(frame, task) {
     actionableCNSCTargets(task),
   );
   if (!readback.ok) throw new BlockedError(readback.reason, readback);
-  emit('stage', { stage: 'fill_cnsc_site_prices_and_discounts', ok: true, sites: readback.sites, rows: readback.rows });
-  return readback;
+  emit('stage', {
+    stage: 'fill_cnsc_site_prices_and_discounts',
+    ok: true,
+    sites: readback.sites,
+    rows: readback.rows,
+    ...(replacedActivities.length ? { replaced_activities: replacedActivities } : {}),
+  });
+  return replacedActivities.length ? { ...readback, replaced_activities: replacedActivities } : readback;
 }
 
 // auto-publish ≠ publish: this toggles Mabang's "上架后自动发布到站点店铺" setting,
@@ -2429,8 +2583,33 @@ async function selectElementOption(frame, labels, values, options = {}) {
     else await item.locator('.el-select').first().click({ timeout: 5000 });
   }
   phase('open_panel');
-  const optionDeadline = Date.now() + 5000;
+  // 跨境选店铺（CNSC店铺）现场 2026-11-25：新刊登页的店铺列表接口慢，5s 读不到选项，
+  // attempt 1/2 都在 select_store 报 select_option_not_found，第 3 次换新页面才成功。
+  // 这两个能力必须**显式开启**（optionWaitMs / reopenEmptyPanel），默认值与本土完全一致：
+  // 本土（site）仍然是 5s、不重开面板、不多做任何一次选项扫描。
+  const optionWaitMs = Number(options.optionWaitMs) > 0 ? Number(options.optionWaitMs) : 5000;
+  const allowReopen = options.reopenEmptyPanel === true;
+  const optionDeadline = Date.now() + optionWaitMs;
+  let panelReopens = 0;
+  let seenOptions = 0;
   while (Date.now() < optionDeadline) {
+    if (allowReopen) {
+      const visibleOptionCount = await frame
+        .locator('.el-select-dropdown:visible .el-select-dropdown__item')
+        .count()
+        .catch(() => 0);
+      seenOptions = Math.max(seenOptions, visibleOptionCount);
+      if (!visibleOptionCount && panelReopens < 2 && Date.now() < optionDeadline - 3000) {
+        panelReopens += 1;
+        // 面板开着就别再点（Element UI 是 toggle，再点会关掉）；只有真的没开才重开。
+        if (!(await isSelectPanelOpen(item))) {
+          const reopenArrow = item.locator('.el-select .el-input__suffix').first();
+          if (await isVisible(reopenArrow)) await reopenArrow.click({ timeout: 3000 }).catch(() => {});
+          else await item.locator('.el-select').first().click({ timeout: 3000 }).catch(() => {});
+          await new Promise((resolve) => setTimeout(resolve, 300));
+        }
+      }
+    }
     for (const value of targets) {
       for (const optionText of selectTextVariants(value)) {
         let optionLocators = frame.locator('.el-select-dropdown:visible .el-select-dropdown__item').filter({ hasText: optionText });
@@ -2622,7 +2801,30 @@ async function selectElementOption(frame, labels, values, options = {}) {
     }
     await new Promise((resolve) => setTimeout(resolve, 100));
   }
-  throw new BlockedError('select_option_not_found', { field: labels[0] });
+  // 跨境（显式开启扩展等待）失败时把「下拉里到底有什么」一起带回：现场 2026-11-25（3PF
+  // 选 CNSC店铺）只凭「下拉里没有这个选项」分不清是页面没加载完（选项 0 条）还是店铺
+  // 改名/换绑（选项有、但没有目标）。本土（site）保持原有报错，一个字都不改。
+  if (!allowReopen) throw new BlockedError('select_option_not_found', { field: labels[0] });
+  let available = [];
+  try {
+    const items = frame.locator('.el-select-dropdown:visible .el-select-dropdown__item');
+    const count = Math.min(await items.count().catch(() => 0), 10);
+    for (let index = 0; index < count; index += 1) {
+      const text = cleanText(await items.nth(index).innerText().catch(() => ''));
+      if (text) available.push(text);
+    }
+  } catch {}
+  attrPickDebug({
+    phase: 'select_option_missing',
+    field: labels[0], targets, available, seen_options: seenOptions, panel_reopens: panelReopens,
+  });
+  throw new BlockedError('select_option_not_found', {
+    field: labels[0],
+    targets,
+    available,
+    seen_options: seenOptions,
+    panel_reopens: panelReopens,
+  });
 }
 
 // 点完选项后只读**控件自身的值**（多选=标签，单选/文本=输入值或显示值），命中即算提交成功。
@@ -2877,7 +3079,14 @@ async function selectStore(frame, task) {
     : [store.name, store.mabang_store_id].filter(Boolean);
   // 本土要带上站点容错标志：选完直接读控件自身的值就收工（现场这一步 62s 全耗在
   // "读选项行 class + 5s 稳定回读 + 诊断兜底"上）；跨境保持原样。
-  const result = await selectElementOption(frame, labels, values, globalMode ? {} : siteSelectOptions());
+  // 跨境（CNSC/3PF）的 CNSC店铺 下拉列表是懒加载的，单独放宽等待并允许空列表重开面板；
+  // 本土传的仍是 siteSelectOptions()，5s / 不重开，行为逐字不变。
+  const result = await selectElementOption(
+    frame,
+    labels,
+    values,
+    globalMode ? { optionWaitMs: 15000, reopenEmptyPanel: true } : siteSelectOptions(),
+  );
   emit('stage', { stage: 'select_store', ok: true });
   return result;
 }

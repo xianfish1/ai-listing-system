@@ -3656,3 +3656,58 @@ test('商品标题超长时按控件 maxLength 裁剪，回读等 Element UI 异
   assert.match(source, /field_value_fitted_to_maxlength/);
   assert.match(source, /field_value_mismatch/);
 });
+
+test('选店铺：跨境显式放宽等待并重开空面板，本土路径逐字不变', () => {
+  // 现场 2026-11-25（3PF，另一台机）：attempt 1/2 都在 select_store 报
+  // select_option_not_found（CNSC店铺），第 3 次换了新页面才选上——典型的
+  // “店铺下拉还没加载完”竞态。扩展等待必须显式开启，本土（site）保持 5s / 不重开。
+  const source = fs.readFileSync(path.join(__dirname, '../scripts/mabang_playwright_executor.cjs'), 'utf8');
+  const fn = source.slice(source.indexOf('async function selectElementOption('), source.indexOf('async function waitForControlValue('));
+  assert.match(fn, /const optionWaitMs = Number\(options\.optionWaitMs\) > 0 \? Number\(options\.optionWaitMs\) : 5000;/, '默认等待仍是 5s');
+  assert.match(fn, /const allowReopen = options\.reopenEmptyPanel === true;/, '重开面板要显式开启');
+  assert.match(fn, /if \(allowReopen\) \{/, '未开启时不做额外的选项扫描（本土零改动）');
+  assert.match(fn, /panelReopens < 2/, '空列表时最多重开两次面板');
+  assert.match(fn, /isSelectPanelOpen\(item\)/, '面板开着不许再点（Element UI 是 toggle）');
+  const throwBlock = fn.slice(fn.lastIndexOf('if (!allowReopen) throw new BlockedError'));
+  assert.match(throwBlock, /if \(!allowReopen\) throw new BlockedError\('select_option_not_found', \{ field: labels\[0\] \}\);/, '本土报错保持原样');
+  assert.match(throwBlock, /available,/, '跨境失败要带回下拉里实际有哪些选项');
+  assert.match(throwBlock, /seen_options: seenOptions/, '带回是否见过任何选项（区分没加载 vs 没这个店）');
+  assert.match(throwBlock, /targets,/, '带回期望值（店名/店铺 id）');
+
+  const storeFn = source.slice(source.indexOf('async function selectStore('), source.indexOf('async function waitForCategoryPathSegment('));
+  assert.match(storeFn, /globalMode \? \{ optionWaitMs: 15000, reopenEmptyPanel: true \} : siteSelectOptions\(\)/, '只有跨境传扩展参数');
+  assert.match(storeFn, /siteSelectOptions\(\)/, '本土仍走原参数');
+});
+
+test('折扣活动：id 找不到时按名称兜底，折扣不一致则拒绝，并明确报 not_found', () => {
+  const source = fs.readFileSync(path.join(__dirname, '../scripts/mabang_playwright_executor.cjs'), 'utf8');
+  assert.match(source, /async function matchCNSCDiscountRowByName\(/, '新增按名称匹配');
+  const nameFn = source.slice(source.indexOf('async function matchCNSCDiscountRowByName('), source.indexOf('async function closeCNSCDiscountDialog('));
+  assert.match(nameFn, /compact\(nameOf\(row\)\) === wantedName/, '名字必须整串相等');
+  assert.match(nameFn, /Math\.abs\(percent - expectedPercent\) > 1/, '折扣力度不一致时拒绝自动替换');
+  assert.match(nameFn, /matched_by: 'name'/, '回传匹配方式');
+
+  const selectFn = source.slice(source.indexOf('async function selectCNSCSiteDiscountActivity('), source.indexOf('async function readCNSCSitePriceSnapshot('));
+  assert.match(selectFn, /async function selectCNSCSiteDiscountActivity\(frame, header, site, task\)/, '要拿到 task 才能回写新活动 id');
+  assert.match(selectFn, /closeCNSCDiscountDialog\(frame, dialog\)/, '空列表时关掉重开弹窗再等一轮');
+  assert.match(selectFn, /cnsc_site_discount_activity_not_found/, '0 条用 not_found，不再冒充 not_unique');
+  assert.match(selectFn, /cnsc_site_discount_activity_percent_changed/, '同名不同折扣单独报错');
+  assert.match(selectFn, /target\.mabang_discount_id = actualId/, '兜底选中后把新 id 写回任务快照');
+  assert.match(selectFn, /stage: 'cnsc_site_discount_activity_replaced'/, '面板上要能看到活动被替换');
+});
+
+test('站点价格/折扣错误码有中文映射（不再是英文码）', () => {
+  const app = fs.readFileSync(path.join(__dirname, '../apps/web/app.js'), 'utf8');
+  for (const code of [
+    'cnsc_site_discount_activity_not_found',
+    'cnsc_site_discount_activity_not_unique',
+    'cnsc_site_discount_activity_percent_changed',
+    'cnsc_site_discount_dialog_not_visible',
+    'cnsc_site_price_missing',
+    'cnsc_site_price_mismatch',
+  ]) {
+    assert.match(app, new RegExp(`\\b${code}:\\s*"`), `${code} 需要中文文案`);
+  }
+  const html = fs.readFileSync(path.join(__dirname, '../apps/web/index.html'), 'utf8');
+  assert.match(html, /app\.js\?v=cnsc-discount-recover-v1/, '改前端要 bump 缓存版本');
+});
