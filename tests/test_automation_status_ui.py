@@ -348,3 +348,27 @@ def test_automation_job_row_shows_main_image_next_to_sku() -> None:
     assert ".automation-job-identity-main {" in styles
     assert ".automation-job-thumb {" in styles
     assert ".automation-job-thumb--empty {" in styles
+
+
+def test_worker_and_browser_buttons_probe_api_before_long_actions() -> None:
+    """现场（2026-11-27）：有机子点「启动 / 重启 / 启动自动化浏览器」只回一句 Failed to fetch。
+
+    这三个动作要先探活：连不上就给出中文原因（API 没在跑 / 磁盘满 / 代理 / 地址），
+    而不是把浏览器的网络错误原样丢给操作员；网络抖动时探活通过再重试一次。
+    """
+    script = (PROJECT_ROOT / "apps" / "web" / "app.js").read_text(encoding="utf-8")
+
+    assert "async function probeApiHealth(" in script
+    assert 'fetch("/api/ping"' in script
+    # 旧版 API 没有 /api/ping（更新中途新旧文件短暂不一致）时，404 也算「活着」。
+    assert "response.ok || response.status === 404" in script
+    assert "function apiUnreachableMessage(" in script
+    assert "连不上本机 API" in script
+    assert "async function runApiAction(" in script
+    # 三个按钮都走同一个入口
+    assert 'request: () => api("/api/mabang-browser/start"' in script
+    assert 'request: () => api(`/api/worker/${action}`' in script
+    # 慢动作提示（首次启动 Chrome 可能 1–2 分钟）
+    assert "请不要刷新页面" in script
+    # 网络错误与业务错误分开
+    assert "function isNetworkError(" in script

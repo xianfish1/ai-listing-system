@@ -3264,6 +3264,9 @@ def create_store_template(payload: dict[str, Any]) -> dict[str, Any]:
             template["missing_configuration"] = _cnsc_configuration_problems(template)
             template["status"] = "needs_configuration" if template["missing_configuration"] else "active"
         _validate_store_template_category_binding(data, template)
+        if _missing_category_profile(template, data):
+            # 2026-11-26：允许「先存类目和记录站点，规则后补」，但不能当成可刊登模板。
+            template["status"] = "needs_mabang_import"
         # 模板选中的站点就是该店铺的站点声明：多站点店铺每个站点各一条登记。
         _ensure_store_option_for_template(data, template, now=now)
         data.setdefault("store_templates", [])
@@ -4637,6 +4640,7 @@ def update_store_template(template_id: str, payload: dict[str, Any]) -> dict[str
         "variation",
         "default_size_chart_path",
         "default_video_id",
+        "fixed_title",
         "variation_rule",
         "sku_template",
         "listing_mode",
@@ -4716,6 +4720,9 @@ def update_store_template(template_id: str, payload: dict[str, Any]) -> dict[str
                 updated["missing_configuration"] = _cnsc_configuration_problems(updated)
                 updated["status"] = "needs_configuration" if updated["missing_configuration"] else "active"
             _validate_store_template_category_binding(data, updated)
+            if _missing_category_profile(updated, data):
+                # 同 create：类目与记录站点可以先存，规则后补；这种模板不参与刊登。
+                updated["status"] = "needs_mabang_import"
             # 换了站点就把该站点补成店铺的一条站点登记（多站点店铺各站点一条）。
             _ensure_store_option_for_template(data, updated, now=now)
             # 归一化后再比较：老模板的存量配置缺少后来新增的子字段（如
@@ -4941,9 +4948,10 @@ def _derive_automation_glyph(summary: dict[str, int]) -> str:
 
 def _delete_base_product_from_store(data: dict, base_product_id: str) -> dict[str, Any] | None:
     """Remove one base product plus its regenerable listing data inside an already
-    locked store. Terminal automation jobs are kept for audit; non-terminal jobs are
-    dropped alongside the product. Returns per-product delete stats or None when the
-    product is missing (the caller decides whether that is an error)."""
+    locked store. Every automation job of its copies is deleted too (2026-11-26:
+    terminal jobs used to be kept for audit, which left jobs pointing at deleted
+    products). Returns per-product delete stats or None when the product is missing
+    (the caller decides whether that is an error)."""
     terminal_job_statuses = {"saved", "saved_with_warnings", "failed", "blocked", "needs_confirmation", "canceled"}
     base_product = next((item for item in data.get("base_products", []) if item.get("id") == base_product_id), None)
     if not base_product:
@@ -4956,9 +4964,9 @@ def _delete_base_product_from_store(data: dict, base_product_id: str) -> dict[st
     linked_skus = [item for item in data.get("listing_skus", []) if item.get("listing_copy_id") in listing_copy_ids]
     linked_prices = [item for item in data.get("listing_prices", []) if item.get("listing_copy_id") in listing_copy_ids]
     linked_jobs = [item for item in data.get("automation_jobs", []) if item.get("listing_copy_id") in listing_copy_ids]
-    retained_jobs = [item for item in linked_jobs if str(item.get("status") or "").lower() in terminal_job_statuses]
-    retained_job_ids = {str(item.get("id") or "") for item in retained_jobs}
-    deleted_job_ids = {str(item.get("id") or "") for item in linked_jobs if str(item.get("id") or "") not in retained_job_ids}
+    # 2026-11-26：跟副本删除保持一致——基础商品删掉时，它名下副本的自动化任务全部删除，
+    # 不再保留终态任务做审计（否则列表里会留下指向已删商品的孤儿任务）。
+    deleted_job_ids = {str(item.get("id") or "") for item in linked_jobs if str(item.get("id") or "")}
 
     data["base_products"] = [item for item in data.get("base_products", []) if item.get("id") != base_product_id]
     data["store_listing_copies"] = [item for item in data.get("store_listing_copies", []) if item.get("id") not in listing_copy_ids]
@@ -4976,12 +4984,13 @@ def _delete_base_product_from_store(data: dict, base_product_id: str) -> dict[st
         "deleted_listing_sku_count": len(linked_skus),
         "deleted_listing_price_count": len(linked_prices),
         "deleted_automation_job_count": len(deleted_job_ids),
-        "retained_automation_job_count": len(retained_jobs),
+        # 现在不再保留任何任务，这个字段留着只为兼容老的调用方/前端。
+        "retained_automation_job_count": 0,
     }
 
 
 def delete_base_product(base_product_id: str) -> dict[str, Any] | None:
-    """Delete a base product and regenerable listing data while keeping terminal job audit records."""
+    """Delete a base product, its regenerable listing data, and all its automation jobs."""
     base_product_id = str(base_product_id or "").strip()
     if not base_product_id:
         return None
@@ -5023,15 +5032,12 @@ def delete_base_products(base_product_ids: list[str]) -> dict[str, Any]:
 
 
 # 副本上有这些状态的任务时不能删：worker 正拿着它跑，删掉就是把执行状态抽走。
+# 其余状态（含已完成/失败/已取消）在删副本时一律连带删除——2026-11-26 起不再保留审计副本。
 _LIVE_LISTING_COPY_JOB_STATUSES = frozenset({"claimed", "running"})
-# 终态任务留作审计，只有没跑完的才跟着副本一起清掉。
-_TERMINAL_LISTING_COPY_JOB_STATUSES = frozenset(
-    {"saved", "saved_with_warnings", "failed", "blocked", "needs_confirmation", "canceled"}
-)
 
 
 def _purge_store_listing_copy(data: dict[str, Any], listing_copy_id: str) -> dict[str, Any]:
-    """从整库快照里删掉一个副本及其可再生成数据（SKU / 价格 / 未完成任务 / 任务快照）。
+    """从整库快照里删掉一个副本及其可再生成数据（SKU / 价格 / 全部自动化任务 / 任务快照）。
 
     只改内存里的 ``data``，不落盘；调用方决定 save。返回 ``skipped`` 说明没动它的原因：
     ``not_found``（副本不存在）、``running_job``（有 claimed/running 的任务）。"""
@@ -5043,12 +5049,10 @@ def _purge_store_listing_copy(data: dict[str, Any], listing_copy_id: str) -> dic
         return {"id": listing_copy_id, "skipped": "running_job", "linked_automation_job_count": len(linked_jobs)}
     linked_skus = [item for item in data.get("listing_skus", []) if item.get("listing_copy_id") == listing_copy_id]
     linked_prices = [item for item in data.get("listing_prices", []) if item.get("listing_copy_id") == listing_copy_id]
-    retained_jobs = [
-        item for item in linked_jobs
-        if str(item.get("status") or "").lower() in _TERMINAL_LISTING_COPY_JOB_STATUSES
-    ]
-    retained_job_ids = {str(item.get("id") or "") for item in retained_jobs}
-    deleted_job_ids = {str(item.get("id") or "") for item in linked_jobs if str(item.get("id") or "") not in retained_job_ids}
+    # 2026-11-26：副本删掉后把它的自动化任务全部删掉（以前终态任务留作审计，结果商品
+    # 删了任务还在列表里挂着，运营以为没删干净）。仍在 claimed/running 的任务上面已经
+    # 拦掉了，走到这里的都能安全删除。
+    deleted_job_ids = {str(item.get("id") or "") for item in linked_jobs if str(item.get("id") or "")}
 
     data["store_listing_copies"] = [item for item in data.get("store_listing_copies", []) if item.get("id") != listing_copy_id]
     data["listing_skus"] = [item for item in data.get("listing_skus", []) if item.get("listing_copy_id") != listing_copy_id]
@@ -5066,15 +5070,15 @@ def _purge_store_listing_copy(data: dict[str, Any], listing_copy_id: str) -> dic
         "deleted_listing_sku_count": len(linked_skus),
         "deleted_listing_price_count": len(linked_prices),
         "deleted_automation_job_count": len(deleted_job_ids),
-        "retained_automation_job_count": len(retained_jobs),
+        # 现在不再保留任何任务，这个字段留着只为兼容老的调用方/前端。
+        "retained_automation_job_count": 0,
     }
 
 
 def delete_store_listing_copy(listing_copy_id: str) -> dict[str, Any] | None:
-    """Delete one store listing copy plus its regenerable data. Terminal automation
-    jobs are kept for audit; non-terminal jobs are dropped alongside the copy. Refuses
-    if a job is currently claimed or running to avoid pulling state out from under a
-    live worker."""
+    """Delete one store listing copy plus its regenerable data and all of its
+    automation jobs. Refuses if a job is currently claimed or running to avoid pulling
+    state out from under a live worker."""
     listing_copy_id = str(listing_copy_id or "").strip()
     if not listing_copy_id:
         return None
@@ -5121,6 +5125,7 @@ def delete_store_listing_copies(listing_copy_ids: list[str]) -> dict[str, Any]:
 
 
 def create_base_product_from_folder(payload: dict[str, Any]) -> dict[str, Any] | None:
+    from services.api.product_title_file import read_title_file
     from workers.asset_scanner.scanner import scan_asset_root
 
     root_path = Path(payload.get("root_path") or payload.get("asset_root") or "").expanduser()
@@ -5138,6 +5143,10 @@ def create_base_product_from_folder(payload: dict[str, Any]) -> dict[str, Any] |
     assets = [dict(asset) for asset in result.get("assets") or [] if isinstance(asset, dict)]
     if not assets:
         return None
+
+    # 商品目录里的 标题.txt / title.txt：操作员自己写好的标题，导入时直接采用。
+    # 有它就不再让 AI 另写标题（见 main._enrich_with_vision_listing 的 title_source 判断）。
+    title_from_file = re.sub(r"\s+", " ", read_title_file(root_path)).strip()
 
     now = utc_now()
     group_id = _most_common([asset.get("group_id") for asset in assets]) or _derive_group_from_path(str(root_path))
@@ -5182,6 +5191,10 @@ def create_base_product_from_folder(payload: dict[str, Any]) -> dict[str, Any] |
         "main_sku": main_sku,
         "product_name_cn": base_name,
         "base_name": base_name,
+        # 标题来源：title_file = 导入时读的商品目录标题文件，AI 标题阶段不再覆盖；
+        # 空 = 没有标题文件（仍走原来的 AI 生成/维护弹窗手填）。
+        "listing_title": title_from_file,
+        "title_source": "title_file" if title_from_file else "",
         "asset_root": str(root_path),
         "main_image": main.get("file_name") if main else "",
         "product_images": product_images,
@@ -5423,6 +5436,9 @@ def update_base_product(
         "base_name",
         "main_sku",
         "listing_title",
+        # 标题来源（""/title_file）：导入读 标题.txt 时标 title_file，AI 标题阶段据此让路。
+        # 允许写接口显式设置，回填存量商品标题时才能把锁一起补上。
+        "title_source",
         "description",
         "status",
         "price_tiers",
@@ -5490,6 +5506,15 @@ def update_base_product(
                     )
                 else:
                     base[key] = str(payload.get(key) or "").strip()
+            if (
+                "listing_title" in payload
+                and "title_source" not in payload
+                and _editable_snapshot(base.get("listing_title")) != before.get("listing_title")
+            ):
+                # 标题真的被改写（AI 重新识别 / 操作员手改）后就不再是导入时读的
+                # 标题.txt 内容，解除「AI 标题不覆盖」的导入锁。
+                # 显式带了 title_source 的写入（存量回填）以调用方为准。
+                base["title_source"] = ""
             if "variant_image_map" in payload or "recognized_colors" in payload:
                 base["variant_image_map"] = _variant_image_map_for_colors(
                     base.get("variant_image_map") or {},
@@ -6064,6 +6089,16 @@ def _copy_base_products_to_templates_in_store(
                 continue
             if (base_product_id, template_id) in existing_pairs:
                 base_skipped.append({"base_product_id": base_product_id, "template_id": template_id, "reason": "already_exists"})
+                continue
+            if _missing_category_profile(template, data):
+                # 2026-11-26：模板可以「先存类目、规则后补」，但这种模板不能生成副本——
+                # 否则副本带着空的必填属性去刊登，只会在马帮页面上报一堆缺字段。
+                base_errors.append({
+                    "base_product_id": base_product_id,
+                    "template_id": template_id,
+                    "reason": "category_rules_not_collected",
+                    "message": "该模板的类目必填项规则还没采集，请先在该店铺采集一次当前页",
+                })
                 continue
             listing_copy = _build_store_listing_copy(base, template, now, data)
             skus = _generate_listing_skus(base, template, listing_copy)
@@ -7032,6 +7067,22 @@ def _template_attribute_values_for_copy(
     }
 
 
+def _fixed_title_for_copy(data: dict[str, Any], listing_copy: dict[str, Any]) -> str:
+    """副本所属店铺模板上配的「固定标题」（没配返回空串）。
+
+    固定标题是**店铺模板级**的：一个模板对应一个店铺（+站点），不同店铺配各自的固定标题，
+    只在商品标题为空时兜底使用。
+    """
+    template_id = str(listing_copy.get("template_id") or "").strip()
+    if not template_id:
+        return ""
+    template = next(
+        (item for item in data.get("store_templates", []) if item.get("id") == template_id),
+        None,
+    ) or {}
+    return str(template.get("fixed_title") or "").strip()
+
+
 def _missing_template_attribute_fields(data: dict[str, Any], listing_copy: dict[str, Any]) -> list[str]:
     """模板配了、副本没值的字段 id（就绪提醒 + 补全动作共用同一套判断）。"""
 
@@ -7126,6 +7177,13 @@ def _build_automation_job_in_store(
         listing_copy["attribute_values"] = values
         listing_copy["category_attributes"] = deepcopy(values)
         listing_copy["updated_at"] = now
+    # 标题同理：模板配了「固定标题」、副本标题又是空的时候，建任务前补上——
+    # 否则执行器把空标题写进马帮，保存必然被拦（不同店铺模板各用各的固定标题）。
+    if not str(listing_copy.get("listing_title") or "").strip():
+        fixed_title = _fixed_title_for_copy(data, listing_copy)
+        if fixed_title:
+            listing_copy["listing_title"] = fixed_title
+            listing_copy["updated_at"] = now
     skus = _listing_skus_in_store(data, listing_copy_id)
     prices = _listing_prices_in_store(data, listing_copy_id)
     readiness = _check_automation_readiness(
@@ -9564,6 +9622,9 @@ def _normalize_store_template_payload(payload: dict[str, Any], *, now: str) -> d
         "variation_rule": str(_value_or_default(payload, profile_defaults, "variation_rule", "color_size") or "color_size").strip(),
         "sku_template": str(_value_or_default(payload, profile_defaults, "sku_template", "{main_sku}_{color}||{size}") or "{main_sku}_{color}||{size}").strip(),
         "title_suffix": str(_value_or_default(payload, profile_defaults, "title_suffix", "") or "").strip(),
+        # 固定标题（可选，跟随店铺模板）：商品标题为空时上架用它。不同店铺模板各配各的。
+        # 有商品标题时不用它（不是覆盖，只是兜底）。
+        "fixed_title": str(payload.get("fixed_title") or "").strip(),
         "description": str(_value_or_default(payload, profile_defaults, "description", "") or "").strip(),
         "attribute_values": attribute_values,
         "category_attributes": deepcopy(attribute_values),
@@ -9636,6 +9697,31 @@ def _canonical_category_path(value: Any) -> str:
     路径比较只该拦「层级真的不同」，分隔符写法差异不算不匹配。"""
     parts = [part.strip() for part in re.split(r"\s*>\s*", str(value or "").strip())]
     return " > ".join(part for part in parts if part)
+
+
+def _missing_category_profile(template: dict[str, Any], data: dict[str, Any]) -> bool:
+    """模板选了类目、但该「记录站点」还没有这个类目的已发布方案。
+
+    2026-11-26：以前这种模板在保存时直接 422（"requires a published category profile"），
+    运营想「先把类目和站点存下来、回头再采集规则」就做不到。现在允许保存，但必须能认出来：
+    调用方据此把模板标成 ``needs_mabang_import``，并在建副本/刊登前拦一道。
+    """
+
+    category_id = str(template.get("mabang_category_id") or "").strip()
+    if not category_id:
+        return False
+    profile_id = str(template.get("category_profile_id") or "").strip()
+    version_id = str(template.get("category_profile_version_id") or "").strip()
+    if not profile_id or not version_id:
+        return True
+    profiles = data.get("category_profiles") or []
+    versions = data.get("category_profile_versions") or []
+    profile = next((item for item in profiles if item.get("id") == profile_id), None)
+    version = next((item for item in versions if item.get("id") == version_id), None)
+    if not profile or not version:
+        return True
+    active_version_id = profile.get("active_version_id") or profile.get("published_version_id")
+    return active_version_id != version_id or version.get("status") not in {"active", "published"}
 
 
 def _validate_store_template_category_binding(data: dict[str, Any], template: dict[str, Any]) -> None:
@@ -9748,7 +9834,10 @@ def _validate_store_template_category_binding(data: dict[str, Any], template: di
     profile_id = str(template.get("category_profile_id") or "").strip()
     version_id = str(template.get("category_profile_version_id") or "").strip()
     if not profile_id or not version_id:
-        raise CategoryProfileConflict("Store template category requires a published category profile")
+        # 2026-11-26：不再硬性拦截「有类目、但该站点还没采集规则」的模板。
+        # 允许先保存类目与记录站点（状态由调用方标成 needs_mabang_import），
+        # 规则等该站点采集一次商品编辑页后再补齐。
+        return
     profile = next((item for item in data.get("category_profiles", []) if item.get("id") == profile_id), None)
     version = next((item for item in data.get("category_profile_versions", []) if item.get("id") == version_id), None)
     if not profile or not version or version.get("status") not in {"active", "published"}:
@@ -9872,6 +9961,9 @@ def _build_store_listing_copy(
     title = str(base.get("listing_title") or "").strip()
     if not title:
         title = " ".join(part for part in [base_name, template.get("title_suffix") or "", base.get("group_id") or ""] if str(part or "").strip()).strip()
+    if not title:
+        # 商品侧完全没有标题：用该店铺模板配的固定标题（跟随店铺绑定，不同店铺各不相同）。
+        title = str(template.get("fixed_title") or "").strip()
     size_chart_source = _normalize_size_chart_source(template.get("size_chart_source"))
     # 尺码图表选「选择模板」时表单页上没有可引用的尺码图地址（表单项里只有
     # 「上传图片 / 选择模板 / 同步」，没有预览图），描述末尾要靠店铺模板里一并上传的
@@ -11319,7 +11411,10 @@ def _resolve_marketplace_category_source(payload: dict[str, Any], template: dict
 
 
 def _build_default_listing_title(template: dict[str, Any], product_name: str, group_id: str) -> str:
-    return " ".join(part for part in [product_name, template.get("title_suffix") or "", group_id] if str(part or "").strip()).strip()
+    composed = " ".join(part for part in [product_name, template.get("title_suffix") or "", group_id] if str(part or "").strip()).strip()
+    # 商品连名字都没有（例如只给了裸目录）：用店铺模板的「固定标题」兜底，
+    # 不同店铺模板各配各的；配了固定标题就一定有标题可上架。
+    return composed or str(template.get("fixed_title") or "").strip()
 
 
 def _color_code_from_asset(asset: dict[str, Any]) -> str:

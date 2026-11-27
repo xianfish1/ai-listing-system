@@ -70,6 +70,27 @@ test('rejects selections without supported product media', () => {
   );
 });
 
+test('uploads 标题.txt / title.txt with its product folder, other txt files stay filtered', () => {
+  const plan = batch.planLocalFolderImport([
+    file('批次/AL0001/main.jpg', 3),
+    file('批次/AL0001/标题.txt', 10),
+    file('批次/AL0002/main.jpg', 4),
+    file('批次/AL0002/title.txt', 11),
+    file('批次/AL0002/notes.txt', 12),
+  ], SUPPORTED);
+
+  assert.equal(plan.mode, 'batch');
+  assert.deepEqual(plan.groups[0].manifest, [
+    { path: 'main.jpg', size_bytes: 3 },
+    { path: '标题.txt', size_bytes: 10 },
+  ]);
+  assert.deepEqual(plan.groups[1].manifest, [
+    { path: 'main.jpg', size_bytes: 4 },
+    { path: 'title.txt', size_bytes: 11 },
+  ]);
+  assert.equal(plan.filteredFileCount, 1);
+});
+
 test('skips transparent artwork files before uploading', () => {
   const plan = batch.planLocalFolderImport([
     file('AL0004/A白色.jpg', 3),

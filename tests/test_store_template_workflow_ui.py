@@ -625,7 +625,8 @@ def test_unselected_category_fields_stay_blank_and_are_not_submitted():
     assert 'control.value = value == null ? "" : String(value)' in render
     assert "if (selected.length) values[fieldId] = selected" in collect
     # 「＋ 添加自选值…」哨兵值不能落库（单选/多选都要过滤）
-    assert 'else if (control.value !== "" && control.value !== CUSTOM_ATTRIBUTE_OPTION) values[fieldId] = control.value' in collect
+    assert 'control.value !== CUSTOM_ATTRIBUTE_OPTION' in collect
+    assert 'values[fieldId] = control.value;' in collect
 
 
 def test_stale_select_category_field_with_free_text_value_falls_back_to_text_input():
@@ -980,7 +981,11 @@ def test_multi_select_category_fields_offer_add_custom_value() -> None:
     # 自选值 = 替换当前选择（枚举里没有我要的）
     assert "[...control.options].forEach((option) => { option.selected = false; });" in script
     # 「＋ 添加自选值…」哨兵值不能被当成属性值存进模板/商品
-    assert script.count(".filter((item) => item && item !== CUSTOM_ATTRIBUTE_OPTION)") == 2
+    sentinel_filters = (
+        script.count(".filter((item) => item && item !== CUSTOM_ATTRIBUTE_OPTION)")
+        + script.count(".filter((item) => item.value && item.value !== CUSTOM_ATTRIBUTE_OPTION)")
+    )
+    assert sentinel_filters == 2
     assert 'control.value !== CUSTOM_ATTRIBUTE_OPTION' in script
     assert ".category-field-custom-btn" in styles
 

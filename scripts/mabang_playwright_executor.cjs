@@ -440,11 +440,20 @@ async function scanFramesWithExactText(page, label) {
   return matches;
 }
 
-async function findFrameWithExactText(page, label) {
+async function findFrameWithExactText(page, label, timeoutMs = 12000) {
   // Scope the search to a single page's frames. The environment can hold several
   // identical Mabang tabs; searching every page would match the same label twice
   // and wrongly report workspace_frame_not_unique.
-  const matches = await scanFramesWithExactText(page, label);
+  //
+  // 2026-11-26：冷启动/刚切页签时列表还没渲染，「待发布商品」这种页签文案经常
+  // count=0，旧实现读一次就抛 workspace_frame_not_unique，把 Worker 直接暂停。
+  // 这里改成按截止时间轮询：只有真的出现多个匹配（真正的歧义）才立刻失败。
+  const deadline = Date.now() + Math.max(0, Number(timeoutMs) || 0);
+  let matches = await scanFramesWithExactText(page, label);
+  while (matches.length === 0 && Date.now() < deadline) {
+    await sleep(300);
+    matches = await scanFramesWithExactText(page, label);
+  }
   if (matches.length !== 1) {
     throw new BlockedError('workspace_frame_not_unique', { label, count: matches.length });
   }
@@ -2103,6 +2112,19 @@ async function applyAttributeValuesInModel(frame, entries) {
       if (!attribute) { results.push({ field_id: item.field_id, ok: false, reason: 'attribute_not_found' }); continue; }
       const groups = Array.isArray(attribute.values) ? attribute.values : [];
       const options = groups.flatMap((group) => (Array.isArray(group.options) ? group.options : [group]));
+      // 马帮刊登页自己写自选值的做法（publish-ui：ensureCustomOption）：值不在枚举里时，
+      // 先把它登记进「自填选项」分组（value/label 都是文本），再写 attribute.value。
+      // 保存时 custom 一律发 {value_id: 0, original_value_name: 文本}——**不需要**任何
+      // 平台选项 id；反过来说，只写 value 不登记，多选属性保存时这个值会被整个丢掉
+      // （现场：型号草稿为空 / 显示成一串数字）。
+      const customGroup = groups.find((group) => String((group && group.id) || '') === 'custom');
+      const ensureCustomOption = (text) => {
+        if (!customGroup) return;
+        if (!Array.isArray(customGroup.options)) customGroup.options = [];
+        const exists = customGroup.options.some((option) => String((option && option.value) ?? '') === text
+          || String((option && option.label) ?? '') === text);
+        if (!exists) customGroup.options.push({ value: text, label: text });
+      };
       const resolve = (raw) => {
         const text = clean(raw).toLowerCase();
         const hit = options.find((option) => clean(option.value) === clean(raw)
@@ -2110,9 +2132,10 @@ async function applyAttributeValuesInModel(frame, entries) {
           || clean(option.name_cn).toLowerCase() === text
           || clean(option.value).toLowerCase() === text);
         if (hit) return { value: clean(hit.value), label: clean(hit.label ?? hit.name_cn ?? hit.value), from_options: true };
-        // 枚举里没有：马帮自己支持「添加自填选项」（原产地 = Philippines 走的正是这条路），
-        // 照写原值并标记 custom；页面不认的话由 attributeValueRendered 兜底。
-        return { value: clean(raw), label: clean(raw), from_options: false };
+        // 枚举里没有：先登记成马帮的「自填选项」，再按文本写值。
+        const rawText = clean(raw);
+        ensureCustomOption(rawText);
+        return { value: rawText, label: rawText, from_options: false };
       };
       const resolved = [];
       let missing = '';
@@ -2458,7 +2481,10 @@ async function addCustomSelectOption(frame, item, labels, value, options = {}) {
   if (!(await isSelectControl(item))) return null;
   const panel = await openSelectPanel(frame, item);
   if (!panel) return null;
-  if (!(await submitCustomSelectValue(panel, target))) return null;
+  // 提交通道返回 false 不等于失败：衣领类型这类 allow-create 下拉只要键入 + 回车就把
+  // 值变成了 tag，面板里既没有「添加自选值」也没有下拉项，submitCustomSelectValue 会
+  // 返回 false。所以先按下"可能已经提交"，回读控件再决定。
+  const submitted = await submitCustomSelectValue(panel, target).catch(() => false);
   // 自填行的 ✔ 常常已经把值提交进控件了（现场 2026-10-06：多选下拉「型号」101639 的 ✔
   // 直接把标签填好、页面模型里也换成了马帮生成的选项 id）。这种情况**不能**再去点列表里
   // 那一行——多选是 toggle，点一下等于取消选择。所以先回读控件：已经有这个值就收工。
@@ -2468,6 +2494,18 @@ async function addCustomSelectOption(frame, item, labels, value, options = {}) {
   if (echoedTexts.some((selected) => selectTextMatches(selected, target))) {
     await closeOpenSelectPanels(frame, echoed || item, options);
     return { value: echoedTexts.join(', '), method: 'custom_option' };
+  }
+  if (!submitted) {
+    // 控件可能要等一拍才渲染出 tag：再回读一次，带上就算成功。
+    await new Promise((resolve) => setTimeout(resolve, 700));
+    const late = await formItemForLabels(frame, labels, options).catch(() => null);
+    const lateTexts = late ? await selectedTextsForItem(late).catch(() => []) : [];
+    attrPickDebug({ phase: 'custom_option_add_unconfirmed', field: labels[0], target, late: lateTexts });
+    if (lateTexts.some((selected) => selectTextMatches(selected, target))) {
+      await closeOpenSelectPanels(frame, late || item, options);
+      return { value: target, method: 'custom_option_typed' };
+    }
+    return null;
   }
   // 新增项通常挂到「自填选项」分组下；等它出现再点，找不到就退回整面板匹配。
   const deadline = Date.now() + 8000;
@@ -3442,11 +3480,15 @@ async function autoFillMissingRequiredAttributes(frame, task, page, resolvedFiel
     // 兜底：现场重算把「模板存成选项 id、快照里又查不到文字」的字段判成 unresolved 时，
     // 如果 Python 侧（拿着类目方案）已经解析出人能读的标签，就用那份标签填——绝不把
     // 1795012147982 这种内部 id 当值写进刊登（现场：型号整格被静默跳过，草稿一直为空）。
+    // 2026-11-27：Python 侧的"标签"也可能是它自己兜底回填的原值 id（快照里也翻不出文字时），
+    // 那种标签等于把 id 打进「添加自选值」→ 草稿里型号就是一串数字。所以这里再拦一道：
+    // 长得像平台选项 id 的标签一律不认，宁可保持 unresolved 让人重新选。
     const templateFieldsMerged = siteMode ? templateFields.map((field) => {
       if (!field.unresolved_option_id) return field;
       const provided = providedById.get(String(field.field_id));
       const providedLabels = ((provided && provided.option_labels) || [])
-        .map((value) => String(value || '').trim()).filter(Boolean);
+        .map((value) => String(value || '').trim())
+        .filter((value) => value && !looksLikeOptionId(value));
       if (!providedLabels.length) return field;
       attrPickDebug({
         phase: 'attribute_unresolved_recovered', field: field.label, field_id: String(field.field_id),
@@ -3773,12 +3815,35 @@ async function setCategoryAttributes(frame, task, page) {
           confirmed: confirmed.has(String(field.field_id)),
           model_evidence: modelEvidenceFields.has(String(field.field_id)),
         });
-        // 自选值（页面枚举里没有这个值——型号就是）**必须**在 UI 上真的"添加"出来。
-        // 现场（2026-10-02）：写页面表单模型时页面上有 tag、模型里也是 ['T-shirt']，但马帮保存
-        // 出来的草稿里型号是空的——那次只写了模型，没走「搜索 → 添加 → 请输入自定义值 → ✔」。
-        // 所以这里对 custom 值不再认"模型写成功"这条捷径，交给 UI 自选通道；UI 失败才退回模型结果
-        // （并写成 warning 让人看见，不再假装成功）。
+        // 自选值（页面枚举里没有这个值——型号/衣领类型就是）：模型写入时已经按马帮自己的
+        // 做法把它登记进「自填选项」分组（value/label 都是文本，保存发 value_id:0 + 文本），
+        // 所以只要控件把它渲染出来就算填好，**不必再去点「＋ 添加自选值」**——现场
+        // 2026-11-27：那条 UI 通道在衣领类型上认不出"已经加好"，在型号上才是唯一出路。
+        // 这里先认模型+渲染两重证据；任缺一项才退回原来的点击通道。
         if (applied.ok && applied.custom) {
+          const customTargets = (
+            (applied.labels && applied.labels.length) ? applied.labels
+              : (optionLabels.length ? optionLabels : candidateValues)
+          ).map((value) => String(value || '')).filter(Boolean);
+          const registeredInModel = customTargets.length
+            ? await registeredCustomOption(frame, String(field.field_id), customTargets).catch(() => null)
+            : null;
+          const renderedFromModel = registeredInModel
+            ? await attributeValueRendered(frame, labels, customTargets, 1200).catch(() => false)
+            : false;
+          attrPickDebug({
+            phase: 'custom_option_model_plan',
+            field: labels[0], field_id: String(field.field_id),
+            targets: customTargets, registered: Boolean(registeredInModel), rendered: renderedFromModel,
+          });
+          if (registeredInModel && renderedFromModel) {
+            results[field.field_id] = {
+              value: customTargets.join(', '),
+              method: 'model_custom',
+              note: 'custom_option_registered_by_model',
+            };
+            continue;
+          }
           // 多选（tags 控件）上的自选值：模型写进去只让控件"看起来有值"（页面 tag 是渲染出来的，
           // 不是马帮登记过的选项）——现场 2026-10-06 真机：执行器记 already_selected、草稿里型号为空，
           // 手工走一遍「搜索 → 添加 → 请输入自定义值 → ✔」后页面模型才变成马帮给的选项 id。

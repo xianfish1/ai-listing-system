@@ -179,6 +179,12 @@ const WORKER_STATUS_PRESENTATION = {
 const WORKER_ACTIVITY_PRESENTATION = {
   waiting_for_browser: { label: "等待自动化浏览器", hint: "Worker 会自动拉起浏览器并尝试用绑定的账号登录马帮；若仍在等待，请在 设置 → 马帮连接 绑定账号，或点击「启动自动化浏览器」手动登录。" },
   waiting_for_page_import: { label: "页面导入中 · 已让路", hint: "「从马帮当前页导入」正在进行：采集窗口正被使用，Worker 不重启浏览器也不领取任务，导入确认后自动恢复。" },
+  running: { label: "执行中", hint: "" },
+  polling: { label: "轮询中", hint: "" },
+  paused: {
+    label: "已暂停 · 冷却后自动重试",
+    hint: "系统级失败（如页面框架识别不到）只做短暂冷却，到点自动恢复领取任务，不需要手动重启；连续失败时冷却时间递增（45→90→135…最长 5 分钟）。",
+  },
   idle: { label: "空闲 · 等待任务", hint: "" },
   saved: { label: "上一单已保存草稿", hint: "" },
   saved_with_warnings: { label: "上一单已保存（有提醒）", hint: "" },
@@ -337,6 +343,67 @@ async function api(path, options = {}) {
   const data = contentType.includes("application/json") ? await res.json() : await res.text();
   if (!res.ok) throw new Error(data?.error || `Request failed: ${res.status}`);
   return data;
+}
+
+// 网络层失败（fetch 连响应都没拿到）≠ 业务报错：前者基本都是「本机 API 没在跑 / 正在重启 /
+// 被安全软件掐断」。启动 Worker、启动自动化浏览器这类长动作最容易撞上，单独给中文原因。
+function isNetworkError(error) {
+  const message = String(error?.message || error || "");
+  return error instanceof TypeError
+    || /failed to fetch|networkerror|load failed|connection (reset|refused|closed)/i.test(message);
+}
+
+// 极轻探活（/api/ping 不碰存储、不读文件）：2 秒内没有 200 就当 API 不可用。
+async function probeApiHealth(timeoutMs = 2000) {
+  const controller = typeof AbortController === "function" ? new AbortController() : null;
+  const timer = controller ? setTimeout(() => controller.abort(), Math.max(300, timeoutMs)) : null;
+  try {
+    const response = await fetch("/api/ping", {
+      cache: "no-store",
+      ...(controller ? { signal: controller.signal } : {}),
+    });
+    // 只要拿到 HTTP 响应就说明这个端口上有 API 在应答；404 是「旧版 API 还没 /api/ping」，
+    // 不能因此判成连不上（更新过程中新旧文件短暂不一致时尤其重要）。
+    return response.ok || response.status === 404;
+  } catch (_error) {
+    return false;
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
+function apiUnreachableMessage(actionLabel = "") {
+  const prefix = actionLabel ? `${actionLabel}失败：` : "";
+  return `${prefix}连不上本机 API（浏览器报 Failed to fetch）。按顺序检查：`
+    + "① 任务管理器里有没有 python 进程，没有就运行 start-api-silent.vbs 重新启动 API；"
+    + "② 磁盘是否已满（data/api-runtime/api.err.log 里会出现 No space left on device）；"
+    + "③ 关闭系统代理 / VPN 后按 F5 重试；"
+    + "④ 地址栏必须是用 127.0.0.1 打开的。日志：data/api-runtime/api.err.log";
+}
+
+// 长动作统一入口：先探活（连不上立刻给中文原因）→ 执行 → 网络抖动时探活后重试一次。
+// 慢动作（拉起 Chrome + 自动登录）会先写一行「请不要刷新」的提示。
+async function runApiAction({ label, request, statusEl = "", slowHint = "" }) {
+  const status = statusEl ? $(statusEl) : null;
+  if (status && slowHint) status.textContent = slowHint;
+  if (!(await probeApiHealth())) {
+    const message = apiUnreachableMessage(label);
+    if (status) status.textContent = message;
+    throw new Error(message);
+  }
+  try {
+    return await request();
+  } catch (error) {
+    if (!isNetworkError(error)) throw error;
+    // Windows 监听队列/安全软件偶尔会 RST 一下：等一拍、探活通过就重试一次。
+    await new Promise((resolve) => setTimeout(resolve, 1200));
+    if (await probeApiHealth(3000)) {
+      return await request();
+    }
+    const message = apiUnreachableMessage(label);
+    if (status) status.textContent = message;
+    throw new Error(message);
+  }
 }
 
 // APIs the very first paint needs before the UI is usable: header status,
@@ -2075,8 +2142,16 @@ async function saveRuntimeSettings() {
 
 async function controlWorker(action) {
   const loginGated = ["start", "resume", "restart"].includes(action);
+  const verb = action === "pause" ? "暂停" : action === "restart" ? "重启" : action === "start" ? "启动" : action === "resume" ? "继续" : "停止";
   if (loginGated) showOperationFeedback("正在准备自动化浏览器并检查马帮登录…", "info");
-  const result = await api(`/api/worker/${action}`, { method: "POST", body: "{}" });
+  const result = await runApiAction({
+    label: `Worker ${verb}`,
+    request: () => api(`/api/worker/${action}`, { method: "POST", body: "{}" }),
+    statusEl: "settings-worker-status",
+    slowHint: loginGated
+      ? "正在启动 Worker 并拉起马帮浏览器…（首次可能要 1–2 分钟，请不要刷新页面）"
+      : "正在处理…",
+  });
   state.workerStatus = result;
   renderRuntimeSettings();
   const loginStatus = result.auto_login?.status || "";
@@ -2117,11 +2192,15 @@ function autoLoginErrorDetail(autoLogin) {
 
 async function launchAutomationBrowser() {
   const status = $("settings-worker-browser-status");
-  if (status) status.textContent = "正在启动自动化浏览器...";
   const button = $("worker-browser-btn");
   if (button) button.disabled = true;
   try {
-    const launch = await api("/api/mabang-browser/start", { method: "POST", body: "{}" });
+    const launch = await runApiAction({
+      label: "启动自动化浏览器",
+      request: () => api("/api/mabang-browser/start", { method: "POST", body: "{}" }),
+      statusEl: "settings-worker-browser-status",
+      slowHint: "正在启动马帮浏览器并自动登录…（首次启动 Chrome 可能要 1–2 分钟，请不要刷新页面）",
+    });
     const autoLoginStatus = launch.auto_login?.status || "";
     const modeSuffix = launch.browser_mode === "headless" ? "（无头模式，不显示窗口）" : "";
     let message;
@@ -3906,20 +3985,18 @@ async function createSelectedCategoryProfileCollectionRun() {
     if (status) status.textContent = "请先选择店铺和平台类目";
     return;
   }
-  const run = await api("/api/category-profiles/collection-runs", {
-    method: "POST",
-    body: JSON.stringify({
-      platform: scope.platform,
-      // 采集方案落哪个作用域：跨境页（纯跨境/3PF）是 GLOBAL，本土站点是店铺国家。
-      // 采集脚本会把这里的 country 原样带进 capture，服务端据此建对应的方案。
-      country: scope.profileCountry || category.country || scope.country,
-      store_id: scope.storeId,
-      category_id: category.category_id,
-      category_path: category.path || "",
-      display_name: category.name || "",
-    }),
-  });
-  if (status) status.textContent = `必填项采集任务已创建：${run.id}`;
+  // 2026-11-26：这里原来只 POST 建一条采集任务记录就提示「任务已创建」，但真正去采集的
+  // 是老的 browser-use 链路（.venv-browser-use/Scripts/browser-use.exe），本机没装，
+  // 于是这条任务永远不会被完成——按钮看起来能点，实际什么都不会发生，运营只能干等。
+  // 现在不再建空任务，直接给出当前唯一可用的采集方式。
+  const scopeLabel = scope.profileCountry || category.country || scope.country || "";
+  const message =
+    `当前版本没有可用的「必填项采集器」（browser-use 未安装），这个按钮不会真的采集。` +
+    `请改用「从马帮当前页导入」：在导入弹窗把站点手选为 ${scopeLabel}，` +
+    `打开该店铺这个类目的马帮商品编辑页（类目已选好），点「采集当前页」并确认导入，` +
+    `系统会自动生成 ${scopeLabel} 作用域的类目方案与必填项。`;
+  if (status) status.textContent = message;
+  showOperationFeedback("请用「从马帮当前页导入」采集该类目的必填项", "error");
 }
 
 // ===== 基础商品「产品类目」：三列级联（跟马帮一样逐级选择）=====
@@ -5214,6 +5291,8 @@ function renderStoreTemplateCategoryFields(fields, values = {}, container = null
   const target = container || $("store-template-category-fields");
   if (!target) return;
   target.innerHTML = "";
+  // 现役枚举先记进 id→标签表：同一页里后续渲染（模板/商品共用）就能翻出旧 id 的文字。
+  rememberCategoryAttributeOptionLabels(fields);
   for (const field of fields || []) {
     const fieldId = String(field.field_id || "").trim();
     if (!fieldId) continue;
@@ -5264,7 +5343,14 @@ function renderStoreTemplateCategoryFields(fields, values = {}, container = null
         if (!valueMissingFromOptions(stored) || optionValues.has(text)) continue;
         const item = document.createElement("option");
         item.value = text;
-        item.textContent = text;
+        // 旧选项 id（型号 1794917366212 这类）类目方案重采后就不在枚举里了：能翻出
+        // 标签就显示「T shirt（旧选项 id，请重新选择）」，翻不出就明确标成未识别，
+        // 绝不把一串数字当成人能读的值摆在操作员面前。
+        const knownLabel = attributeOptionLabelFor(fieldId, text);
+        if (knownLabel) item.textContent = `${knownLabel}（旧选项 id，请重新选择）`;
+        else if (looksLikeAttributeOptionId(text)) item.textContent = `⚠ 未识别选项（${text}）`;
+        else item.textContent = text;
+        item.dataset.staleOptionId = knownLabel || looksLikeAttributeOptionId(text) ? "1" : "";
         item.selected = true;
         optionValues.add(text);
         control.appendChild(item);
@@ -5326,15 +5412,76 @@ function renderStoreTemplateCategoryFields(fields, values = {}, container = null
     }
     control.dataset.categoryFieldInput = fieldId;
     wrapper.appendChild(control);
+    // 当前选中的还是「旧选项 id / 未识别值」时给一条醒目提示：不重选就保存，上架会把
+    // 这串 id 当自定义值写进马帮（型号草稿里就是一串数字）。
+    const staleSelected = (control instanceof HTMLSelectElement)
+      && [...control.selectedOptions].some((option) => option.dataset?.staleOptionId === "1");
+    if (staleSelected) {
+      const note = document.createElement("span");
+      note.className = "category-field-warning";
+      note.textContent = "⚠ 旧选项 id / 未识别值：请重新选一次再保存，否则上架会把这串数字写进马帮";
+      wrapper.appendChild(note);
+    }
     target.appendChild(wrapper);
   }
+}
+
+// 类目属性的「选项 id → 标签」记忆表（key = fieldId + \0 + 选项 id）。
+// 现场（2026-11-27）：模板里的「型号」存的是马帮生成的选项 id，类目方案重采后
+// 同一件 T-shirt 换了新 id，旧 id 只剩一串数字——翻不回文字，操作员也认不出来。
+// 这里把历次版本里见过的 id→标签攒起来，渲染时至少能显示「T shirt（旧选项）」。
+function rememberCategoryAttributeOptionLabels(fields) {
+  if (!state.attributeOptionLabels) state.attributeOptionLabels = new Map();
+  let learned = 0;
+  for (const field of fields || []) {
+    const fieldId = String(field?.field_id || "");
+    if (!fieldId) continue;
+    for (const option of field?.options || []) {
+      const value = String(option?.value ?? "");
+      const label = String(option?.label ?? "");
+      if (!value || !label || value === label) continue;
+      const key = `${fieldId}\u0000${value}`;
+      if (state.attributeOptionLabels.get(key) === label) continue;
+      state.attributeOptionLabels.set(key, label);
+      learned += 1;
+    }
+  }
+  return learned;
+}
+
+function attributeOptionLabelFor(fieldId, value) {
+  const map = state.attributeOptionLabels;
+  if (!map || !fieldId || !value) return "";
+  return map.get(`${fieldId}\u0000${value}`) || "";
+}
+
+// 马帮平台生成的选项 id（型号那串 1790002081766 / 1793866866608 = 13 位纯数字）。
+function looksLikeAttributeOptionId(value) {
+  return /^\d{10,}$/.test(String(value ?? "").trim());
 }
 
 async function loadCategoryProfileVersions(profileId) {
   if (!profileId) return;
   const data = await api(`/api/category-profiles/${encodeURIComponent(profileId)}/versions`);
   state.categoryProfileVersions = data.items || [];
+  // 顺手把历史版本里的 id→标签攒下来，给模板编辑器回显旧选项 id 用。
+  const learned = rememberCategoryAttributeOptionLabels(
+    (state.categoryProfileVersions || []).flatMap((version) => version.fields || []),
+  );
   renderCategoryProfileVersions();
+  if (learned) refreshStoreTemplateCategoryValueLabels();
+}
+
+// 学到新的 id→标签后只重画属性区（用当前已选值当种子，别把操作员刚改的值冲掉）。
+function refreshStoreTemplateCategoryValueLabels() {
+  const container = $("store-template-category-fields");
+  const dialog = $("store-template-editor-dialog");
+  if (!container || !container.childElementCount || !dialog?.open) return;
+  const seed = collectStoreTemplateCategoryValues({ convertStaleIds: false });
+  const profile = categoryProfile($("store-template-category-profile")?.value || "");
+  const fields = profile?.published_version?.fields || profile?.active_version?.fields || [];
+  if (!fields.length) return;
+  renderStoreTemplateCategoryFields(fields, seed);
 }
 
 function renderCategoryProfileVersions() {
@@ -5402,8 +5549,19 @@ function renderCategoryProfileVersions() {
   }
 }
 
-function collectStoreTemplateCategoryValues() {
+function collectStoreTemplateCategoryValues({ convertStaleIds = true } = {}) {
   const values = {};
+  // 本土模板：旧选项 id（型号 1794917366212 这类，类目方案重采后已不在枚举里）保存时
+  // 换成能读的标签——上架按标签匹配/当自选值写入，绝不会把一串数字打进马帮。
+  // 只换「渲染时被标成 stale」的那几个值，现役枚举里的 id 原样保留。
+  // 跨境（CNSC / 3PF）属性的 id 语义不同，保持原样（不动其他站点）。
+  const allowConvert = convertStaleIds && !isCnscPageMode($("store-template-listing-mode")?.value);
+  const stableValue = (fieldId, value, stale) => {
+    const text = String(value ?? "");
+    if (!allowConvert || !stale || !looksLikeAttributeOptionId(text)) return value;
+    const label = attributeOptionLabelFor(fieldId, text);
+    return label && !looksLikeAttributeOptionId(label) ? label : value;
+  };
   // 限定模板编辑器容器：商品维护弹窗的属性字段共用 data-category-field-input，
   // 不加 scope 会把商品维度的值一起收进模板。
   document.querySelectorAll("#store-template-category-fields [data-category-field-input]").forEach((control) => {
@@ -5412,10 +5570,17 @@ function collectStoreTemplateCategoryValues() {
     if (control instanceof HTMLInputElement && control.type === "checkbox") values[fieldId] = control.checked;
     else if (control instanceof HTMLSelectElement && control.multiple) {
       const selected = [...control.selectedOptions]
-        .map((item) => item.value)
-        .filter((item) => item && item !== CUSTOM_ATTRIBUTE_OPTION);
+        .filter((item) => item.value && item.value !== CUSTOM_ATTRIBUTE_OPTION)
+        .map((item) => stableValue(fieldId, item.value, item.dataset?.staleOptionId === "1"));
       if (selected.length) values[fieldId] = selected;
-    } else if (control.value !== "" && control.value !== CUSTOM_ATTRIBUTE_OPTION) values[fieldId] = control.value;
+    } else if (control instanceof HTMLSelectElement) {
+      if (control.value !== "" && control.value !== CUSTOM_ATTRIBUTE_OPTION) {
+        const stale = control.selectedOptions[0]?.dataset?.staleOptionId === "1";
+        values[fieldId] = stableValue(fieldId, control.value, stale);
+      }
+    } else if (control.value !== "" && control.value !== CUSTOM_ATTRIBUTE_OPTION) {
+      values[fieldId] = control.value;
+    }
   });
   return values;
 }
@@ -7264,7 +7429,7 @@ function renderStoreTemplateCards() {
           <div class="template-card-name">${escapeHtml(template.template_name || "未命名模板")}</div>
           ${accountLabel ? `<div class="template-card-account">账号 · ${escapeHtml(accountLabel)}</div>` : ""}
         </div>
-        <div class="template-card-badges">${templateSiteBadge(template)}${cnsc ? `<span class="template-mode-badge${isPureCnscMode(template) ? "" : " is-3pf"}">${escapeHtml(listingModeBadgeLabel(template))}</span>` : ""}${cnscMissing.length ? '<span class="template-readiness-badge">待补全配置</span>' : ""}</div>
+        <div class="template-card-badges">${templateSiteBadge(template)}${cnsc ? `<span class="template-mode-badge${isPureCnscMode(template) ? "" : " is-3pf"}">${escapeHtml(listingModeBadgeLabel(template))}</span>` : ""}${String(template.status || "").toLowerCase() === "needs_mabang_import" ? '<span class="template-readiness-badge" title="该类目在这个记录站点还没有必填项规则：可先保存，采集后自动补齐">待采集类目规则</span>' : ""}${cnscMissing.length ? '<span class="template-readiness-badge">待补全配置</span>' : ""}</div>
       </div>
       <div class="template-card-meta">
         <span>类目 · <code>${escapeHtml(template.marketplace_category_path || "未选择")}</code></span>
@@ -7611,7 +7776,7 @@ async function deleteSelectedListingCopies() {
   if (queued.length) notes.push(`其中 ${queued.length} 个已排进队列但还没开始，会连同排队任务一起删除`);
   const confirmed = window.confirm(
     `确认删除 ${ids.length} 个店铺刊登副本？\n\n${head}\n\n` +
-    `将删除副本的 SKU、价格和未完成自动化任务（历史自动化记录保留）。基础商品和 NAS 素材不受影响。` +
+    `将删除副本的 SKU、价格和它的全部自动化任务（含已完成/失败的历史任务记录）。基础商品和 NAS 素材不受影响。` +
     (notes.length ? `\n\n${notes.join("；")}。` : ""),
   );
   if (!confirmed) return;
@@ -8011,7 +8176,7 @@ async function deleteStoreListingCopy(copyId) {
   const label = copy.store_name || copy.template_id || "此副本";
   const confirmed = window.confirm(
     `删除刊登副本「${label}」？\n\n` +
-    `将删除该副本的 SKU、价格和未完成自动化任务。历史自动化记录保留做审计。基础商品和 NAS 素材不受影响。`,
+    `将删除该副本的 SKU、价格和它的全部自动化任务（含已完成/失败的历史任务记录）。基础商品和 NAS 素材不受影响。`,
   );
   if (!confirmed) return;
   const result = await api(`/api/store-listing-copies/${encodeURIComponent(copyId)}`, { method: "DELETE" });
@@ -9628,10 +9793,14 @@ function validateStoreTemplateForm() {
     return `${label}为必填项`;
   }
   if (!selectedTemplateSizes().length) return "请至少选择一个尺码";
-  // 选了类目但还没绑定必填规则：服务端会报 "requires an active category profile"，
-  // 这里提前用中文说清怎么解（页面采集会补方案与必填项）。
+  // 选了类目但还没绑定必填规则：2026-11-26 起不再拦截保存——类目和「记录站点」可以先
+  // 存下来，规则等该站点采集一次商品编辑页后补。模板会以 needs_mabang_import 落库，
+  // 补齐前不能生成刊登副本，所以这里只提示、不阻断。
   if ($("store-template-category-id")?.value.trim() && !$("store-template-category-profile")?.value.trim()) {
-    return `已选类目但${categoryProfileScopeLabel()}还没有该类目的必填项规则：请在该店铺打开马帮商品编辑页做一次「采集当前页」（会自动补齐类目方案与必填项），或在「平台类目」里点「采集必填项」并确认导入；也可以改选已有规则的类目（本土站点与跨境站点各有一套方案，不能混用）`;
+    const hint = $("store-template-category-picker-status");
+    if (hint) {
+      hint.textContent = `该${categoryProfileScopeLabel()}还没有这个类目的必填项规则：现在可以直接保存，模板会标记为「待采集」，补齐前不能生成刊登副本。`;
+    }
   }
   if (isLocalLikeMode(listingMode) && $("store-template-default-sku-enabled")?.checked) {
     const defaultSkuRequirements = [
@@ -9971,6 +10140,8 @@ async function createStoreTemplate() {
       // 模板按马帮账号隔离：保存时带上当前账号（店铺下拉已经只列这个账号的店铺）。
       account_id: currentStoreTemplateAccountId(),
       template_name: $("store-template-name").value.trim(),
+      // 固定标题（可选，跟随店铺模板）：商品标题为空时上架用它；不同店铺各配各的。
+      fixed_title: $("store-template-fixed-title")?.value.trim() || "",
       category_profile_id: $("store-template-category-profile")?.value || "",
       category_profile_version_id: currentVersionId,
       attribute_values: collectStoreTemplateCategoryValues(),
@@ -10437,6 +10608,7 @@ async function openStoreTemplateEditor(templateId) {
   ]);
   renderStoreTemplateDescriptionProfileOptions();
   $("store-template-name").value = template.template_name || "";
+  if ($("store-template-fixed-title")) $("store-template-fixed-title").value = template.fixed_title || "";
   $("store-template-category-profile").value = template.category_profile_id || "";
   $("store-template-category-path").value = template.marketplace_category_path || "";
   $("store-template-category-id").value = template.mabang_category_id || "";
@@ -10551,7 +10723,7 @@ async function openNewStoreTemplateEditor() {
   if (result) result.textContent = "";
   // Reset form fields to sane defaults so the editor doesn't carry the last template's values.
   const resetInputs = [
-    "store-template-name", "store-template-category-path", "store-template-category-id",
+    "store-template-name", "store-template-fixed-title", "store-template-category-path", "store-template-category-id",
     "store-template-normal-price", "store-template-sale-price", "store-template-stock",
     "store-template-weight-kg", "store-template-package-length-cm", "store-template-package-width-cm",
     "store-template-package-height-cm", "store-template-description", "store-template-default-video-id",
@@ -13668,7 +13840,12 @@ document.addEventListener("click", async (event) => {
   if (target.id === "worker-logs-btn") await refreshWorkerLogs().catch((error) => operationError(error, "Worker 日志读取失败"));
   const workerLogsAccount = target.closest("[data-worker-logs-account]");
   if (workerLogsAccount instanceof HTMLElement) await refreshWorkerLogs(workerLogsAccount.dataset.workerLogsAccount || "", Number(workerLogsAccount.dataset.workerLogsSlot || 0)).catch((error) => operationError(error, "Worker 日志读取失败"));
-  if (target.id === "worker-browser-btn") await launchAutomationBrowser().catch((error) => { $("settings-worker-browser-status").textContent = `无法启动自动化浏览器：${error.message || "请检查 Chrome 与端口设置"}`; operationError(error, "启动自动化浏览器失败"); });
+  if (target.id === "worker-browser-btn") await launchAutomationBrowser().catch((error) => {
+    // 连不上 API 时错误信息本身已经带了排查步骤，别再套一层前缀。
+    const message = String(error?.message || "请检查 Chrome 与端口设置");
+    $("settings-worker-browser-status").textContent = /连不上本机 API/.test(message) ? message : `无法启动自动化浏览器：${message}`;
+    operationError(error, "启动自动化浏览器失败");
+  });
   if (target.id === "add-ai-connection-btn") openAiConnectionDialog();
   if (target.id === "save-ai-connection-btn") await saveAiConnection().catch((error) => operationError(error, "AI 连接保存失败"));
   if (target.id === "add-mabang-account-btn") openMabangAccountDialog();

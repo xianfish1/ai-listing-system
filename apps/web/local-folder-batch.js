@@ -16,6 +16,15 @@
     return dot >= 0 ? value.slice(dot).toLowerCase() : '';
   }
 
+  // 商品目录里的标题文件（标题.txt / title.txt）：跟素材一起上传，导入时后端用它
+  // 当商品标题，不再让 AI 另写。名单与后端 services/api/product_title_file.py 一致；
+  // 其它 .txt（备注、素材清单）照旧不上传。
+  const TITLE_FILE_NAMES = new Set(['标题.txt', 'title.txt']);
+
+  function isTitleFileName(name) {
+    return TITLE_FILE_NAMES.has(String(name || '').trim().toLowerCase());
+  }
+
   // 透明图（前胸/后背/袖口透明图、透明底…）只用于生产打样，导入商品时不导入。
   // 判定和后端 scanner.is_transparent_artwork_name 一致：中文按子串，英文按整段。
   // 操作员在商品维护里手动上传的商品图不经过这里，不受影响。
@@ -35,8 +44,9 @@
       const path = normalizedPath(file);
       const parts = path.split('/').filter(Boolean);
       if (!parts.length || parts.some((part) => part.startsWith('.'))) return [];
-      if (!supported.has(extension(file?.name || parts[parts.length - 1]))) return [];
-      if (isTransparentArtworkName(file?.name || parts[parts.length - 1])) {
+      const fileName = file?.name || parts[parts.length - 1];
+      if (!supported.has(extension(fileName)) && !isTitleFileName(fileName)) return [];
+      if (isTransparentArtworkName(fileName)) {
         transparentFileCount += 1;
         return [];
       }
@@ -363,6 +373,7 @@
   return {
     planLocalFolderImport,
     isTransparentArtworkName,
+    isTitleFileName,
     splitDuplicateLocalImportGroups,
     dropContainedLocalImportBatches,
     folderSkuToken,

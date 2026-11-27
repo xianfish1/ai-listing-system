@@ -542,6 +542,32 @@ def test_resolve_category_attribute_fields_marks_free_text_values_as_text_input(
     assert by_id["100168"]["input_kind"] == "select"
 
 
+def test_resolve_category_attribute_fields_never_uses_option_id_as_label() -> None:
+    """型号(101639) 存的是马帮生成的选项 id（1793866866608）：快照里翻不出文字时
+
+    绝不能把这串数字当标签交给执行器——它会走「＋ 添加自选值」把这串数字打进马帮，
+    草稿里的型号就显示成一串数字（现场 2026-11-27）。这种情况标成 unresolved，
+    由执行器如实报出来等人重新选值。
+    """
+    resolved = browser_use_runner.resolve_category_attribute_fields(
+        {"101639": ["1793866866608"], "100174": ["Round Neck"]},
+        {
+            "fields": [
+                {"field_id": "101639", "label": "型号", "type": "multi_select",
+                 "options": [{"value": "1795012147982", "label": "T-shirt"}]},
+                {"field_id": "100174", "label": "衣领类型", "type": "single_select",
+                 "options": [{"value": "1574", "label": "普通话衣领 (Mandarin Collar)"}]},
+            ]
+        },
+    )
+    by_id = {item["field_id"]: item for item in resolved}
+    assert by_id["101639"]["option_labels"] == [""]
+    assert by_id["101639"]["unresolved_option_id"] is True
+    # 人能读的自选文字（不在枚举里）照旧按自定义值填
+    assert by_id["100174"]["option_labels"] == ["Round Neck"]
+    assert by_id["100174"]["unresolved_option_id"] is False
+
+
 def test_task_plan_carries_category_profile_snapshot_for_option_id_translation(tmp_path: Path) -> None:
     """型号(101639) 常被模板存成选项 id（1795012147982）：执行器要靠副本快照把 id 翻回
     「T-shirt」才能真的走「＋ 添加自选值」。任务计划里少这份快照时，执行器会判定

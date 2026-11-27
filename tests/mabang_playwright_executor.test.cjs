@@ -1977,7 +1977,10 @@ test('an already open Mabang dropdown is never toggled shut before the custom op
   assert.match(source, /const boxDeadline = Date\.now\(\) \+ 3000;/);
   assert.match(source, /const box = panel\.locator\('\.addCustomBox'\)/);
   assert.match(source, /box\.locator\('\.el-icon-check:visible'\)/);
-  assert.match(source, /if \(!\(await submitCustomSelectValue\(panel, target\)\)\) return null;/);
+  // 提交失败也不再直接判死：衣领类型这类 allow-create 下拉回车即成 tag，
+  // submitCustomSelectValue 认不出"已经成功"，必须回读控件再决定。
+  assert.match(source, /const submitted = await submitCustomSelectValue\(panel, target\)\.catch\(\(\) => false\);/);
+  assert.match(source, /if \(!submitted\) \{/);
   // 面板里的控件常有多份（隐藏模板�? + 真�?�?��的那份）：一律用 `:visible` 复合 locator�?
   // 按序号取 nth(i) 会在 popper �?��后落到隐藏元素上，点击卡�?actionability 直到超时�?
   assert.match(source, /frame\s*\n\s*\.locator\('\.el-select-dropdown:visible'\)\s*\n\s*\.filter\(\{ has: frame\.locator\('input'\) \}\)/);
@@ -3057,6 +3060,13 @@ test('自定义值通道写文字：文本分支不用 value_ids，模型批写�
   assert.match(source, /const values = \[\.\.\.\(field\.matched_value_ids \?\? field\.value_ids \?\? \[\]\), \.\.\.fieldLabels\]\.filter\(Boolean\);/);
   assert.match(source, /note: 'option_id_not_resolved'/);
   assert.match(source, /snapshotAttributeOptionLabels\(task\.category_profile_snapshot/);
+  // Python 侧兜底的"标签"也可能是原值 id（快照里也翻不出文字）→ 合并时再拦一道：
+  // 长得像平台选项 id 的标签不认，宁可保持 unresolved，绝不把这串数字打进马帮。
+  const merge = source.slice(
+    source.indexOf('const templateFieldsMerged = siteMode'),
+    source.indexOf('const mergedSnapshot = [', source.indexOf('const templateFieldsMerged = siteMode')),
+  );
+  assert.match(merge, /\.filter\(\(value\) => value && !looksLikeOptionId\(value\)\)/);
 });
 
 test('自选值必须走 UI「搜索 → 添加 → 请输入自定义值」，不再认"只写页面模型"这条捷径', () => {
@@ -3121,6 +3131,27 @@ test('自填行的 ✔ 已经把值提交进控件后，不再点列表项（多
   );
   assert.match(helper, /const echoed = await formItemForLabels\(frame, labels, options\);/);
   assert.match(helper, /method: 'custom_option' \}/);
+});
+
+test('自选值按马帮原生写法写模型：登记进「自填选项」+ 按文本写 value，不依赖平台选项 id', () => {
+  const source = fs.readFileSync(path.join(__dirname, '../scripts/mabang_playwright_executor.cjs'), 'utf8');
+  // publish-ui 源码（chunk-9529 getCateAttr/ensureCustomOption + 保存公式）：
+  //   值不在枚举里 → 往 values 里 id==='custom' 的分组 push {value: 文本, label: 文本}；
+  //   保存时 custom 一律发 {value_id: 0, original_value_name: 文本}。
+  // 只写 attribute.value 不登记，多选属性保存时这个值会被丢掉（型号草稿为空）；
+  // 反过来，登记 + 文本写值就完全不需要马帮生成的选项 id（那串 1793866866608）。
+  const helper = source.slice(
+    source.indexOf('async function applyAttributeValuesInModel('),
+    source.indexOf('// 单个属性写模型'),
+  );
+  assert.match(helper, /const customGroup = groups\.find\(/);
+  assert.match(helper, /if \(!exists\) customGroup\.options\.push\(\{ value: text, label: text \}\);/);
+  assert.match(helper, /ensureCustomOption\(rawText\);/);
+  assert.match(helper, /return \{ value: rawText, label: rawText, from_options: false \};/);
+  // 站点循环：模型里已登记 + 控件已渲染 = 填好，不再强制点「＋ 添加自选值」
+  assert.match(source, /const registeredInModel = customTargets\.length/);
+  assert.match(source, /if \(registeredInModel && renderedFromModel\) \{/);
+  assert.match(source, /note: 'custom_option_registered_by_model'/);
 });
 
 test('强制自选通道：添加前先把"只写模型"造出来的假值清零，失败再写回', () => {

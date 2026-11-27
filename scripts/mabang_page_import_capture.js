@@ -895,7 +895,16 @@
   const categorySettings = storeCategory?.categorySettings || {};
   const storeCategoryModule = detailVm?.$store?.state?.shopee?.storeCategoryModule || {};
   const categoryCandidates = Array.isArray(storeCategory?.categoryNameArr) ? storeCategory.categoryNameArr : [];
-  const selectedCategory = categoryCandidates.length === 1 ? categoryCandidates[0] : {};
+  // 页面把「当前选中的类目」记在 vuex 的 storeCategoryModule 里，而 $refs.storeCategory
+  // 的 categoryNameArr 是「候选类目」——男童/女童同属 T恤 时这里会同时出现 101757 和
+  // 101773。旧代码只在候选恰好 1 个时取用，多候选一律判空，于是页面明明选好类目却报
+  // 「读到的商品编辑页里没有类目信息」（2026-11-25 实测）。这里先用模块的 categoryId
+  // 把真正选中的那一个从候选里挑出来。
+  const moduleCategoryId = clean(storeCategoryModule?.categoryId ?? storeCategoryModule?.categoryName?.categoryId);
+  const moduleCategoryName = storeCategoryModule?.categoryName || {};
+  const selectedCategory = categoryCandidates.length === 1
+    ? categoryCandidates[0]
+    : (categoryCandidates.find((item) => clean(item?.categoryId ?? item?.id) === moduleCategoryId) || {});
   const storeId = clean(firstValue(
     storeInfo?.shopId,
     storeInfo?.storeId,
@@ -917,6 +926,7 @@
   const categoryId = clean(firstValue(
     categoryInfo?.categoryId,
     categoryInfo?.id,
+    moduleCategoryId,
     storeCategory?.categoryId,
     storeCategory?.ProductAttributeInfo?.category_id,
     selectedCategory?.categoryId,
@@ -934,6 +944,8 @@
     categoryInfo?.categoryPath,
     categoryInfo?.fullPath,
     storeCategory?.categoryPath,
+    moduleCategoryName?.name_en_path?.split(',').join('>'),
+    moduleCategoryName?.name_zh_path?.split(',').join('>'),
     selectedCategory?.name_en_path?.split(',').join('>'),
     selectedCategory?.name_zh_path?.split(',').join('>'),
   ));
@@ -941,6 +953,10 @@
     categoryInfo?.idPath,
     categoryInfo?.categoryIdPath,
     storeCategory?.categoryIdPath,
+    storeCategoryModule?.category_id_path?.split(','),
+    Array.isArray(storeCategoryModule?.categoryIdAll)
+      ? storeCategoryModule.categoryIdAll.map((item) => String(item))
+      : null,
     selectedCategory?.category_id_path?.split(','),
   ));
   const explicitLeaf = optionalBoolean(firstDefined(
@@ -956,7 +972,6 @@
     categoryInfo?.hasChildren,
   ));
   const selectedCategoryId = clean(selectedCategory?.categoryId ?? selectedCategory?.id);
-  const moduleCategoryId = clean(storeCategoryModule?.categoryId);
   const attributesLoaded = Array.isArray(storeCategory?.ProductAttributeInfo?.attributesNew);
   const consistentSelectedLeaf = Boolean(
     categoryId
@@ -966,7 +981,20 @@
     && categoryIdPath.at(-1) === categoryId
     && attributesLoaded
   );
-  const isLeaf = explicitLeaf ?? (explicitHasChildren === null ? consistentSelectedLeaf : !explicitHasChildren);
+  // 多候选时（男童/女童同属 T恤）上面的「候选唯一」条件永远不成立，所以再补一条：
+  // 模块给的类目路径以当前类目 id 结尾、且该页已经加载出该类目的属性，就按叶子类目认。
+  // 这正是页面选择叶子类目后的状态——属性面板只在叶子类目下才有字段。
+  const moduleSelectsLeaf = Boolean(
+    categoryId
+    && categoryIdPath.length > 1
+    && categoryIdPath.at(-1) === categoryId
+    && attributesLoaded
+  );
+  const isLeaf = explicitLeaf ?? (
+    explicitHasChildren === null
+      ? (consistentSelectedLeaf || moduleSelectsLeaf)
+      : !explicitHasChildren
+  );
   const page = {
     url: location.origin + location.pathname,
     platform: clean(inputPlan.platform || 'shopee').toLowerCase(),

@@ -203,3 +203,23 @@ def test_oversized_json_returns_payload_too_large() -> None:
     payload = json.loads(body.decode("utf-8"))
     assert status == 413
     assert payload == {"error": "Request body too large"}
+
+
+def test_ping_is_a_lightweight_liveness_endpoint() -> None:
+    """前端长动作（启动 Worker / 启动自动化浏览器）前先打 /api/ping 探活。
+
+    它必须极轻：不读版本文件、不碰存储——存储盘掉线时健康检查不能跟着挂，
+    否则「API 还在不在」就判断不出来。
+    """
+    server, base_url = _start_api()
+    try:
+        with request.urlopen(f"{base_url}/api/ping", timeout=5) as response:
+            payload = json.loads(response.read().decode("utf-8"))
+        assert response.status == 200
+    finally:
+        server.shutdown()
+        server.server_close()
+
+    assert payload["ok"] is True
+    assert payload["service"] == "ai-listing-system"
+    assert "storage" not in payload and "version" not in payload

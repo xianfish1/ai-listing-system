@@ -256,6 +256,15 @@ def prepare_video_upload(video: dict[str, Any], upload_dir: Path) -> dict[str, A
     return prepared
 
 
+def _looks_like_option_id(value: str) -> bool:
+    """马帮平台生成的选项 id（型号那串 1790002081766 = 13 位纯数字）。
+
+    这种值只能拿去对枚举，**绝不能**当成人能读的属性值写进刊登：马帮给自选值生成
+    的 id 会变（同一个 T-shirt 在不同版本/站点 id 不同），打上去草稿里就是「一串数字」。
+    """
+    return bool(re.fullmatch(r"\d{10,}", str(value or "").strip()))
+
+
 def resolve_category_attribute_fields(
     category_attributes: dict[str, Any],
     category_profile_snapshot: dict[str, Any],
@@ -288,8 +297,18 @@ def resolve_category_attribute_fields(
         option_labels = [options_by_value.get(value_id, "") for value_id in value_ids]
         # Fall back to the raw id only when the profile snapshot lacks the mapping,
         # so the executor still has something deterministic to match against.
+        # **但平台选项 id 不能当标签用**：型号这类值存的是马帮生成的 13 位数字
+        # （1793866866608），快照里翻不出文字时如果原样当标签，执行器就会把这串
+        # 数字打进「＋ 添加自选值」，草稿里型号显示成一串数字（现场 2026-11-27）。
+        # 这种情况留空 + 标记 unresolved，由执行器如实报出来，等人重新选值。
+        unresolved_ids = [
+            value_id
+            for label, value_id in zip(option_labels, value_ids)
+            if not label and _looks_like_option_id(value_id)
+        ]
         option_labels = [
-            label or value_id for label, value_id in zip(option_labels, value_ids)
+            "" if value_id in unresolved_ids else (label or value_id)
+            for label, value_id in zip(option_labels, value_ids)
         ]
         # Free-text/allow-custom attributes (尺寸 100-150cm, 条件 Brand New, 型号…)
         # have no enum options on the Mabang form: fill them by typing, never by
@@ -320,6 +339,8 @@ def resolve_category_attribute_fields(
             "value_ids": value_ids,
             "option_labels": option_labels,
             "input_kind": input_kind,
+            # 快照里查不到文字、值又长得像平台选项 id：整格不填，如实报给操作员。
+            "unresolved_option_id": bool(unresolved_ids),
         })
     return resolved
 

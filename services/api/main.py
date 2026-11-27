@@ -45,6 +45,7 @@ from services.api.marketplace_category_catalog import (
     MarketplaceCategoryCatalogNotFound,
 )
 from services.api.mabang_page_import import MabangPageImportError
+from services.api.mabang_page_import import record_capture_failure as record_page_import_capture_failure
 from services.api.mabang_browser import (
     MabangBrowserError,
     find_bundled_chrome,
@@ -613,6 +614,12 @@ def _enrich_with_vision_listing(
         want_title, want_description = False, False
         force_colors = True
         run_color_stage = True
+
+    # 导入目录里有 标题.txt / title.txt 时，标题已经是操作员自己写好的（storage
+    # 在导入时标了 title_source="title_file"）：AI 标题阶段不再另写。只有明确点
+    # 「重新识别标题」（aspect=title）才重写。
+    if str(product.get("title_source") or "") == "title_file" and aspect != "title":
+        want_title = False
 
     # Numeric SKU filenames (for example ``SKU-01-dress only.png``) are
     # deliberately not treated as colors by the deterministic scanner. Only those
@@ -1397,14 +1404,28 @@ def _attach_account_worker_activities(
             continue
         activity = _latest_worker_activity(supervisor)
         heartbeat_status = str(row.get("heartbeat_status") or "")
-        if not activity and heartbeat_status:
-            # 日志还没刷（或日志被清空）时，用心跳里的状态兜底，避免面板只显示「运行中」。
-            activity = {
+        heartbeat_at = str(row.get("heartbeat_at") or "")
+        # 日志最后一行可能停在上一单（或重启前）的结论：长任务跑起来之后 Worker 只在
+        # 收尾时才再写一行，于是面板会把「正在执行」的槽位显示成「暂停」
+        # （2026-11-26 现场：3 个槽位其实都在跑单，界面全显示 workspace_frame_not_unique）。
+        # 心跳是实时的，两边取更新的那个。
+        if heartbeat_status and (
+            not activity or str(activity.get("activity_at") or "") <= heartbeat_at
+        ):
+            heartbeat_activity = {
                 "activity": heartbeat_status,
                 "activity_error": str(row.get("paused_reason") or ""),
-                "activity_job_id": "",
-                "activity_at": str(row.get("heartbeat_at") or ""),
+                "activity_job_id": str(row.get("heartbeat_job_id") or ""),
+                "activity_phase": str(row.get("heartbeat_phase") or ""),
+                "activity_at": heartbeat_at,
             }
+            if activity:
+                # 保底：心跳没带任务号时，别把日志里的任务号也丢掉。
+                heartbeat_activity["activity_job_id"] = (
+                    heartbeat_activity["activity_job_id"]
+                    or str(activity.get("activity_job_id") or "")
+                )
+            activity = heartbeat_activity
         if not activity:
             continue
         row.update(activity)
@@ -3116,6 +3137,13 @@ class ApiHandler(BaseHTTPRequestHandler):
         # 未读完的 body 会被当成下一个请求，因此写请求一律在响应后关闭连接。
         self.close_connection = True
         _invalidate_get_response_cache()
+        # 长动作（启动/重启 Worker、启动自动化浏览器）会拉起 Chrome 甚至自动登录，可能跑
+        # 1–2 分钟。现场「Failed to fetch」时分不清是「请求没到 API」还是「跑完了但响应没
+        # 送回去」——起止两行 stderr 落进 api.err.log 就能一眼分开。
+        long_action = str(self.path or "").split("?")[0].startswith(("/api/worker/", "/api/mabang-browser/"))
+        started_at = time.monotonic() if long_action else 0.0
+        if long_action:
+            sys.stderr.write(f"[long-action] start {self.path}\n")
         try:
             self._enforce_write_origin("POST")
             self._handle_post()
@@ -3125,6 +3153,8 @@ class ApiHandler(BaseHTTPRequestHandler):
             self._log_unhandled("POST", exc)
             self._json({"error": "Internal server error"}, status=500)
         finally:
+            if long_action:
+                sys.stderr.write(f"[long-action] done {self.path} {time.monotonic() - started_at:.1f}s\n")
             _invalidate_get_response_cache()
 
     def do_PUT(self) -> None:
@@ -3186,6 +3216,13 @@ class ApiHandler(BaseHTTPRequestHandler):
                 "version": github_updates.read_local_version(),
                 "storage": storage.storage_backend_info(),
             })
+            return
+
+        # 极轻探活：只证明「这个端口上确实有 API 在应答」，不读版本文件、不碰存储。
+        # 前端「启动/重启 Worker」「启动自动化浏览器」这类长动作之前先打它：连不上就
+        # 立刻报「API 没在运行 / 正在重启」，而不是等一次长请求超时后丢一句 Failed to fetch。
+        if path == "/api/ping":
+            self._json({"ok": True, "service": "ai-listing-system"})
             return
 
         if path == "/api/updates/status":
@@ -4763,12 +4800,19 @@ class ApiHandler(BaseHTTPRequestHandler):
 
         if path.startswith("/api/mabang-page-imports/") and path.endswith("/complete"):
             run_id = path.strip("/").split("/")[2]
+            raw_capture = payload.get("raw_capture") or payload
             try:
-                result = storage.stage_mabang_page_import(run_id, payload.get("raw_capture") or payload)
+                result = storage.stage_mabang_page_import(run_id, raw_capture)
             except storage.MabangPageImportNotFound as exc:
                 raise ApiRequestError(str(exc), 404) from exc
             except MabangPageImportError as exc:
-                raise ApiRequestError(str(exc), 422) from exc
+                # 与 /collect 同一条修复：操作员自己 Chrome 里的采集器推过来的快照
+                # 校验失败时，也必须把错误写到 run 上，否则 run 停在 pending，Worker
+                # 一直「等待页面导入」让路；快照同时落盘供事后定位。
+                message = str(exc)
+                record_page_import_capture_failure(run_id, raw_capture, message)
+                storage.record_mabang_page_import_error(run_id, message)
+                raise ApiRequestError(message, 422) from exc
             self._json(result, status=201)
             return
 
@@ -4815,7 +4859,15 @@ class ApiHandler(BaseHTTPRequestHandler):
             try:
                 result = storage.stage_mabang_page_import(run_id, capture_payload)
             except MabangPageImportError as exc:
-                raise ApiRequestError(str(exc), 422) from exc
+                # 采集失败必须落到 run 上。以前这里只抛 422：run 停在 pending，
+                # Worker 于是一直「等待页面导入」给采集窗口让路（2026-11-25 实测
+                # 卡住 50 分钟），采集窗口也不会收回无头，桌面一直挂着窗口。
+                # 原始快照同时落盘，事后能看出到底读到了哪个页面、缺了哪一项。
+                message = str(exc)
+                record_page_import_capture_failure(run_id, capture_payload, message)
+                storage.record_mabang_page_import_error(run_id, message)
+                _restore_collection_browser_mode(import_account_id)
+                raise ApiRequestError(message, 422) from exc
             # 现场要求（2026-10-01）：马帮采集的时候就顺手把水印目录更新到最新，
             # 不用再单独点一次「采集/更新水印」。best-effort：失败只记状态，不影响本次采集。
             self._refresh_watermark_catalog_after_collect(

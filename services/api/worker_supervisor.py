@@ -297,6 +297,10 @@ class WorkerSupervisor:
             "heartbeat_at": str(heartbeat.get("at") or ""),
             "heartbeat_age_seconds": age,
             "heartbeat_status": str(heartbeat.get("status") or ""),
+            # 心跳里带着当前任务与阶段：长任务期间日志不会写新的结果行，面板要靠它
+            # 才能显示「正在跑哪一单」，而不是上一单的结论。
+            "heartbeat_job_id": str(heartbeat.get("job_id") or ""),
+            "heartbeat_phase": str(heartbeat.get("phase") or ""),
             "paused": str(heartbeat.get("status") or "") == "paused",
             "paused_reason": str(heartbeat.get("paused_reason") or ""),
             "stale": bool(stale),

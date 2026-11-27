@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+import time
 import uuid
 from copy import deepcopy
 from typing import Any
@@ -69,6 +71,47 @@ def stage_page_import(
     data.clear()
     data.update(staged)
     return deepcopy(run)
+
+
+_MAX_CAPTURE_FAILURE_DUMPS = 20
+
+
+def record_capture_failure(
+    run_id: str,
+    raw_capture: dict[str, Any],
+    error: str,
+    *,
+    now: str = "",
+) -> str:
+    """把采集失败的原始快照落盘，供事后定位。
+
+    2026-11-25 现场：页面导入报「未识别到马帮类目编号」时，原始快照只存在于请求体里，
+    run 上既没有错误也没有快照——事后无法区分「页面确实没选类目」和「读错了标签页/
+    框架」。这里 best-effort 留一份完整快照，只保留最近 N 份，任何写入失败都不影响
+    主流程（真正要抛的错误由调用方负责）。
+    """
+
+    try:
+        directory = settings.DATA_DIR / "page-import-failures"
+        directory.mkdir(parents=True, exist_ok=True)
+        payload = {
+            "run_id": run_id,
+            "error": str(error or ""),
+            "recorded_at": now or time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+            "capture": raw_capture,
+        }
+        path = directory / f"{run_id}.json"
+        path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+        files = sorted(
+            directory.glob("*.json"),
+            key=lambda item: item.stat().st_mtime,
+            reverse=True,
+        )
+        for stale in files[_MAX_CAPTURE_FAILURE_DUMPS:]:
+            stale.unlink(missing_ok=True)
+        return str(path)
+    except (OSError, ValueError, TypeError):
+        return ""
 
 
 def record_page_import_error(

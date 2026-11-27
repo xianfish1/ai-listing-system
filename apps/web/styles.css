@@ -847,6 +847,14 @@ label {
   font-size: 12px;
 }
 
+/* 旧选项 id / 未识别值提示（型号那串 1793866866608）：比普通 caption 更醒目，
+   提醒操作员重新选一次再保存，别让这串数字被当自定义值写进马帮。 */
+.category-field span.category-field-warning {
+  color: var(--glyph-alert, #b42318);
+  font-size: 11px;
+  line-height: 1.35;
+}
+
 /* Multi-select attribute boxes (材料 / 图案 / 风格 …): give them a fixed,
    scrollable height so they line up with the single-select dropdowns beside
    them instead of ballooning to different heights and raggeding the grid. */

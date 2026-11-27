@@ -544,6 +544,11 @@ class AutomationWorker:
         self.pending_completion_path = Path(pending_completion_path or self.upload_root / "pending-completion.json")
         self._pending_saved_completion = self._load_pending_saved_completion()
         self.paused_reason = ""
+        # 暂停不是永久停摆：系统级失败（workspace_frame_not_unique 等）只冷却一段时间，
+        # 到点由 run_once 自动恢复领任务。以前 paused_reason 一置位就再也不领单，
+        # 4 个槽位里 3 个卡死，只能人工点「重启 Worker」。
+        self.paused_until = 0.0
+        self.pause_attempts = 0
         # 存活心跳：Supervisor 用它区分「进程活着」和「进程还活着但已经卡死」。
         self.heartbeat = WorkerHeartbeat(
             heartbeat_path,
@@ -961,7 +966,38 @@ class AutomationWorker:
         retry = self._invoke_executor(task_plan)
         return {**retry, "auto_login": recovery, "auto_login_retry": True}
 
+    # 系统级失败后的自动重试节奏：第一次等 45s，连败依次加长，最长 5 分钟。
+    PAUSE_RETRY_BASE_SECONDS = 45.0
+    PAUSE_RETRY_MAX_SECONDS = 300.0
+
+    def _pause_for_system_failure(self, error: str) -> None:
+        """系统级失败（页面结构/框架识别类）置暂停，但只冷却一段时间，到点自动恢复。
+
+        线程安全上不需要额外处理：``paused_reason`` 只由本 Worker 线程读写，
+        与 heartbeat 写入同样的路径。
+        """
+
+        self.paused_reason = str(error or "").strip() or "system_failure"
+        self.pause_attempts = int(getattr(self, "pause_attempts", 0) or 0) + 1
+        delay = min(
+            self.PAUSE_RETRY_BASE_SECONDS * self.pause_attempts,
+            self.PAUSE_RETRY_MAX_SECONDS,
+        )
+        self.paused_until = time.monotonic() + delay
+        # 下一次领任务前先把浏览器重建：这类失败十有八九是页面上残留了坏状态。
+        self._browser_restart_pending = True
+        print(f"⏸ 系统级失败，{delay:.0f}s 后自动重试：{self.paused_reason}", flush=True)
+
+    def _maybe_clear_expired_pause(self) -> None:
+        """冷却到点就自动恢复，不等人工重启（2026-11-26）。"""
+
+        if self.paused_reason and time.monotonic() >= self.paused_until:
+            print(f"▶ 暂停冷却结束，自动恢复领任务（上次原因：{self.paused_reason}）", flush=True)
+            self.paused_reason = ""
+            self.paused_until = 0.0
+
     def run_once(self) -> dict[str, Any]:
+        self._maybe_clear_expired_pause()
         self.heartbeat.set(status="polling", job_id="", phase="poll", paused_reason=self.paused_reason)
         if self.paused_reason:
             self.heartbeat.set(status="paused")
@@ -1090,7 +1126,7 @@ class AutomationWorker:
                     final_status = "needs_confirmation"
                 elif execution.get("system_failure") is True or error in SYSTEM_FAILURE_ERRORS:
                     final_status = "blocked"
-                    self.paused_reason = error
+                    self._pause_for_system_failure(error)
                 else:
                     final_status = "blocked"
             else:
@@ -1117,6 +1153,8 @@ class AutomationWorker:
             )
             if final_status in {"saved", "saved_with_warnings"}:
                 self._clear_pending_saved_completion()
+                # 成功一单即清零连败计数，避免后面的偶发失败被拿去叠加冷却时间。
+                self.pause_attempts = 0
             self.heartbeat.set(status=final_status, job_id=job_id, phase=final_status)
             if self.paused_reason:
                 return {"ok": False, "status": "paused", "job_id": job_id, "job": finished, "error": error}

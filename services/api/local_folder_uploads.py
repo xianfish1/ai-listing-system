@@ -8,6 +8,7 @@ import uuid
 from pathlib import Path, PurePosixPath
 from typing import Any, Callable
 
+from services.api.product_title_file import is_title_file_name
 from workers.asset_scanner.scanner import IMAGE_EXTENSIONS, VIDEO_EXTENSIONS
 
 
@@ -16,6 +17,8 @@ MAX_FILE_BYTES = 512 * 1024 * 1024
 MAX_TOTAL_BYTES = 2 * 1024 * 1024 * 1024
 STALE_SECONDS = 24 * 60 * 60
 SUPPORTED_EXTENSIONS = IMAGE_EXTENSIONS | VIDEO_EXTENSIONS
+# 标题文件（标题.txt / title.txt）跟素材一起上传：导入时 storage 读它当商品标题。
+# 只放行这两个名字，别把备注之类的 .txt 也传上来。
 
 
 class LocalFolderUploadError(ValueError):
@@ -159,7 +162,7 @@ def _relative_path(value: str) -> str:
     path = PurePosixPath(raw)
     if not raw or path.is_absolute() or any(part in {"", ".", ".."} for part in path.parts):
         raise LocalFolderUploadError("文件必须使用安全的相对路径")
-    if path.suffix.lower() not in SUPPORTED_EXTENSIONS:
+    if path.suffix.lower() not in SUPPORTED_EXTENSIONS and not is_title_file_name(path.name):
         raise LocalFolderUploadError("文件类型不支持")
     return path.as_posix()
 

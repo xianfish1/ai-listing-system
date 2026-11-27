@@ -241,6 +241,50 @@ async function closePromotionList(frame) {
   return runPromotionPage(frame, 'close').catch(() => ({ closed: 'error' }));
 }
 
+/**
+ * 挑一个采集目标：多开商品编辑页时不要默认取最后一个。
+ *
+ * 以前固定 `targets[targets.length - 1]`：操作员同时开着几个商品编辑页时，读到的
+ * 可能是另一个（甚至是还没选类目的空编辑页），于是采集报「未识别到马帮类目编号」，
+ * 而人眼看到的页面明明有类目。这里对每个候选页各读一次快照（只读，不点任何按钮），
+ * 优先选「读得到类目」且「前台可见」的那个；一个都读不到时退回旧规则，由调用方
+ * 报一条说得清的错误。
+ */
+async function pickProductEditTarget(targets, captureSource, plan) {
+  if (targets.length === 1) return { target: targets[0], probes: [] };
+  const probes = [];
+  for (const candidate of targets) {
+    let visible = false;
+    try {
+      visible = await candidate.page.evaluate(() => document.visibilityState === 'visible');
+    } catch (_error) {
+      visible = false;
+    }
+    let categoryId = '';
+    let storeId = '';
+    try {
+      const probe = await candidate.frame.evaluate(
+        ([source, inputPlan]) => (0, eval)(`(${source})`)(inputPlan),
+        [captureSource, plan],
+      );
+      const state = (probe || {}).store_category_state || {};
+      categoryId = String(((state.category || {}).id) || '').trim();
+      storeId = String(((state.store || {}).id) || '').trim();
+    } catch (_error) {
+      categoryId = '';
+    }
+    probes.push({ url: candidate.url, visible, category_id: categoryId, store_id: storeId, used: false });
+  }
+  const usable = probes.filter((probe) => probe.category_id);
+  const chosen = usable.find((probe) => probe.visible) || usable[0] || null;
+  if (chosen) {
+    chosen.used = true;
+    return { target: targets[probes.indexOf(chosen)], probes };
+  }
+  probes[probes.length - 1].used = true;
+  return { target: targets[targets.length - 1], probes };
+}
+
 async function collectPageImport({ cdpUrl = CDP_DEFAULT, plan = {} } = {}) {
   if (!fs.existsSync(CAPTURE_PATH)) {
     return { ok: false, status: 'failed', error: '页面采集脚本缺失（mabang_page_import_capture.js）' };
@@ -256,7 +300,8 @@ async function collectPageImport({ cdpUrl = CDP_DEFAULT, plan = {} } = {}) {
         error: '当前浏览器没有打开 Shopee 商品编辑页。请在马帮里打开一个商品（编辑），再点采集。',
       };
     }
-    const target = targets[targets.length - 1];
+    const selection = await pickProductEditTarget(targets, captureSource, plan);
+    const target = selection.target;
     // CNSC / 跨境本土(3PF) 的店铺选择器与每站折扣活动默认不渲染：先展开读出，再采快照。
     // 本土页没有这些交互，行为不变。global=4 是 CNSC 页的标记；3PF 如果走了别的入口，
     // 只要页面里有 #shops-wap 也照样展开（选择器在就说明是跨境形态）。
@@ -344,6 +389,28 @@ async function collectPageImport({ cdpUrl = CDP_DEFAULT, plan = {} } = {}) {
     }
     if (capture.source !== 'mabang_current_page') {
       return { ok: false, status: 'failed', error: '页面采集结果来源无效（不是马帮当前页）' };
+    }
+    // 类目是整条导入的硬前提（后端 normalize 一定要求 category.id）。在这里先拦下来，
+    // 报错能指名读到了哪些页面，而不是让操作员看到一句「未识别到马帮类目编号」，
+    // 也不知道是页面没选类目还是读错了窗口。
+    const capturedCategoryId = String(
+      (((capture.store_category_state || {}).category || {}).id) || '',
+    ).trim();
+    if (!capturedCategoryId) {
+      const list = selection.probes.length
+        ? selection.probes
+          .map((probe) => `${probe.used ? '读到' : '其它'} ${probe.url}`)
+          .join('；')
+        : target.url;
+      return {
+        ok: false,
+        status: 'category_missing',
+        error:
+          `读到的商品编辑页里没有类目信息（${list}）。` +
+          '请先在马帮这个页面上选好店铺和叶子类目、让类目路径显示出来，' +
+          '再点「采集当前页」；如果同时开了多个商品编辑页，只保留你要采集的那一个。',
+        candidates: selection.probes,
+      };
     }
     return {
       ok: true,
