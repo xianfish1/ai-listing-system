@@ -68,6 +68,32 @@ def test_copy_uses_fixed_title_only_when_product_title_is_empty() -> None:
     assert copy["listing_title"] == "Product Own Title"
 
 
+def test_placeholder_sku_title_is_treated_as_empty() -> None:
+    """现场（2026-11-27）：商品没标题时旧逻辑拼出「YSC961 YSC961」，看着有值其实不是标题。
+
+    模板配了固定标题时，这种占位标题必须按「空」处理，副本上架用固定标题。
+    """
+    template = _template("固定标题：Kids Tee")
+    now = "2026-11-27T00:00:00+00:00"
+
+    for base_title in ("YSC961", "YSC961 YSC961"):
+        copy = storage._build_store_listing_copy(
+            {"id": "base", "group_id": "YSC961", "listing_title": base_title}, template, now, {}
+        )
+        assert copy["listing_title"] == "固定标题：Kids Tee", base_title
+
+    # 没有固定标题时保持老行为（拼商品名/SKU），不会因为占位判断变成空标题
+    plain = _template("")
+    copy = storage._build_store_listing_copy(
+        {"id": "base", "group_id": "YSC961", "listing_title": "YSC961 YSC961"}, plain, now, {}
+    )
+    assert copy["listing_title"] == "YSC961 YSC961"
+
+    # 建任务阶段只拿得到副本：纯 SKU 重复的标题同样算占位
+    assert storage._listing_title_is_placeholder("YSC961 YSC961", {"group_id": "YSC961"}, {}) is True
+    assert storage._listing_title_is_placeholder("Kids Cotton Tee", {"group_id": "YSC961"}, {}) is False
+
+
 def test_default_listing_title_falls_back_to_fixed_title() -> None:
     template = {"fixed_title": "固定标题 X", "title_suffix": ""}
     assert storage._build_default_listing_title(template, "", "") == "固定标题 X"
@@ -95,3 +121,32 @@ def test_template_editor_exposes_and_saves_fixed_title() -> None:
     assert 'fixed_title: $("store-template-fixed-title")?.value.trim() || ""' in script
     assert 'if ($("store-template-fixed-title")) $("store-template-fixed-title").value = template.fixed_title || ""' in script
     assert '"store-template-fixed-title"' in script  # resetInputs 里
+
+
+def test_saving_template_fixed_title_repairs_existing_placeholder_copies(tmp_path: Path) -> None:
+    """保存模板的固定标题后，该模板名下标题是「SKU 占位」的副本要一起换掉。
+
+    现场（2026-11-27）：运营在模板里填了固定标题，回头看副本列表标题还是
+    「YSC961 YSC961」，以为功能没生效。
+    """
+    folder = tmp_path / "YSC961 童装"
+    folder.mkdir()
+    (folder / "main.jpg").write_bytes(b"image")
+    (folder / "Black.jpg").write_bytes(b"image")
+    base = storage.create_base_product_from_folder({"root_path": str(folder), "category": "POD Kids T-Shirt"})
+    template = _template("")
+
+    created = storage.copy_base_product_to_store_templates(base["id"], [template["id"]])["created"]
+    copy_id = created[0]["id"]
+    storage.update_store_listing_copy(copy_id, {"title": "YSC961 YSC961"})
+
+    updated = storage.update_store_template(template["id"], {"fixed_title": "Kids Cotton Tee 固 定"})
+    assert updated["fixed_title"] == "Kids Cotton Tee 固 定"
+    copy = next(item for item in storage.list_store_listing_copies() if item["id"] == copy_id)
+    assert copy["listing_title"] == "Kids Cotton Tee 固 定"
+
+    # 操作员手改过的真标题不受影响
+    storage.update_store_listing_copy(copy_id, {"title": "Operator Real Title"})
+    storage.update_store_template(template["id"], {"fixed_title": "Another Fixed Title"})
+    copy = next(item for item in storage.list_store_listing_copies() if item["id"] == copy_id)
+    assert copy["listing_title"] == "Operator Real Title"

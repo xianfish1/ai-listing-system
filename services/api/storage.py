@@ -4794,6 +4794,19 @@ def update_store_template(template_id: str, payload: dict[str, Any]) -> dict[str
                             updated.get("description_media_max_images")
                         )
                     listing_copy["updated_at"] = now
+            # 固定标题是模板-owned：保存模板后，该模板名下「标题为空 / 只是 SKU 占位」
+            # （YSC961、YSC961 YSC961）的副本一起换成固定标题；操作员手改过的真标题不动。
+            # 现场 2026-11-27：商品没标题时副本标题被自动拼成「YSC961 YSC961」，
+            # 运营以为模板的固定标题没生效——不把存量副本一起换掉，看起来就是没生效。
+            fixed_title = str(updated.get("fixed_title") or "").strip()
+            if fixed_title and "fixed_title" in payload:
+                for listing_copy in data.get("store_listing_copies", []):
+                    if listing_copy.get("template_id") != template_id:
+                        continue
+                    if not _listing_title_is_placeholder(listing_copy.get("listing_title"), listing_copy, updated):
+                        continue
+                    listing_copy["listing_title"] = fixed_title
+                    listing_copy["updated_at"] = now
             save(data)
             return deepcopy(template)
             changed_sync_fields = {field for field in sync_fields if field in payload}
@@ -7067,20 +7080,62 @@ def _template_attribute_values_for_copy(
     }
 
 
+def _template_for_copy(data: dict[str, Any], listing_copy: dict[str, Any]) -> dict[str, Any]:
+    template_id = str(listing_copy.get("template_id") or "").strip()
+    if not template_id:
+        return {}
+    return next(
+        (item for item in data.get("store_templates", []) if item.get("id") == template_id),
+        None,
+    ) or {}
+
+
 def _fixed_title_for_copy(data: dict[str, Any], listing_copy: dict[str, Any]) -> str:
     """副本所属店铺模板上配的「固定标题」（没配返回空串）。
 
     固定标题是**店铺模板级**的：一个模板对应一个店铺（+站点），不同店铺配各自的固定标题，
-    只在商品标题为空时兜底使用。
+    在商品标题为空（或只是商品名/SKU 的占位）时兜底使用。
     """
-    template_id = str(listing_copy.get("template_id") or "").strip()
-    if not template_id:
-        return ""
-    template = next(
-        (item for item in data.get("store_templates", []) if item.get("id") == template_id),
-        None,
-    ) or {}
-    return str(template.get("fixed_title") or "").strip()
+    return str(_template_for_copy(data, listing_copy).get("fixed_title") or "").strip()
+
+
+# 自动拼出来的"占位标题"（YSC961、YSC961 YSC961、YSC961 <标题后缀> YSC961）：
+# 商品没有真标题时旧逻辑会把商品名/SKU 拼上去，看着有值其实不是标题。
+# 模板配了固定标题时，这类占位标题要按"标题为空"处理。
+def _listing_title_is_placeholder(
+    title: Any,
+    base: dict[str, Any] | None,
+    template: dict[str, Any] | None = None,
+) -> bool:
+    text = " ".join(str(title or "").split()).strip()
+    if not text:
+        return True
+    base = base or {}
+    template = template or {}
+    name = str(base.get("product_name_cn") or base.get("base_name") or "").strip()
+    group = str(base.get("group_id") or "").strip()
+    suffix = str(template.get("title_suffix") or "").strip()
+    combos = (
+        [name], [group], [name, group], [group, name],
+        [name, suffix], [suffix, group], [name, suffix, group],
+    )
+    candidates = {
+        " ".join(part for part in combo if part).strip().lower()
+        for combo in combos
+        if any(part for part in combo)
+    }
+    if candidates and text.lower() in candidates:
+        return True
+    # 建任务阶段只拿得到副本（没有商品名/标题后缀）：像「YSC961 YSC961」这种
+    # 纯由 SKU 重复组成的标题同样算占位。
+    identifiers = {
+        value.lower()
+        for value in (group, name, str(base.get("main_sku") or "").strip())
+        if value
+    }
+    tokens = {token.lower() for token in text.split()}
+    return bool(identifiers and tokens and tokens <= identifiers)
+
 
 
 def _missing_template_attribute_fields(data: dict[str, Any], listing_copy: dict[str, Any]) -> list[str]:
@@ -7177,13 +7232,13 @@ def _build_automation_job_in_store(
         listing_copy["attribute_values"] = values
         listing_copy["category_attributes"] = deepcopy(values)
         listing_copy["updated_at"] = now
-    # 标题同理：模板配了「固定标题」、副本标题又是空的时候，建任务前补上——
-    # 否则执行器把空标题写进马帮，保存必然被拦（不同店铺模板各用各的固定标题）。
-    if not str(listing_copy.get("listing_title") or "").strip():
-        fixed_title = _fixed_title_for_copy(data, listing_copy)
-        if fixed_title:
-            listing_copy["listing_title"] = fixed_title
-            listing_copy["updated_at"] = now
+    # 标题同理：模板配了「固定标题」、副本标题是空或只是商品名/SKU 占位（YSC961 YSC961）
+    # 的时候，建任务前补上——否则执行器把占位标题写进马帮（不同店铺模板各用各的固定标题）。
+    copy_template = _template_for_copy(data, listing_copy)
+    fixed_title = str(copy_template.get("fixed_title") or "").strip()
+    if fixed_title and _listing_title_is_placeholder(listing_copy.get("listing_title"), listing_copy, copy_template):
+        listing_copy["listing_title"] = fixed_title
+        listing_copy["updated_at"] = now
     skus = _listing_skus_in_store(data, listing_copy_id)
     prices = _listing_prices_in_store(data, listing_copy_id)
     readiness = _check_automation_readiness(
@@ -9961,9 +10016,11 @@ def _build_store_listing_copy(
     title = str(base.get("listing_title") or "").strip()
     if not title:
         title = " ".join(part for part in [base_name, template.get("title_suffix") or "", base.get("group_id") or ""] if str(part or "").strip()).strip()
-    if not title:
-        # 商品侧完全没有标题：用该店铺模板配的固定标题（跟随店铺绑定，不同店铺各不相同）。
-        title = str(template.get("fixed_title") or "").strip()
+    fixed_title = str(template.get("fixed_title") or "").strip()
+    if fixed_title and _listing_title_is_placeholder(title, base, template):
+        # 商品标题为空、或只是「YSC961 / YSC961 YSC961」这种商品名/SKU 占位：
+        # 用该店铺模板配的固定标题（跟随店铺绑定，不同店铺各不相同）。
+        title = fixed_title
     size_chart_source = _normalize_size_chart_source(template.get("size_chart_source"))
     # 尺码图表选「选择模板」时表单页上没有可引用的尺码图地址（表单项里只有
     # 「上传图片 / 选择模板 / 同步」，没有预览图），描述末尾要靠店铺模板里一并上传的
