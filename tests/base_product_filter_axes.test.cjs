@@ -34,6 +34,7 @@ function makeSandbox() {
       baseProductAudienceFilter: '',
       baseProductCategoryFilter: '',
       baseProductTimeFilter: 'all',
+      baseProductSearchQuery: '',
     },
     rendered: 0,
     cleared: 0,
@@ -48,9 +49,14 @@ function makeSandbox() {
   vm.createContext(sandbox);
   vm.runInContext(
     [
+      extractFunction(APP_SOURCE, 'normalizeBaseSkuPart'),
+      extractFunction(APP_SOURCE, 'baseSkuSearchTokens'),
+      extractFunction(APP_SOURCE, 'baseSkuTokenMatches'),
+      extractFunction(APP_SOURCE, 'matchesBaseProductSearch'),
       extractFunction(APP_SOURCE, 'matchesBaseProductFilters'),
       extractFunction(APP_SOURCE, 'toggleBaseCategoryFilter'),
       'this.matchesBaseProductFilters = matchesBaseProductFilters;',
+      'this.matchesBaseProductSearch = matchesBaseProductSearch;',
       'this.toggleBaseCategoryFilter = toggleBaseCategoryFilter;',
     ].join('\n\n'),
     sandbox,
@@ -115,4 +121,43 @@ test('换任何一轴都会清掉勾选并重画列表', () => {
   box.toggleBaseCategoryFilter('stage:uncopied');
   assert.equal(box.cleared, 1);
   assert.equal(box.rendered, 1);
+});
+
+// 货号模糊搜索：大小写 / 空格横线无关，包含匹配优先，长货号还允许按顺序缺字。
+test('按主 SKU 模糊搜索货号', () => {
+  const box = makeSandbox();
+  const product = { ...PRODUCT, main_sku: 'AL1399', group_id: 'G-AL1399' };
+  box.state.baseProductSearchQuery = '';
+  assert.equal(box.matchesBaseProductFilters(product), true, '空的搜索词等于不过滤');
+
+  for (const query of ['al1399', 'AL-1399', 'a1399', '1399 al', '  AL 1399  ']) {
+    box.state.baseProductSearchQuery = query;
+    assert.equal(box.matchesBaseProductSearch(product), true, `「${query}」应命中 AL1399`);
+  }
+
+  // 4 位以上允许按顺序缺字；3 位短词只做包含匹配，免得一次捞出一大片。
+  box.state.baseProductSearchQuery = 'h580';
+  assert.equal(box.matchesBaseProductSearch({ ...PRODUCT, main_sku: 'HN0580' }), true);
+  box.state.baseProductSearchQuery = 'h58';
+  assert.equal(box.matchesBaseProductSearch({ ...PRODUCT, main_sku: 'HN0580' }), false);
+
+  box.state.baseProductSearchQuery = 'HN0244';
+  assert.equal(box.matchesBaseProductSearch(product), false);
+});
+
+test('没分配主 SKU 时按分组 SKU 兜底搜索', () => {
+  const box = makeSandbox();
+  const product = { ...PRODUCT, main_sku: '', group_id: 'HN0244' };
+  box.state.baseProductSearchQuery = 'hn024';
+  assert.equal(box.matchesBaseProductSearch(product), true);
+});
+
+test('货号搜索和其它筛选轴取交集', () => {
+  const box = makeSandbox();
+  box.state.baseProductSearchQuery = 'AL1399';
+  box.state.baseProductStageFilter = 'imported';
+  const product = { ...PRODUCT, main_sku: 'AL1399' };
+  assert.equal(box.matchesBaseProductFilters(product), true);
+  assert.equal(box.matchesBaseProductFilters({ ...product, stage: 'uncopied' }), false);
+  assert.equal(box.matchesBaseProductFilters({ ...product, main_sku: 'AL1400' }), false);
 });

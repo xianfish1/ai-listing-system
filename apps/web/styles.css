@@ -735,6 +735,12 @@ h2 {
   margin-bottom: 14px;
 }
 
+/* .inline-form 自己声明了 display:flex，UA 的 [hidden] 规则压不住，必须显式隐藏。
+   （手填 NAS 路径那一行已停用，走「从 NAS 创建」的浏览选择器。） */
+.inline-form[hidden] {
+  display: none;
+}
+
 .panel-head input,
 .inline-form input {
   max-width: 520px;
@@ -2476,41 +2482,98 @@ td code {
   overflow-wrap: anywhere;
 }
 
-/* 批量操作栏：显示在筛选条上方，选中任意商品后出现。 */
+/* 批量操作条：常驻在筛选面板最上方（不再隐藏），有勾选时整条高亮、
+   没勾选时「依赖勾选」的动作置灰。两行布局：勾选/删除一行，AI 重识别一行。 */
 .base-product-batch-bar {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding-bottom: 10px;
+  border-bottom: 1px solid var(--line);
+  transition: border-color 120ms ease;
+}
+.base-product-batch-bar--active {
+  border-bottom-color: color-mix(in srgb, var(--indigo) 20%, var(--line));
+}
+.base-product-batch-row {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px 10px;
+  min-height: 28px;
+}
+.base-product-batch-count {
+  display: inline-flex;
+  align-items: center;
+  height: 24px;
+  padding: 0 10px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--text) 6%, transparent);
+  color: var(--text-soft);
+  font-size: 12px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  transition: background 120ms ease, color 120ms ease;
+}
+.base-product-batch-bar--active .base-product-batch-count {
+  background: var(--indigo);
+  color: #fff;
+}
+/* 两组动作：勾选类（全选/清除）一行，AI 重识别单独一行。 */
+.base-product-batch-group {
   display: flex;
   align-items: center;
   flex-wrap: wrap;
   gap: 8px;
-  margin: 8px 0 4px;
-  padding: 8px 10px;
-  border: 1px dashed var(--indigo);
-  border-radius: var(--radius-sm);
-  background: color-mix(in srgb, var(--indigo) 5%, var(--panel));
 }
-.base-product-batch-count {
-  font-size: 12.5px;
-  font-weight: 600;
-  color: var(--indigo);
-  margin-right: 4px;
-}
-.base-product-batch-divider {
-  width: 1px;
-  height: 18px;
-  margin: 0 2px;
-  background: var(--line);
+.base-product-batch-group--ai {
+  gap: 6px;
 }
 .base-product-batch-label {
-  font-size: 12px;
+  font-size: 11px;
   font-weight: 600;
+  letter-spacing: 0.08em;
   color: var(--muted);
+  white-space: nowrap;
+}
+/* 勾选状态和动作按钮之间的细分隔线。 */
+.base-product-batch-divider {
+  width: 1px;
+  height: 20px;
+  background: var(--line);
+}
+/* 批量删除放到第一行最右边，和左边的人工操作拉开距离，避免误点。 */
+.base-product-batch-delete {
+  margin-left: auto;
+}
+/* 批量条里的按钮比筛选 chip 小一号，一行放得下全部动作。 */
+.base-product-batch-bar .chip {
+  padding: 5px 10px;
+  font-size: 12px;
+}
+.base-product-batch-bar .chip:disabled,
+.base-product-batch-bar .chip.chip--ai:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+.base-product-batch-bar .chip.chip--ai:disabled:hover {
+  background: var(--panel);
+  border-color: color-mix(in srgb, var(--indigo) 45%, var(--line));
+}
+.base-product-batch-bar .chip.danger-ghost:disabled:hover {
+  background: var(--panel);
+  border-color: color-mix(in srgb, var(--danger) 45%, var(--line));
+  color: var(--danger);
 }
 /* 「重新识别标题」旁的标题规则下拉：跟着 chip 的高度走，别把批量栏撑高。 */
 .base-retry-skill {
-  max-width: 260px;
-  height: 28px;
+  flex: 0 0 auto;
+  width: 210px;
+  max-width: 100%;
+  height: 30px;
   padding: 2px 8px;
-  font-size: 12.5px;
+  font-size: 12px;
 }
 .chip.chip--ai {
   color: var(--indigo);
@@ -4636,6 +4699,97 @@ dialog:not([open]) { display: none; }
 /* ============================================================
    Base-product filter chips
    ============================================================ */
+/* 商品维护筛选工具条：货号搜索 / 时间 / 分类收进一块浅色面板，和下面的
+   商品卡分开；三行共用同一套「标签 + 控件」基线对齐（标签 33px 与 chip 等高）。 */
+.base-product-filter-bar {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin: 2px 0 16px;
+  padding: 12px 14px;
+  background: var(--panel-soft);
+  border: 1px solid var(--line-soft);
+  border-radius: var(--radius-md);
+}
+
+.base-product-filter-group {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  min-width: 0;
+}
+
+.base-product-filter-label {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  height: 33px;
+  font-size: 12px;
+  font-weight: 500;
+  letter-spacing: 0.04em;
+  color: var(--muted);
+}
+
+.base-product-filter-bar .chip-row {
+  flex: 1 1 auto;
+  min-width: 0;
+  margin: 0;
+}
+
+/* 货号模糊搜索：胶囊输入框 + 左侧放大镜，右侧挂命中张数的小标签。 */
+.base-product-search-group {
+  align-items: center;
+}
+
+input.base-product-search {
+  width: 320px;
+  max-width: 100%;
+  height: 33px;
+  padding: 0 14px 0 34px;
+  font-size: 13px;
+  border-radius: 999px;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='16' height='16' viewBox='0 0 24 24' fill='none' stroke='%2398a1b0' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Ccircle cx='11' cy='11' r='7'/%3E%3Cpath d='m20 20-3.6-3.6'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: 12px center;
+  background-size: 15px 15px;
+}
+
+.base-product-search-hint {
+  display: inline-flex;
+  align-items: center;
+  height: 24px;
+  padding: 0 10px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--indigo) 8%, transparent);
+  color: var(--indigo-ink);
+  font-size: 12px;
+  font-weight: 500;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+/* .base-product-search-hint 自己声明了 display，必须显式压回 hidden，
+   否则 UA 的 [hidden] 规则会被类选择器盖掉。 */
+.base-product-search-hint[hidden] {
+  display: none;
+}
+
+@media (max-width: 720px) {
+  .base-product-filter-group {
+    flex-direction: column;
+    align-items: stretch;
+    gap: 6px;
+  }
+
+  .base-product-filter-label {
+    height: auto;
+  }
+
+  input.base-product-search {
+    width: 100%;
+  }
+}
+
 .chip-row {
   display: flex;
   flex-wrap: wrap;

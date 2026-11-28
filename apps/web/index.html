@@ -9,7 +9,7 @@
     <link rel="preload" href="/fonts/inter-400-latin.woff2" as="font" type="font/woff2" crossorigin />
     <link rel="preload" href="/fonts/inter-500-latin.woff2" as="font" type="font/woff2" crossorigin />
     <link rel="stylesheet" href="/fonts.css?v=self-hosted-v1" />
-    <link rel="stylesheet" href="/styles.css?v=store-template-site-isolation-v1&feature=store-promotion-recollect-v1&feature=category-cascader-v1&feature=desc-profile-base-detail-v2&feature=base-product-multiselect-v1&feature=base-product-stage-v1&feature=local-import-queue-v1&feature=nas-import-queue-retry-v1&feature=copy-editor-errors-v1&feature=job-generation-feedback-v1&feature=fill-missing-attributes-v1&feature=multi-select-custom-value-v1&feature=copy-template-mode-cards-v1&feature=jobs-time-buckets-v1&feature=jobs-collapsed-by-default-v1&feature=ai-color-connection-v1&feature=size-chart-local-image-v1&feature=refresh-position-v1&feature=refresh-inline-v1&feature=jobs-sku-thumb-v1&feature=size-chart-last-image-v1&feature=switch-line-v1&feature=watermark-redesign-v1&feature=mabang-account-list-v1&feature=worker-per-account-v1&feature=mabang-account-ui-v4&feature=import-headed-window-v1&feature=base-color-follow-images-v1&feature=store-template-account-v1&feature=base-product-rerecognize-v1&feature=github-updates-v1&feature=category-cascader-v1&feature=skills-management-v1&feature=title-workbench-v1&feature=base-batch-cost-v1&feature=retry-title-skill-v1&feature=variant-image-thumb-picker-v2&feature=title-ai-suggest-v2&feature=update-reminder-v2&feature=base-product-audience-v1&feature=cnsc-3pf-mode-v1&feature=excel-import-v2&feature=store-template-site-isolation-v1&feature=template-custom-option-id-guard-v1" />
+    <link rel="stylesheet" href="/styles.css?v=store-template-site-isolation-v1&feature=store-promotion-recollect-v1&feature=category-cascader-v1&feature=desc-profile-base-detail-v2&feature=base-product-multiselect-v1&feature=base-product-stage-v1&feature=local-import-queue-v1&feature=nas-import-queue-retry-v1&feature=copy-editor-errors-v1&feature=job-generation-feedback-v1&feature=fill-missing-attributes-v1&feature=multi-select-custom-value-v1&feature=copy-template-mode-cards-v1&feature=jobs-time-buckets-v1&feature=jobs-collapsed-by-default-v1&feature=ai-color-connection-v1&feature=size-chart-local-image-v1&feature=refresh-position-v1&feature=refresh-inline-v1&feature=jobs-sku-thumb-v1&feature=size-chart-last-image-v1&feature=switch-line-v1&feature=watermark-redesign-v1&feature=mabang-account-list-v1&feature=worker-per-account-v1&feature=mabang-account-ui-v4&feature=import-headed-window-v1&feature=base-color-follow-images-v1&feature=store-template-account-v1&feature=base-product-rerecognize-v1&feature=github-updates-v1&feature=category-cascader-v1&feature=skills-management-v1&feature=title-workbench-v1&feature=base-batch-cost-v1&feature=retry-title-skill-v1&feature=variant-image-thumb-picker-v2&feature=title-ai-suggest-v2&feature=update-reminder-v2&feature=base-product-audience-v1&feature=cnsc-3pf-mode-v1&feature=excel-import-v2&feature=store-template-site-isolation-v1&feature=template-custom-option-id-guard-v1&feature=base-product-sku-search-v10" />
     <link rel="stylesheet" href="/title-workbench.css?v=2" />
   </head>
   <body>
@@ -184,7 +184,9 @@
                 <button id="copy-to-store-templates-btn">复制到店铺模板</button>
               </div>
             </div>
-            <div class="inline-form">
+            <!-- 手填 NAS 路径这一行已停用（现场直接走「从 NAS 创建」的浏览选择器）：
+                 整行隐藏，但保留输入框/文件选择器，JS 和文件选择器仍按原样工作。 -->
+            <div class="inline-form" hidden>
               <input id="base-product-folder" placeholder="粘贴 NAS 商品文件夹路径，如 \\Juns\产品编辑部\...\AL0115抱熊小黄人" />
               <button id="browse-nas-folder-btn" class="secondary" type="button">浏览…</button>
               <input id="local-base-product-folder-upload" type="file" accept=".jpg,.jpeg,.png,.webp,.mp4,.mov,.avi,.mkv,.txt" webkitdirectory directory multiple hidden />
@@ -218,21 +220,36 @@
               <p class="muted local-import-queue-hint">「重新识别标题」按勾选顺序逐条排队；识别出的标题会直接显示在这一行，全部跑完会弹窗列出全部标题，可逐个或一次性复制。</p>
               <ol id="base-title-queue-list" class="local-import-queue-list"></ol>
             </div>
-            <div id="base-product-batch-bar" class="base-product-batch-bar" hidden>
-              <span id="base-product-batch-count" class="base-product-batch-count">已选 0 个</span>
-              <button type="button" class="chip" data-base-batch-action="select-all">全选当前列表</button>
-              <button type="button" class="chip" data-base-batch-action="clear">清除勾选</button>
-              <span class="base-product-batch-divider" aria-hidden="true"></span>
-              <span class="base-product-batch-label">AI 重识别</span>
-              <button type="button" class="chip chip--ai" data-base-batch-action="retry-title" title="只对勾选商品重新生成英文标题，不改详情和颜色图">重新识别标题</button>
-              <select id="base-retry-skill" class="base-retry-skill" title="只影响「重新识别标题」：选中的规则会强制用于这批商品；留在「自动匹配」则按商品范围和默认规则自动选择">
-                <option value="">标题规则：自动匹配（默认）</option>
-              </select>
-              <button type="button" class="chip chip--ai" data-base-batch-action="retry-description" title="只对勾选商品重新生成详情，不改标题和颜色图">重新识别详情</button>
-              <button type="button" class="chip chip--ai" data-base-batch-action="retry-colors" title="对勾选商品重新识别全部颜色图的颜色（含已命名的颜色图）">重新识别颜色图</button>
-              <button type="button" class="chip danger-ghost" data-base-batch-action="delete">批量删除</button>
-            </div>
             <div class="base-product-filter-bar">
+              <!-- 批量操作条常驻显示（不隐藏）：未勾选时依赖勾选的动作置灰。
+                   两行：第一行勾选/删除，第二行 AI 重识别，窄屏也不会挤成乱排。 -->
+              <div id="base-product-batch-bar" class="base-product-batch-bar">
+                <div class="base-product-batch-row">
+                  <span id="base-product-batch-count" class="base-product-batch-count">已选 0 个商品</span>
+                  <span class="base-product-batch-divider" aria-hidden="true"></span>
+                  <div class="base-product-batch-group">
+                    <button type="button" class="chip" data-base-batch-action="select-all">全选当前列表</button>
+                    <button type="button" class="chip" data-base-batch-action="clear">清除勾选</button>
+                  </div>
+                  <button type="button" class="chip danger-ghost base-product-batch-delete" data-base-batch-action="delete">批量删除</button>
+                </div>
+                <div class="base-product-batch-row">
+                  <span class="base-product-batch-label">AI 重识别</span>
+                  <div class="base-product-batch-group base-product-batch-group--ai">
+                    <button type="button" class="chip chip--ai" data-base-batch-action="retry-title" title="只对勾选商品重新生成英文标题，不改详情和颜色图">重新识别标题</button>
+                    <select id="base-retry-skill" class="base-retry-skill" title="只影响「重新识别标题」：选中的规则会强制用于这批商品；留在「自动匹配」则按商品范围和默认规则自动选择">
+                      <option value="">标题规则：自动匹配（默认）</option>
+                    </select>
+                    <button type="button" class="chip chip--ai" data-base-batch-action="retry-description" title="只对勾选商品重新生成详情，不改标题和颜色图">重新识别详情</button>
+                    <button type="button" class="chip chip--ai" data-base-batch-action="retry-colors" title="对勾选商品重新识别全部颜色图的颜色（含已命名的颜色图）">重新识别颜色图</button>
+                  </div>
+                </div>
+              </div>
+              <div class="base-product-filter-group base-product-search-group">
+                <span class="base-product-filter-label">货号</span>
+                <input id="base-product-search" class="base-product-search" type="search" autocomplete="off" spellcheck="false" placeholder="输入完整或部分货号，如 HN0580" aria-label="按货号模糊搜索商品" />
+                <span id="base-product-search-hint" class="base-product-search-hint" hidden></span>
+              </div>
               <div class="base-product-filter-group">
                 <span class="base-product-filter-label">时间</span>
                 <div id="base-product-filter-time" class="chip-row" role="group" aria-label="按时间筛选">
@@ -1606,7 +1623,7 @@
 
     <script src="/local-folder-batch.js?v=title-file-import-v1"></script>
     <script src="/excel-import.js?v=excel-import-v2"></script>
-    <script src="/app.js?v=store-template-site-isolation-v1&feature=store-promotion-recollect-v1&feature=desc-profile-base-detail-v2&feature=base-product-multiselect-v1&feature=description-media-v1&feature=local-folder-batch-v1&feature=local-import-queue-v1&feature=import-scoped-assets-v1&feature=product-image-upload-v2&feature=category-custom-option-v1&feature=base-product-stage-v1&feature=desc-required-spec-rows-v1&feature=field-not-editable-v1&feature=job-requeue-in-place-v1&feature=retry-no-detail-dialog-v1&feature=description-tail-insert-v1&feature=loader-retry-v1&feature=template-sale-price-editable-v1&feature=size-chart-template-label-v1&feature=size-chart-local-image-v1&feature=size-chip-drag-order-v1&feature=size-price-editable-v1&feature=copy-list-new-only-v1&feature=automation-live-steps-v3&feature=local-import-queue-v1&feature=base-product-time-all-v1&feature=jobs-sku-thumb-v1&feature=size-chart-last-image-v1&feature=watermark-redesign-v1&feature=mabang-account-list-v1&feature=worker-per-account-v1&feature=mabang-account-ui-v4&feature=import-headed-window-v1&feature=base-color-follow-images-v1&feature=page-import-worker-standby-v2&feature=store-template-duplicate-v1&feature=store-template-account-v1&feature=hide-fill-missing-batch-v1&feature=base-product-rerecognize-v1&feature=category-quick-template-values-v1&feature=github-updates-v1&feature=cross-border-mode-v1&feature=stale-select-text-fallback-v1&feature=cnsc-price-section-hide-v1&feature=color-quick-pick-v1&feature=color-quick-select-all-v1&feature=color-dropdown-live-refresh-v1&feature=skills-management-v1&feature=title-workbench-v1&feature=quick-template-reliable-v1&feature=base-common-sizes-v1&feature=base-batch-cost-v1&feature=retry-title-skill-v1&feature=variant-image-thumb-picker-v2&feature=description-image-width-log-v1&feature=description-image-width-fix-v1&feature=local-import-duplicate-guard-v1&feature=base-save-queue-v1&feature=base-selection-clear-on-nav-v2&feature=copy-batch-delete-v1&feature=copy-image-asset-root-v1&feature=title-ai-suggest-v2&feature=title-audience-detect-v1&feature=update-reminder-v2&feature=media-step-status-v1&feature=base-product-audience-v1&feature=base-selection-clear-on-filter-v1&feature=base-product-filter-axes-v1&feature=local-import-transparent-skip-v1&feature=cnsc-3pf-mode-v1&feature=worker-heartbeat-v1&feature=cnsc-3pf-template-pricing-v3&feature=cnsc-3pf-import-preview-v1&feature=excel-import-v2&feature=store-template-category-persist-v1&feature=size-chart-template-keep-v1&feature=description-media-market-limit-v1&feature=category-profile-scope-v1&feature=default-sku-prefill-v1&feature=promotion-store-scope-v1&feature=color-pass-accuracy-v1&feature=store-template-site-isolation-v1&feature=template-custom-option-id-guard-v1&feature=api-action-recovery-v1&feature=store-template-fixed-title-v1"></script>
+    <script src="/app.js?v=store-template-site-isolation-v1&feature=store-promotion-recollect-v1&feature=desc-profile-base-detail-v2&feature=base-product-multiselect-v1&feature=description-media-v1&feature=local-folder-batch-v1&feature=local-import-queue-v1&feature=import-scoped-assets-v1&feature=product-image-upload-v2&feature=category-custom-option-v1&feature=base-product-stage-v1&feature=desc-required-spec-rows-v1&feature=field-not-editable-v1&feature=job-requeue-in-place-v1&feature=retry-no-detail-dialog-v1&feature=description-tail-insert-v1&feature=loader-retry-v1&feature=template-sale-price-editable-v1&feature=size-chart-template-label-v1&feature=size-chart-local-image-v1&feature=size-chip-drag-order-v1&feature=size-price-editable-v1&feature=copy-list-new-only-v1&feature=automation-live-steps-v3&feature=local-import-queue-v1&feature=base-product-time-all-v1&feature=jobs-sku-thumb-v1&feature=size-chart-last-image-v1&feature=watermark-redesign-v1&feature=mabang-account-list-v1&feature=worker-per-account-v1&feature=mabang-account-ui-v4&feature=import-headed-window-v1&feature=base-color-follow-images-v1&feature=page-import-worker-standby-v2&feature=store-template-duplicate-v1&feature=store-template-account-v1&feature=hide-fill-missing-batch-v1&feature=base-product-rerecognize-v1&feature=category-quick-template-values-v1&feature=github-updates-v1&feature=cross-border-mode-v1&feature=stale-select-text-fallback-v1&feature=cnsc-price-section-hide-v1&feature=color-quick-pick-v1&feature=color-quick-select-all-v1&feature=color-dropdown-live-refresh-v1&feature=skills-management-v1&feature=title-workbench-v1&feature=quick-template-reliable-v1&feature=base-common-sizes-v1&feature=base-batch-cost-v1&feature=retry-title-skill-v1&feature=variant-image-thumb-picker-v2&feature=description-image-width-log-v1&feature=description-image-width-fix-v1&feature=local-import-duplicate-guard-v1&feature=base-save-queue-v1&feature=base-selection-clear-on-nav-v2&feature=copy-batch-delete-v1&feature=copy-image-asset-root-v1&feature=title-ai-suggest-v2&feature=title-audience-detect-v1&feature=update-reminder-v2&feature=media-step-status-v1&feature=base-product-audience-v1&feature=base-selection-clear-on-filter-v1&feature=base-product-filter-axes-v1&feature=local-import-transparent-skip-v1&feature=cnsc-3pf-mode-v1&feature=worker-heartbeat-v1&feature=cnsc-3pf-template-pricing-v3&feature=cnsc-3pf-import-preview-v1&feature=excel-import-v2&feature=store-template-category-persist-v1&feature=size-chart-template-keep-v1&feature=description-media-market-limit-v1&feature=category-profile-scope-v1&feature=default-sku-prefill-v1&feature=promotion-store-scope-v1&feature=color-pass-accuracy-v1&feature=store-template-site-isolation-v1&feature=template-custom-option-id-guard-v1&feature=api-action-recovery-v1&feature=store-template-fixed-title-v1&feature=base-product-sku-search-v10"></script>
     <script src="/title-workbench.js?v=7-children-20261102"></script>
   </body>
 </html>

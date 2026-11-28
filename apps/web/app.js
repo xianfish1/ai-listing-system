@@ -44,6 +44,9 @@ const state = {
   baseProductStageFilter: "",
   baseProductAudienceFilter: "",
   baseProductTimeFilter: "today", // 默认只看今天更新的商品；点 chip 切到昨天/最近一周/全部
+  // 「货号」搜索框：按主 SKU / 分组 SKU 模糊匹配，和其它筛选轴取交集。
+  baseProductSearchQuery: "",
+  baseProductSearchTimer: null,
   selectedStoreTemplates: new Set(),
   selectedListingCopies: new Set(),
   selectedFileGroup: "",
@@ -3162,6 +3165,10 @@ async function refreshBaseProductsAfterImport(mainSkus = []) {
     state.baseProductStageFilter = "";
     state.baseProductAudienceFilter = "";
     state.baseProductCategoryFilter = "";
+    // 货号搜索也会把新导入的商品藏起来，一并清掉并同步输入框。
+    state.baseProductSearchQuery = "";
+    const searchInput = $("base-product-search");
+    if (searchInput instanceof HTMLInputElement) searchInput.value = "";
     renderBaseProducts();
   }
   const first = imported[0];
@@ -4566,6 +4573,12 @@ function renderBaseProducts() {
     const filterLabel = activeBaseProductFilterLabel();
     const scoped = presetLabel && presetLabel !== "全部" ? presetLabel : "";
     const categoryText = filterLabel ? `「${escapeHtml(filterLabel)}」` : "";
+    // 货号搜索框有关键词时，空态直接报「货号匹配 xxx」，比「没有符合条件的」更好定位。
+    const searchQuery = String(state.baseProductSearchQuery || "").trim();
+    if (searchQuery) {
+      target.innerHTML = `<div class="empty-state">${scoped}${categoryText}没有货号匹配「${escapeHtml(searchQuery)}」的基础商品。</div>`;
+      return;
+    }
     target.innerHTML = `<div class="empty-state">${scoped}${categoryText}没有${scoped ? "更新的" : "符合条件的"}基础商品。</div>`;
     return;
   }
@@ -4617,11 +4630,42 @@ function renderBaseProducts() {
         <button type="button" class="danger" data-delete-base-product="${escapeHtml(product.id)}">删除</button>
       </div>
     `;
+    // 记录按下位置：拖动选择文字（复制标题/货号）时松手也会触发 click，
+    // 不能把这类 click 当成「选中卡片」。
+    let cardPressPoint = null;
+    card.addEventListener("pointerdown", (event) => {
+      delete card.dataset.skipSelectionToggle;
+      cardPressPoint = { x: event.clientX, y: event.clientY };
+    });
+    card.addEventListener("pointerup", (event) => {
+      const start = cardPressPoint;
+      cardPressPoint = null;
+      if (!start) return;
+      if (Math.abs(event.clientX - start.x) > 4 || Math.abs(event.clientY - start.y) > 4) {
+        card.dataset.skipSelectionToggle = "1";
+      }
+    });
+    card.addEventListener("pointercancel", () => {
+      cardPressPoint = null;
+    });
     card.addEventListener("click", (event) => {
       // 点卡片内按钮或勾选框时不触发单选；勾选框由 change 委托处理多选。
       if (event.target instanceof HTMLElement && event.target.closest("button, .product-card-check, input")) return;
+      // 刚拖选过文字：跳过这一次 click（拖选的 click 和普通点击长得一样）。
+      if (card.dataset.skipSelectionToggle === "1") {
+        delete card.dataset.skipSelectionToggle;
+        return;
+      }
+      // 双击/三击选词、或卡片内有文字选区时也保留选区，不切换勾选（方便复制）。
+      if (event.detail > 1) return;
+      const selection = window.getSelection();
+      if (selection && !selection.isCollapsed && String(selection).trim() && card.contains(selection.anchorNode)) {
+        return;
+      }
       // 以勾选状态为准的 toggle：已勾选的卡再点 = 取消勾选（若它还是当前单选卡，
       // 单选一并取消）；未勾选的卡点一下 = 勾选并设为单选。
+      // 这里只改状态和这一张卡的 DOM，不整表重画：整表重画会替换节点，
+      // 把正在双击选词 / 拖选复制的文字选区一起销毁（现场「想复制标题却选不上」）。
       if (state.selectedBaseProducts.has(product.id)) {
         state.selectedBaseProducts.delete(product.id);
         if (state.selectedBaseProductId === product.id) state.selectedBaseProductId = "";
@@ -4629,7 +4673,22 @@ function renderBaseProducts() {
         state.selectedBaseProducts.add(product.id);
         state.selectedBaseProductId = product.id;
       }
-      renderBaseProducts();
+      const isChecked = state.selectedBaseProducts.has(product.id);
+      card.classList.toggle("checked", isChecked);
+      if (isChecked) {
+        if (state.selectedBaseProductId === product.id) {
+          // 单选高亮只有一张卡：把别的卡的 selected 摘掉。
+          document.querySelectorAll(".product-card.selected").forEach((other) => {
+            if (other !== card) other.classList.remove("selected");
+          });
+        }
+        card.classList.add("selected");
+      } else {
+        card.classList.remove("selected");
+      }
+      const checkbox = card.querySelector("[data-base-product-select]");
+      if (checkbox instanceof HTMLInputElement) checkbox.checked = isChecked;
+      renderBaseProductBatchBar();
     });
     target.appendChild(card);
   }
@@ -4685,8 +4744,47 @@ function matchesBaseTimeFilter(product) {
   return dateFallsInPreset(stamp, state.baseProductTimeFilter);
 }
 
+// 货号搜索：先归一化（大写、去掉空格 / 横线 / 下划线等分隔符），再按「包含」匹配，
+// 长货号（≥4 位）额外允许字符按顺序出现（h580 → HN0580），少记一位也能搜到。
+// 阈值取 4 是避免 3 位短词把一大片货号都当成模糊命中；空格分隔多个词时要求每个词都命中。
+function normalizeBaseSkuPart(value) {
+  return String(value || "").toUpperCase().replace(/[\s\-_/\\]+/g, "");
+}
+
+function baseSkuSearchTokens() {
+  return String(state.baseProductSearchQuery || "")
+    .trim()
+    .split(/\s+/)
+    .map(normalizeBaseSkuPart)
+    .filter(Boolean);
+}
+
+function baseSkuTokenMatches(field, token) {
+  if (!field || !token) return false;
+  if (field.includes(token)) return true;
+  if (token.length < 4) return false;
+  let cursor = 0;
+  for (const char of token) {
+    const found = field.indexOf(char, cursor);
+    if (found === -1) return false;
+    cursor = found + 1;
+  }
+  return true;
+}
+
+function matchesBaseProductSearch(product) {
+  const tokens = baseSkuSearchTokens();
+  if (!tokens.length) return true;
+  // 货号 = 主 SKU（main_sku）；没分配主 SKU 的商品用分组 SKU（group_id）兜底，
+  // 卡片上「主 SKU」显示的也是这个兜底值。
+  const fields = [normalizeBaseSkuPart(product?.main_sku), normalizeBaseSkuPart(product?.group_id)].filter(Boolean);
+  if (!fields.length) return false;
+  return tokens.every((token) => fields.some((field) => baseSkuTokenMatches(field, token)));
+}
+
 function matchesBaseProductFilters(product) {
   // 三个分类轴 + 时间窗全部取交集：选了男童之后「首次导入」还留着一起筛（现场要求）。
+  if (!matchesBaseProductSearch(product)) return false;
   if (state.baseProductStageFilter && baseProductStage(product) !== state.baseProductStageFilter) {
     return false;
   }
@@ -4827,7 +4925,17 @@ function renderBaseProductFilterBar() {
   if (!categoryRow) return;
   // 分类 chip 的计数按当前时间窗内的商品算，并且「其它两个轴已生效」：
   // 选了男童之后，阶段 chip 显示的就是「男童里各阶段的张数」，点下去数量对得上。
-  const inTime = state.baseProducts.filter(matchesBaseTimeFilter);
+  // 货号搜索也算在内：搜「AL13」时计数/「全部」数字就是搜出来的那几张。
+  const inTime = state.baseProducts.filter((product) => matchesBaseTimeFilter(product) && matchesBaseProductSearch(product));
+  // 搜索框右侧提示命中的张数（没输入时不显示）——按全部筛选条件算，
+  // 和下面实际渲染出来的卡片数一致；叠加人群/阶段后也不会对不上。
+  const searchHint = $("base-product-search-hint");
+  if (searchHint) {
+    const query = String(state.baseProductSearchQuery || "").trim();
+    const matched = query ? state.baseProducts.filter(matchesBaseProductFilters).length : 0;
+    searchHint.hidden = !query;
+    searchHint.textContent = query ? `匹配 ${matched} 个` : "";
+  }
   const stageActive = String(state.baseProductStageFilter || "");
   const audienceActive = String(state.baseProductAudienceFilter || "");
   const categoryActive = String(state.baseProductCategoryFilter || "");
@@ -4880,9 +4988,19 @@ function renderBaseProductBatchBar() {
   if (!bar) return;
   const countEl = $("base-product-batch-count");
   const count = state.selectedBaseProducts.size;
+  const hasSelection = count > 0;
   if (countEl) countEl.textContent = `已选 ${count} 个商品`;
-  bar.hidden = count === 0;
-  if (count > 0) void loadBaseRetrySkillOptions();
+  // 批量条常驻显示（现场要求不隐藏）：没勾选时把依赖勾选的动作置灰；
+  // 「全选当前列表」始终可点（列表为空时点了也不会有变化）。
+  bar.classList.toggle("base-product-batch-bar--active", hasSelection);
+  for (const control of bar.querySelectorAll("[data-base-batch-action]")) {
+    if (!(control instanceof HTMLButtonElement)) continue;
+    if (control.dataset.baseBatchAction === "select-all") continue;
+    control.disabled = !hasSelection;
+  }
+  const skillSelect = $("base-retry-skill");
+  if (skillSelect instanceof HTMLSelectElement) skillSelect.disabled = !hasSelection;
+  if (hasSelection) void loadBaseRetrySkillOptions();
 }
 
 // 切页时清掉商品勾选（多选 + 当前单选卡片）。只改已经渲染出来的勾选框和卡片类名，
@@ -14724,6 +14842,17 @@ document.addEventListener("change", (event) => {
 
 document.addEventListener("input", (event) => {
   const target = event.target;
+  if (target instanceof HTMLInputElement && target.id === "base-product-search") {
+    // 货号搜索：输入停顿 120ms 再整表重画，商品多时逐字重画会卡。
+    state.baseProductSearchQuery = target.value || "";
+    window.clearTimeout(state.baseProductSearchTimer);
+    state.baseProductSearchTimer = window.setTimeout(() => {
+      // 搜索会换一批可见商品，勾选跟着清（与时间/分类筛选一致）。
+      clearBaseProductSelectionForFilter();
+      renderBaseProducts();
+    }, 120);
+    return;
+  }
   if (target instanceof HTMLElement && target.matches("#description-profile-dialog [data-section-body], #description-profile-dialog [data-section-hint], #description-profile-dialog [data-section-title], #description-profile-dialog [data-section-emoji], #description-profile-dialog [data-row-emoji], #description-profile-dialog [data-row-label], #description-profile-dialog [data-row-value], #description-profile-dialog [data-row-hint], #description-profile-dialog [data-row-slot], #description-profile-dialog [data-row-field], #description-profile-dialog [data-row-source]")) {
     renderProfilePreview();
     return;
