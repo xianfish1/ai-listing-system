@@ -576,22 +576,63 @@ def test_collect_watermarks_failure_keeps_the_previous_catalog(monkeypatch: pyte
         server.server_close()
 
 
-def test_collect_watermarks_rejects_a_page_from_another_store(monkeypatch: pytest.MonkeyPatch) -> None:
+def _register_store(store_id: str, name: str, account_id: str) -> None:
+    """登记店铺备案（水印目录按账号存，账号从店铺备案里解析）。"""
+    storage.upsert_mabang_store_options(
+        {"store_name": name, "mabang_store_id": store_id, "account_id": account_id},
+        account_id=account_id,
+    )
+
+
+def test_collect_watermarks_accepts_a_page_from_another_store_of_the_same_account(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """水印模板是马帮公司级的：同账号里停在别的店铺编辑页也能刷新这份目录（本土/跨境通用）。"""
+    _register_store(WATERMARK_STORE_ID, "PH 测试店铺", "acct-1")
+    _register_store("store-b", "同账号另一个店", "acct-1")
     _seed_watermark_catalog()
     _stub_collect(monkeypatch, {
         "ok": True,
         "status": "ok",
         "catalog_loaded": True,
-        "store": {"id": "some-other-store", "name": "别的店"},
-        "templates": [{"template_id": "wm-x", "name": "别的店水印"}],
+        "store": {"id": "store-b", "name": "同账号另一个店"},
+        "templates": [{"template_id": "wm-x", "name": "同账号水印"}],
+    })
+    server, base_url = _start_api()
+    try:
+        status, payload = _collect(server, base_url)
+
+        assert status == 200
+        assert payload["count"] == 1
+        assert payload["page_store"] == {"id": "store-b", "name": "同账号另一个店", "same_store": False}
+        assert payload["scope"] == "account"
+        # 同账号的另一个店铺立刻看到同一份目录。
+        _, listed = _request_json("GET", f"{base_url}/api/store-watermarks?store_id=store-b")
+        assert [item["template_id"] for item in listed["items"]] == ["wm-x"]
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+def test_collect_watermarks_rejects_a_page_from_another_account(monkeypatch: pytest.MonkeyPatch) -> None:
+    """页面属于另一个马帮账号时必须拦住：否则会把别人公司的水印写进这个账号的目录。"""
+    _register_store(WATERMARK_STORE_ID, "PH 测试店铺", "acct-1")
+    _register_store("store-c", "别的账号的店", "acct-2")
+    _seed_watermark_catalog()
+    _stub_collect(monkeypatch, {
+        "ok": True,
+        "status": "ok",
+        "catalog_loaded": True,
+        "store": {"id": "store-c", "name": "别的账号的店"},
+        "templates": [{"template_id": "wm-other", "name": "别人公司的水印"}],
     })
     server, base_url = _start_api()
     try:
         status, payload = _collect(server, base_url)
 
         assert status == 422
-        assert "不是要采集的店铺" in payload["error"]
-        assert "别的店" in payload["error"]
+        assert "另一个马帮账号" in payload["error"]
+        assert "别的账号的店" in payload["error"]
         _, listed = _request_json("GET", f"{base_url}/api/store-watermarks?store_id={WATERMARK_STORE_ID}")
         assert [item["template_id"] for item in listed["items"]] == ["wm-old"]
     finally:

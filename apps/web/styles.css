@@ -8073,3 +8073,26 @@ button.mini {
   outline-offset: 2px;
 }
 
+/* 促销活动过期提醒（模板卡片徽标 + 副本表格小标，2026-11-29） */
+.template-readiness-badge.is-expired {
+  border-color: rgba(190, 40, 40, 0.45);
+  color: #b3261e;
+  background: rgba(190, 40, 40, 0.08);
+}
+
+.promotion-chip {
+  display: inline-block;
+  margin-left: 6px;
+  padding: 1px 6px;
+  border-radius: 999px;
+  border: 1px solid rgba(190, 40, 40, 0.35);
+  color: #b3261e;
+  background: rgba(190, 40, 40, 0.07);
+  font-size: 11px;
+  line-height: 16px;
+  white-space: nowrap;
+}
+
+.promotion-chip.is-expired {
+  font-weight: 600;
+}

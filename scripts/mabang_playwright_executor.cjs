@@ -1859,7 +1859,7 @@ async function setField(frame, labels, value, options = {}) {
     if (cleanText(actual) !== cleanText(editorValue)) {
       throw new BlockedError('field_value_not_verified', { field: labels[0] });
     }
-    return;
+    return field;
   }
   if (!(await isFillableControl(field))) {
     throw new BlockedError('field_not_editable', { field: labels[0] });
@@ -1879,7 +1879,7 @@ async function setField(frame, labels, value, options = {}) {
     }
   }
   await field.fill(expected);
-  if (await waitForFieldValue(field, expected, options.verifyTimeoutMs)) return;
+  if (await waitForFieldValue(field, expected, options.verifyTimeoutMs)) return field;
   const actual = await field.inputValue().catch(() => field.innerText().catch(() => ''));
   const control = await field
     .evaluate((node) => ({
@@ -1916,9 +1916,23 @@ async function setField(frame, labels, value, options = {}) {
       expected_length: expectedText.length,
       actual_length: actualText.length,
     });
-    return;
+    return field;
   }
   throw new BlockedError('field_value_not_verified', { field: labels[0] });
+}
+
+// 让「填进去的值」真正变成页面自己的值：Element UI 的输入组件在 blur 时才把
+// 输入框内容确认给表单，必填校验也挂在 blur 上。只 fill() 不 blur 的后果是
+// 页面上看着有值、页面模型仍是空，之后任何一次重渲染都把输入框刷回空，保存闸
+// 看到「请输入商品标题」就整单拦下（现场 2026-11-28：AL1345 / AL1418 / AL1499
+// 共 5 次，点「再次尝试」换一次页面时序就好了）。blur 是"用户确认"信号，
+// 同时会让 Element 按当前值重新校验，把旧的行内错误清掉。
+async function commitFieldBlur(field) {
+  if (!field) return false;
+  await field.focus({ timeout: 3000 }).catch(() => {});
+  await field.blur().catch(() => {});
+  await sleep(120);
+  return true;
 }
 
 // 马帮/Element UI 的下拉是 toggle：已经展开时再点一次 trigger 会把它关掉。
@@ -3635,6 +3649,9 @@ async function setCategoryAttributes(frame, task, page) {
     const customOptionUiFailures = [];
     // 自选值真的走 UI 添加成功的字段（执行详情里能看见"这个值是添加出来的"）。
     const customOptionUiApplied = [];
+    // 单选控件上只能用「自填文本」落值的字段：页面枚举里确实没有这个值，马帮保存时
+    // 这一格有可能存成空（现场 2026-11-28：衣领类型 Crew Neck）。如实报出来让操作员核对。
+    const customSingleSelectRisky = [];
     // 可选属性填不进去（页面不唯一/选项找不到/回读对不上）：可选属性不值得阻断整单，
     // 记成 warning 让草稿照样存下来，同时把原因写进执行详情供人工补填。
     // 必填属性仍然照旧抛错——缺必填的刊登存下来也是废的。
@@ -3682,6 +3699,14 @@ async function setCategoryAttributes(frame, task, page) {
       const batch = [];
       for (const field of resolvedFields) {
         if (field.unresolved_option_id) continue;
+        // 有枚举的单选、值又不在快照枚举里（select_custom，例如衣领类型 Crew Neck）：
+        // **不要**在批量里把裸文本写进模型——保存后它会变成一个"悬空值"（草稿里那格
+        // 显示为空、模型里 custom 分组也是空的，2026-11-28 现场）。留给逐字段循环：
+        // 展开可选属性 → 点页面枚举里的真实选项，点不到再走「添加自填选项」。
+        if (field.input_kind === 'select_custom'
+          && (field.option_labels || []).some((value) => String(value || '').trim())) {
+          continue;
+        }
         const fieldLabels = (field.option_labels || []).map((value) => String(value || '')).filter(Boolean);
         // 只把"真的匹配到页面枚举的 id"加进去：匹配不上的原值（模板存的那串选项 id）混进来
         // 会在页面表单模型里同时留下 id 和文字两个值。文字由 option_labels 提供。
@@ -3770,10 +3795,11 @@ async function setCategoryAttributes(frame, task, page) {
       // 必填属性则明确报"字段未找到"，而不是退回整页扫描后报一个误导性的
       // field_not_unique（count 会是全页输入框数量）。
       let present = await timeIt('presence_ms', () => findFormItemPresent(frame, labels, 2000, matchOptions));
-      if (!present && (siteMode || threePfMode) && !hiddenExpanded) {
-        // 只尝试展开一次：展开后仍在的属性才是真的不在表单上。
+      if (!present && (siteMode || threePfMode) && (!hiddenExpanded || deferredToUi)) {
+        // 展开「显示所有属性」；deferredToUi 的字段即使前面已经展开过也再试一次——
+        // 页面还没渲染完时那次展开会返回 false，之后就会把可选属性（衣领类型）当"页面没有"。
         hiddenExpanded = true;
-        if (await expandHiddenCategoryAttributes(frame, 2000, { broad: threePfMode })) {
+        if (await expandHiddenCategoryAttributes(frame, 4000, { broad: threePfMode })) {
           present = await timeIt('presence_ms', () => findFormItemPresent(frame, labels, 2000, matchOptions));
         }
       }
@@ -3801,7 +3827,11 @@ async function setCategoryAttributes(frame, task, page) {
       // 保存时真正使用的数据源，也是唯一能可靠落值的通道（点选的多选值只停在"待提交"态，
       // 收面板或属性区重渲染就丢）。这里只等 UI 把它渲染出来；渲染不出来才退回点选/打字路径。
       const candidateValues = [...(field.matched_value_ids ?? field.value_ids ?? []), ...optionLabels].filter(Boolean);
-      if (siteMode && candidateValues.length) {
+      // 值不在快照枚举里的单选：交给下面的 UI 通道（先点页面真实选项，再退回自填选项）。
+      const deferredToUi = siteMode
+        && field.input_kind === 'select_custom'
+        && optionLabels.length > 0;
+      if (siteMode && candidateValues.length && !deferredToUi) {
         const applied = prewritten.get(String(field.field_id)) || await applyAttributeValueInModel(frame, field.field_id, candidateValues);
         // 点选/UI 分支的现场取证：型号这类多选自选值「模型写了也算填好」曾经把草稿存成空，
         // 这条日志把每个字段实际走的证据摆出来（option_count=页面模型里的选项数）。
@@ -3825,6 +3855,81 @@ async function setCategoryAttributes(frame, task, page) {
             (applied.labels && applied.labels.length) ? applied.labels
               : (optionLabels.length ? optionLabels : candidateValues)
           ).map((value) => String(value || '')).filter(Boolean);
+          // 单选控件上「页面枚举里可能真有这个值」：衣领类型 Crew Neck 在页面上就是枚举项，
+          // 只是副本快照是旧的没记它 → 模型写入走了「自填」。自填文本对**有枚举的单选**
+          // 马帮保存时会丢（草稿里这一格就是空的，2026-11-28 现场）。所以单选先按文字在
+          // 页面下拉里点一次真实枚举项；点不到（页面确实没有这个选项）才继续走自填。
+          const tagControl = await isTagBasedControl(present);
+          if (!tagControl) {
+            // 单选（衣领类型这类）：两条路
+            //   ① 页面枚举里真有这个值 → 点真实选项（保存成平台选项 id，最稳）；
+            //   ② 枚举里没有 → 只能让马帮服务端登记自选项（「添加自填选项」）。
+            // 只把文本写进页面模型是不够的：保存后控件回读不到，草稿里这一格会变空
+            // （现场 2026-11-28：Crew Neck 草稿里为空、模型 custom 分组也是空的）。
+            let enumPick = null;
+            try {
+              // 先清掉刚写进模型的裸文本：控件里还显示着它时，点选会被当成 already_selected
+              // 直接返回，真实枚举项/自填通道都不会被走到（2026-11-28 实测）。
+              await clearAttributeValueInModel(frame, String(field.field_id)).catch(() => null);
+              await sleep(120);
+              const freshItem = await formItemForLabels(frame, labels).catch(() => null) || present;
+              enumPick = await selectElementOption(frame, labels, customTargets, { ...matchOptions, knownItem: freshItem });
+            } catch (error) {
+              enumPick = null;
+              attrPickDebug({
+                phase: 'custom_value_enum_attempt_failed',
+                field: labels[0], field_id: String(field.field_id),
+                reason: classifyError(error),
+              });
+            }
+            if (enumPick) {
+              attrPickDebug({
+                phase: 'custom_value_resolved_to_enum',
+                field: labels[0], field_id: String(field.field_id),
+                targets: customTargets, method: enumPick.method || '',
+              });
+              results[field.field_id] = {
+                value: customTargets.join(', '),
+                method: 'select',
+                note: 'enum_option_preferred_over_custom',
+              };
+              continue;
+            }
+            // forceAdd：先撤掉"只写模型"造出来的假值，再走「搜索 → 添加自填选项 → ✔」，
+            // 成功后把马帮登记过的选项 id 写回模型。
+            const viaCustomUi = await timeIt('custom_ui_ms', () => applyCustomValueThroughUi(
+              frame,
+              labels,
+              customTargets,
+              matchOptions,
+              present,
+              { forceAdd: true, fieldId: String(field.field_id) },
+            ).catch((error) => ({ failed: true, error: classifyError(error) })));
+            if (viaCustomUi && !viaCustomUi.failed) {
+              customOptionUiApplied.push({
+                field: labels[0],
+                field_id: String(field.field_id),
+                method: viaCustomUi.method || '',
+                value: customTargets.join(', '),
+              });
+              results[field.field_id] = {
+                value: viaCustomUi.value || customTargets.join(', '),
+                method: 'custom_option_ui',
+                note: viaCustomUi.method || '',
+              };
+              continue;
+            }
+            const reason = (viaCustomUi && viaCustomUi.error) || 'custom_option_ui_failed';
+            customSingleSelectRisky.push({
+              field: labels[0],
+              field_id: String(field.field_id),
+              value: customTargets.join(', '),
+              reason,
+            });
+            attrPickDebug({ phase: 'custom_option_single_select_failed', field: labels[0], reason });
+            results[field.field_id] = { value: '', method: 'custom_option_ui_failed', note: reason };
+            continue;
+          }
           const registeredInModel = customTargets.length
             ? await registeredCustomOption(frame, String(field.field_id), customTargets).catch(() => null)
             : null;
@@ -3932,6 +4037,82 @@ async function setCategoryAttributes(frame, task, page) {
       // 触发器是 readonly 的 el-input__inner。对 readonly 控件 fill() 只会白等到超时
       // （现场：30s 后任务整单失败）。所以交给 selectElementOptionOrCustom 按控件
       // 本身决定——真文本框打字，下拉则选枚举、枚举里没有就走「添加自填选项」。
+      if (deferredToUi) {
+        const uiValues = optionLabels.length ? optionLabels : candidateValues;
+        // 先把"只写模型"造出来的悬空文本清掉：控件里还显示着它时，点选会被当成
+        // already_selected 直接返回，自填通道也不会触发（现场 2026-11-28 实测）。
+        await clearAttributeValueInModel(frame, String(field.field_id)).catch(() => null);
+        await sleep(150);
+        let picked = null;
+        try {
+          picked = await selectElementOption(frame, labels, uiValues, { ...matchOptions, knownItem: present });
+        } catch (error) {
+          if (!(error instanceof BlockedError) || error.message !== 'select_option_not_found') {
+            attrPickDebug({ phase: 'custom_value_enum_attempt_failed', field: labels[0], reason: classifyError(error) });
+          }
+        }
+        if (picked) {
+          results[field.field_id] = { value: uiValues.join(', '), method: 'select', note: 'enum_option_selected' };
+          continue;
+        }
+        // 枚举里没有：走「搜索 → 添加自填选项 → ✔」把值登记成马帮的选项，然后把登记后
+        // 的选项 id 写回模型（只登记不回写，草稿里这一格仍然是空的）。
+        // 注意别用 applyCustomValueThroughUi：它在衣领类型上会 custom_option_add_missed
+        // （现场 2026-11-28），并把清掉的假值又写回去。
+        // 新开的商品页在类目属性刚渲染完时，「添加自填选项」入口偶尔还没挂上：
+        // 重试几次（每次重新定位表单项），仍然失败才降级成"留空 + 风险提示"。
+        let added = null;
+        for (let attempt = 0; attempt < 3; attempt += 1) {
+          const addItem = await formItemForLabels(frame, labels).catch(() => null) || present;
+          added = await timeIt('custom_ui_ms', () => addCustomSelectOption(
+            frame,
+            addItem,
+            labels,
+            uiValues[0],
+            matchOptions,
+          ).catch((error) => ({ failed: true, error: classifyError(error) })));
+          if (added && !added.failed) break;
+          attrPickDebug({
+            phase: 'custom_option_add_retry',
+            field: labels[0], field_id: String(field.field_id),
+            attempt: attempt + 1, error: (added && added.error) || '',
+          });
+          await sleep(800);
+        }
+        if (added && !added.failed) {
+          const registered = await registeredCustomOption(frame, String(field.field_id), uiValues).catch(() => null);
+          const written = registered
+            ? await applyAttributeValueInModel(frame, String(field.field_id), [registered.value]).catch(() => null)
+            : null;
+          attrPickDebug({
+            phase: 'custom_value_added_to_model',
+            field: labels[0], field_id: String(field.field_id),
+            registered: Boolean(registered), written: Boolean(written && written.ok),
+            option_value: registered ? registered.value : '',
+          });
+          if (registered && written && written.ok) {
+            customOptionUiApplied.push({
+              field: labels[0], field_id: String(field.field_id),
+              method: (added.method || 'custom_option'), value: uiValues.join(', '),
+            });
+            results[field.field_id] = {
+              value: uiValues.join(', '),
+              method: 'custom_option_ui',
+              note: 'custom_option_registered_and_written_back',
+            };
+            continue;
+          }
+        }
+        const reason = (added && added.error) || (added && added.failed ? 'custom_option_writeback_failed' : 'custom_option_ui_failed');
+        // 自填通道失败：把控件/模型里的值清空，别留一个「看起来有值、保存后变空」的悬空文本。
+        await clearAttributeValueInModel(frame, String(field.field_id)).catch(() => null);
+        customSingleSelectRisky.push({
+          field: labels[0], field_id: String(field.field_id), value: uiValues.join(', '), reason,
+        });
+        attrPickDebug({ phase: 'custom_option_single_select_failed', field: labels[0], reason });
+        results[field.field_id] = { value: '', method: 'custom_option_ui_failed', note: reason };
+        continue;
+      }
       const isTextInput = String(field.input_kind || field.type || '').toLowerCase() === 'text' || !optionLabels.length;
       if (isTextInput) {
         // 文本/自定义值通道要的是**人能读的文字**：模板存成选项 id 的（型号）已经在
@@ -3966,6 +4147,9 @@ async function setCategoryAttributes(frame, task, page) {
       ...(unresolvedOptionIdFields.length ? { unresolved_option_id: unresolvedOptionIdFields } : {}),
       ...(customOptionUiFailures.length ? { custom_option_ui_failed: customOptionUiFailures } : {}),
       ...(customOptionUiApplied.length ? { custom_option_ui: customOptionUiApplied } : {}),
+      // 单选只能按"自填文本"写、页面枚举里没有该值的字段：保存后这一格可能是空的，
+      // 报出来让操作员在草稿里核对（现场 2026-11-28 衣领类型 Crew Neck）。
+      ...(customSingleSelectRisky.length ? { custom_single_select_risky: customSingleSelectRisky } : {}),
     });
     return results;
   }
@@ -3982,10 +4166,89 @@ async function setCategoryAttributes(frame, task, page) {
 async function fillBasicInfo(frame, task) {
   const basic = task.basic_info || {};
   await setField(frame, ['Parent SKU'], basic.parent_sku);
-  await setField(frame, [TEXT.title], basic.title, { fitToMaxLength: true });
+  // 标题写完立刻 blur 确认：马帮的标题是异步回写的 v-model，只 fill() 的话页面模型
+  // 可能一直没收到（见 commitFieldBlur 注释）。这一步顺手把「请输入商品标题」这类
+  // 旧错误清掉，省得保存闸拿一条过期的行内错误把整单拦下。
+  const titleField = await setField(frame, [TEXT.title], basic.title, { fitToMaxLength: true });
+  await commitFieldBlur(titleField);
   await setField(frame, [TEXT.description], basic.description);
   emit('stage', { stage: 'fill_basic_info', ok: true });
   return { parent_sku: true, title: true, description: true };
+}
+
+// 保存前最后一次对基础信息：页面在「选完店铺/类目 + 属性面板异步回来」时还会重渲染
+// 一轮基础信息卡片，标题（还有 Parent SKU）可能被刷回空。标题是最早写的一格，
+// 也是唯一会被这一轮重渲染吃掉的一格，所以保存前单独再确认一次：值还在就只 blur，
+// 值没了就补回去再 blur（补完还空着就交给保存闸如实报错，这里不吞错误）。
+// 只碰标题和 Parent SKU：描述里已经插好的图和尺码表不能被重写。
+async function reassertBasicInfo(frame, task) {
+  const basic = task.basic_info || {};
+  const matches = (actual, wanted) => {
+    const a = cleanText(actual);
+    const w = cleanText(wanted);
+    if (!w) return true;
+    if (a === w) return true;
+    // 页面按自己的 maxLength 截断时，回读是期望值的前缀（与 setField 的放行规则一致）。
+    return a.length >= 20 && w.startsWith(a);
+  };
+  const outcome = { title: 'ok', parent_sku: 'ok', rounds: 0, status: '' };
+  const checks = [
+    // Parent SKU 只在「空了」时补：马帮改父 SKU 会连带重算子 SKU，值只要还在就不动它。
+    ['parent_sku', ['Parent SKU'], String(basic.parent_sku || ''), { onlyIfEmpty: true }],
+    ['title', [TEXT.title], String(basic.title || ''), { fitToMaxLength: true }],
+  ];
+  for (const [key, labels, wanted, options] of checks) {
+    if (!wanted) continue;
+    let state = 'ok';
+    // 只认「自身 label 命中」的表单项：uniqueField 找不到表单项时会退化成整页找输入框，
+    // 那一退就会把值写进别的格子（现场验证：父 SKU 那一格缺失时写进了标题）。
+    const item = await formItemForLabels(frame, labels).catch(() => null);
+    if (!item) {
+      // 这一页没有这个表单项（跨境页面结构不同）：不补值也不报警，交给保存闸判断。
+      outcome[key] = 'not_found';
+      continue;
+    }
+    for (let round = 1; round <= 2; round += 1) {
+      outcome.rounds = Math.max(outcome.rounds, round);
+      let field;
+      try {
+        field = await uniqueField(frame, labels, undefined, { knownItem: item });
+      } catch (error) {
+        // 页面正处在重渲染/这一格里出现多个输入框：记下来交回保存闸判断，不在这里制造新错误。
+        state = 'unavailable';
+        break;
+      }
+      const current = cleanText(await field.inputValue().catch(() => ''));
+      if (matches(current, wanted)) {
+        if (state === 'ok') state = current === cleanText(wanted) ? 'ok' : 'truncated_by_page';
+        await commitFieldBlur(field);
+        break;
+      }
+      if (options.onlyIfEmpty && current) {
+        // 有值但和期望不一致：父 SKU 不动（改它会连带重算子 SKU），只 blur 确认一次。
+        state = 'kept_existing';
+        await commitFieldBlur(field);
+        break;
+      }
+      state = current ? 'restored' : 'refilled';
+      try {
+        const filled = await setField(frame, labels, wanted, { ...options, knownItem: item });
+        await commitFieldBlur(filled);
+      } catch (error) {
+        state = 'refill_failed';
+        break;
+      }
+      // 给页面一点时间把模型写回再复核第二轮：写完立刻被重渲染吃掉的情况要能看出来。
+      await sleep(600);
+    }
+    outcome[key] = state;
+    // 只有"真的补过值"才降级成 warning：没找到这一格 / 多个输入框属于观察项，
+    // 不该把本来干净的草稿标成 saved_with_warnings。
+    if (state === 'refilled' || state === 'restored' || state === 'refill_failed') outcome.status = 'warning';
+  }
+  attrPickDebug({ phase: 'reassert_basic_info', ...outcome });
+  emit('stage', { stage: 'reassert_basic_info', ok: true, ...outcome });
+  return outcome;
 }
 
 async function uploadFiles(input, paths) {
@@ -4970,19 +5233,84 @@ async function insertDescriptionProductImages(frame, editorId, wantedUrls, ensur
 // 撤销次数按这批最多插进去的图数封顶：多按会把正文的文字一起撤掉。
 // baseline（插图前的快照 { urls, textLength }）在的时候，除了张数回到 expectedCount，
 // 还要核对原有的图仍在、正文没变短，才算真的恢复——张数变少也可能是撤过头了。
-async function undoDescriptionInserts(frame, editor, editorId, expectedCount, insertedCount = 0, baseline = null) {
-  const attempts = Math.max(3, Math.min(20, Number(insertedCount) + 2));
+//
+// 2026-11-28 现场（TH_1JH / AL1393）：尺码表上传落到了正文最前面，撤销按 3 次都没生效，
+// 图只能留在原处，整步降级成 description_size_chart_position_not_at_tail。根因是「图已经
+// 出现在 DOM 里」不等于「这一步已经进了撤销栈」——wangEditor 的历史是异步压栈的，上传
+// 落图到压栈之间按下的 Ctrl+Z 全打在空栈上。所以这里先静置一下、多按几次并逐次复核；
+// 还是撤不掉就把这批新图直接从编辑器 DOM 里摘掉兜底（正文本来就是 wangEditor 的
+// contenteditable DOM，markDescriptionSizeChart 也是直接改它的属性，摘图不影响正文和旧图）。
+//
+// 返回 { ok, method, removed }：method 用来区分是撤销生效还是走了 DOM 兜底，
+// 调用方把它写进 method 字符串，下次现场一眼能看出走的哪条路。
+async function undoDescriptionInserts(frame, editor, editorId, expectedCount, inserted = 0, baseline = null) {
+  const insertedUrls = (Array.isArray(inserted) ? inserted : []).filter(Boolean).map(String);
+  const insertedCount = insertedUrls.length || Number(inserted) || 0;
+  const attempts = Math.max(4, Math.min(20, insertedCount + 3));
   const undoShortcut = descriptionUndoShortcut(await descriptionPlatform(frame));
   const restored = async () => {
     const snapshot = await readDescriptionSnapshot(frame, editorId);
     return (snapshot.urls || []).length <= expectedCount && descriptionMediaBaselineRestored(snapshot, baseline);
   };
+  if (await restored()) return { ok: true, method: 'noop', removed: 0 };
+  // 让异步落图/历史压栈先完成，别把撤销全打在空栈上。
+  await sleep(350);
   for (let attempt = 0; attempt < attempts; attempt += 1) {
-    if (await restored()) return true;
+    if (await restored()) return { ok: true, method: 'undo', removed: 0 };
     await editor.press(undoShortcut).catch(() => {});
-    await sleep(200);
+    await sleep(300);
   }
-  return restored();
+  if (await restored()) return { ok: true, method: 'undo', removed: 0 };
+  // 撤销没生效：把这批新插的图从 DOM 摘掉，别让它们留在正文中间把描述切两半。
+  const removed = insertedUrls.length ? await removeDescriptionImages(frame, editorId, insertedUrls) : 0;
+  if (removed) {
+    await sleep(200);
+    if (await restored()) {
+      attrPickDebug({ phase: 'description_rollback', method: 'dom_remove', removed, attempts });
+      return { ok: true, method: 'dom_remove', removed };
+    }
+  }
+  attrPickDebug({ phase: 'description_rollback', method: 'failed', removed, attempts });
+  return { ok: false, method: 'failed', removed };
+}
+
+// 从描述编辑器 DOM 里摘掉指定的图：按整串地址或文件名比（CDN 换域名也认得出），
+// 只摘这批新插进去的地址，不碰正文和旧图；摘空的段落一起删掉，免得留下空行。
+async function removeDescriptionImages(frame, editorId, urls) {
+  const targets = (urls || []).filter(Boolean).map(String);
+  if (!targets.length) return 0;
+  return frame.evaluate(({ id, wanted }) => {
+    const editor = document.getElementById(id);
+    if (!editor) return 0;
+    const keyOf = (url) => {
+      const text = String(url || '');
+      try {
+        const parts = new URL(text).pathname.split('/');
+        return String(parts[parts.length - 1] || '').toLowerCase();
+      } catch (_error) {
+        const parts = text.split('#')[0].split('?')[0].split('/');
+        return String(parts[parts.length - 1] || '').toLowerCase();
+      }
+    };
+    const keys = wanted.map(keyOf).filter(Boolean);
+    const matches = (src) => {
+      const text = String(src || '');
+      if (wanted.includes(text)) return true;
+      const key = keyOf(text);
+      return Boolean(key) && keys.includes(key);
+    };
+    let removed = 0;
+    for (const image of [...editor.querySelectorAll('img')]) {
+      if (!matches(image.getAttribute('src'))) continue;
+      const holder = image.parentElement;
+      image.remove();
+      removed += 1;
+      if (holder && holder !== editor && !holder.querySelector('img') && !String(holder.textContent || '').trim()) {
+        holder.remove();
+      }
+    }
+    return removed;
+  }, { id: editorId, wanted: targets }).catch(() => 0);
 }
 
 async function appendDescriptionMediaOnce(frame, task) {
@@ -5053,9 +5381,13 @@ async function appendDescriptionMediaOnce(frame, task) {
           sizeChartExisting = [...existing, sizeChartUrl].filter(Boolean);
           sizeChartMethod = 'size_chart:upload';
         } else {
-          const undone = await undoDescriptionInserts(frame, editor, editorId, existing.length, 1, baseline);
-          if (undone) {
-            sizeChartMethod = 'size_chart:upload-reinsert';
+          const rollback = await undoDescriptionInserts(frame, editor, editorId, existing.length, [sizeChartUrl], baseline);
+          if (rollback.ok) {
+            // dom_removed：撤销没生效、改从 DOM 摘图。两种情况图都已经不在了，
+            // 下面按地址的批量插图会把尺码表插回正文末尾。
+            sizeChartMethod = rollback.method === 'dom_remove'
+              ? 'size_chart:upload-dom-removed'
+              : 'size_chart:upload-reinsert';
           } else {
             // 撤不回来就别再插第二张：留在原处，把位置问题作为警告交给运营。
             sizeChartExisting = [...existing, sizeChartUrl].filter(Boolean);
@@ -5161,10 +5493,10 @@ async function appendDescriptionMediaOnce(frame, task) {
       // 没人管会把描述切成两半，所以先撤干净再决定重试还是报错。
       failure = cleanText(error && error.message) || 'description_media_failed';
       evidence = { ...((error && error.details) || {}), failed_round: round + 1 };
-      const rolled = await undoDescriptionInserts(frame, editor, editorId, sizeChartExisting.length, pending.length, baseline);
-      rollbacks.push({ round: round + 1, ok: rolled, reason: failure });
-      evidence.rolled_back = rolled;
-      if (!rolled) {
+      const rollback = await undoDescriptionInserts(frame, editor, editorId, sizeChartExisting.length, expectedOrder, baseline);
+      rollbacks.push({ round: round + 1, ok: rollback.ok, method: rollback.method, reason: failure });
+      evidence.rolled_back = rollback.ok;
+      if (!rollback.ok) {
         rollbackFailed = true;
         break;
       }
@@ -5185,10 +5517,10 @@ async function appendDescriptionMediaOnce(frame, task) {
     } else {
       evidence = descriptionMediaPlacementEvidence(html, expectedOrder, sizeChartExisting);
     }
-    const undone = await undoDescriptionInserts(frame, editor, editorId, sizeChartExisting.length, pending.length, baseline);
-    rollbacks.push({ round: round + 1, ok: undone, reason: atTail ? 'tail_check_settled_failed' : 'tail_check_failed' });
-    evidence.rolled_back = undone;
-    if (!undone) {
+    const rollback = await undoDescriptionInserts(frame, editor, editorId, sizeChartExisting.length, expectedOrder, baseline);
+    rollbacks.push({ round: round + 1, ok: rollback.ok, method: rollback.method, reason: atTail ? 'tail_check_settled_failed' : 'tail_check_failed' });
+    evidence.rolled_back = rollback.ok;
+    if (!rollback.ok) {
       rollbackFailed = true;
       break;
     }
@@ -5438,13 +5770,17 @@ async function ensureDescriptionImageWidths(frame, options = {}) {
   const before = await waitForDescriptionImageSizes(frame);
   const widths = before.map((entry) => entry.width);
   if (!before.length) {
-    emit('stage', { stage: 'fix_description_image_widths', ok: true, skipped: 'no_description_images' });
-    return { status: 'skipped', reason: 'no_description_images' };
+    const skipped = { status: 'skipped', code: 'description_images_absent', reason: 'no_description_images' };
+    emit('stage', { stage: 'fix_description_image_widths', ok: true, ...skipped });
+    return skipped;
   }
   const tooSmall = before.filter((entry) => entry.width > 0 && entry.width < minWidth);
   if (!tooSmall.length) {
-    emit('stage', { stage: 'fix_description_image_widths', ok: true, skipped: 'widths_ok', widths });
-    return { status: 'skipped', reason: 'widths_ok', widths };
+    // 没图宽度 < 700 就什么都不做。必须带 code：只回 status=skipped 时存储层会把
+    // reason 丢掉，界面上就只剩英文「skipped」（操作员看不懂"这是失败还是没事"）。
+    const skipped = { status: 'skipped', code: 'description_image_widths_ok', reason: 'widths_ok', widths };
+    emit('stage', { stage: 'fix_description_image_widths', ok: true, ...skipped });
+    return skipped;
   }
 
   const dialog = await openDescriptionImageEditor(frame);
@@ -5535,6 +5871,9 @@ async function ensureDescriptionImageWidths(frame, options = {}) {
   }
   const result = {
     status: 'fixed',
+    // 「真的修了」也要留 code：存储层原先不认 fixed 状态，这条阶段会被整条丢掉，
+    // 操作员反而看不到「描述图宽度被自动改过」。
+    code: 'description_image_widths_fixed',
     target_width: targetWidth,
     count: after.length,
     before: widths,
@@ -5548,8 +5887,9 @@ async function ensureDescriptionImageWidths(frame, options = {}) {
 // 水印下拉里不是"模板"的那几行：管理入口和空态。匹配模板时必须排除。
 // （真实 markup：末尾一行是「水印模板管理」，模板列表为空时是一行「暂无水印模板」。）
 const WATERMARK_NON_TEMPLATE_ROWS = [
+  // 空态有两版文案：老皮肤「暂无水印模板」/ 真实页面（publish-ui）「暂无水印」。
+  /^暂无水印/,
   /水印模板管理/,
-  /暂无水印模板/,
   /Watermark template/i,
   /No watermark/i,
 ];
@@ -5569,7 +5909,51 @@ function resolveWatermarkTemplate(catalog, reference) {
 // renders the dropdown in a popper anywhere in the frame, so we accept the first
 // visible menu whose rows actually look like watermark options (an id attribute or
 // a thumbnail), which keeps other open pickers (类目 cascader, 尺码图 select) out.
-async function watermarkMenuOpen(frame, triggerLabel = TEXT.addWatermark) {
+// 真实页面的水印模板是**第一次打开下拉时才向服务端加载**的：菜单先出来、里面只有
+// 一行「暂无水印」，1~3 秒后才换成真正的模板行。开菜单后必须等真模板出现再点，
+// 否则会拿「暂无水印」当候选、报 watermark_template_not_found（目录明明有模板）。
+async function watermarkMenuRowNames(menu) {
+  const rows = menu.locator('[data-watermark-id],[data-watermark-name],[data-template-id],[data-watermarkid],.watermark-item,.watermark-list-item,.el-dropdown-menu__item');
+  const names = [];
+  for (let index = 0, count = await rows.count().catch(() => 0); index < count; index += 1) {
+    const name = cleanText(await rows.nth(index).innerText().catch(() => ''));
+    if (!name || WATERMARK_NON_TEMPLATE_ROWS.some((pattern) => pattern.test(name))) continue;
+    names.push(name);
+  }
+  return names;
+}
+
+async function waitForWatermarkMenuLoaded(frame, trigger, timeoutMs = 12000) {
+  const deadline = Date.now() + timeoutMs;
+  let menu = null;
+  let names = [];
+  while (Date.now() < deadline) {
+    menu = await watermarkMenuOpen(frame, TEXT.addWatermark, trigger);
+    if (menu) {
+      names = await watermarkMenuRowNames(menu);
+      if (names.length) return { menu, names, waited_ms: timeoutMs - (deadline - Date.now()) };
+    }
+    await sleep(200);
+  }
+  return { menu, names, waited_ms: timeoutMs };
+}
+
+async function watermarkMenuOpen(frame, triggerLabel = TEXT.addWatermark, trigger = null) {
+  // 真实页面同一时刻可能开着别的下拉（「AI作图」里也有一行「添加水印」）。Element UI
+  // 把菜单 id 写在触发器的 aria-controls 上，所以先按 id 精确认，认不到再退回扫描。
+  let preferredId = '';
+  try {
+    preferredId = cleanText(trigger && (await trigger.getAttribute('aria-controls')));
+  } catch (_error) {
+    preferredId = '';
+  }
+  if (preferredId) {
+    const preferred = frame.locator(`#${preferredId}`);
+    if ((await preferred.count().catch(() => 0)) && (await isVisible(preferred.first()))) {
+      const rows = preferred.first().locator('[data-watermark-id],[data-watermark-name],[data-template-id],[data-watermarkid],.watermark-item,.watermark-list-item,.el-dropdown-menu__item');
+      if (await rows.count().catch(() => 0)) return preferred.first();
+    }
+  }
   const candidates = [];
   for (const selector of ['.el-dropdown-menu', '[role="menu"]', '.el-select-dropdown__menu', '.el-select-dropdown']) {
     const menus = frame.locator(selector);
@@ -5627,11 +6011,11 @@ async function findWatermarkTrigger(frame) {
 // 打开「添加水印」下拉。真实页面上的 trigger 是 **click**（`el-dropdown trigger:"click"`），
 // hover 只是兼容兜底（有些皮肤的 dropdown 会挂 mouseenter）。
 async function openWatermarkMenu(frame, trigger, options = {}) {
-  if (await watermarkMenuOpen(frame)) return { method: 'already_open' };
+  if (await watermarkMenuOpen(frame, TEXT.addWatermark, trigger)) return { method: 'already_open' };
   const deadline = Date.now() + (options.timeoutMs ?? 6000);
   let method = 'click';
   await trigger.click({ timeout: 2000 }).catch(() => { method = ''; });
-  if (!(await watermarkMenuOpen(frame))) {
+  if (!(await watermarkMenuOpen(frame, TEXT.addWatermark, trigger))) {
     try {
       await trigger.hover({ timeout: 1500 });
       method = 'hover';
@@ -5640,11 +6024,34 @@ async function openWatermarkMenu(frame, trigger, options = {}) {
     }
   }
   while (Date.now() < deadline) {
-    const menu = await watermarkMenuOpen(frame);
+    const menu = await watermarkMenuOpen(frame, TEXT.addWatermark, trigger);
     if (menu) return { method, menu };
     await sleep(100);
   }
   throw new BlockedError('watermark_menu_not_visible', { method });
+}
+
+// 收菜单。真实页面的「添加水印」是 hover 型下拉：点一下关掉后，Playwright 的把鼠标
+// 停在触发器上又会把它重新悬停打开（现场 2026-11-28：产品图水印跑完菜单还留在页面上，
+// 后面的 SKU 表格点击被浮层挡住）。所以关完必须把鼠标挪开，再验一次。
+async function closeWatermarkMenu(frame, trigger) {
+  const page = (typeof frame.page === 'function' ? frame.page() : null) || null;
+  const isOpen = async () => Boolean(await watermarkMenuOpen(frame, TEXT.addWatermark, trigger).catch(() => null));
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    if (!(await isOpen())) return true;
+    await page?.keyboard?.press('Escape').catch(() => {});
+    await sleep(120);
+    await page?.mouse?.move(2, 2, { steps: 1 }).catch(() => {});
+    await sleep(150);
+    if (!(await isOpen())) return true;
+    if (trigger) {
+      await trigger.click({ timeout: 1500 }).catch(() => {});
+      await sleep(120);
+      await page?.mouse?.move(2, 2, { steps: 1 }).catch(() => {});
+      await sleep(150);
+    }
+  }
+  return !(await isOpen());
 }
 
 // Read the open watermark menu's rows as catalog entries. Each row maps to a
@@ -5961,11 +6368,16 @@ async function applyWatermark(frame, role, reference) {
   let applied = null;
   let trigger = null;
   try {
-    // 2) 打开「添加水印」下拉（真实页面 trigger=click），点名称唯一匹配的模板行。
+    // 2) 打开「添加水印」下拉（真实页面 trigger=click），等模板列表懒加载完，
+    //    再点名称唯一匹配的模板行。
     trigger = await findWatermarkTrigger(frame);
-    const opened = await openWatermarkMenu(frame, trigger);
-    const menu = opened.menu || await watermarkMenuOpen(frame);
+    await openWatermarkMenu(frame, trigger);
+    const loadedMenu = await waitForWatermarkMenuLoaded(frame, trigger);
+    const menu = loadedMenu.menu;
     if (!menu) throw new BlockedError('watermark_menu_not_visible', { role });
+    if (!loadedMenu.names.length) {
+      throw new BlockedError('watermark_menu_empty', { role, waited_ms: loadedMenu.waited_ms });
+    }
     clicked = await clickWatermarkMenuOption(menu, role, templateId, templateName);
 
     // 3) 等马帮处理完，并回读目标图片地址是否真的换了。
@@ -5975,15 +6387,7 @@ async function applyWatermark(frame, role, reference) {
     //    不把我们为选范围临时勾的选择留在页面上。
     //    注意：Escape 要发给 page，Frame 上**没有 keyboard**（2026-10-01 真机踩到：
     //    frame.keyboard.press 直接 TypeError，把 finally 里后面的复原也一起带崩了）。
-    if (await watermarkMenuOpen(frame).catch(() => null)) {
-      await frame.page?.()?.keyboard?.press('Escape').catch(() => {});
-      await sleep(150);
-      // Element UI 的 click 型下拉对 Escape 不一定买账：还在就把触发器再点一下收起来。
-      if (await watermarkMenuOpen(frame).catch(() => null)) {
-        await trigger.click({ timeout: 2000 }).catch(() => {});
-        await sleep(150);
-      }
-    }
+    await closeWatermarkMenu(frame, trigger).catch(() => {});
     await restoreWatermarkImages(frame, selection.initial).catch(() => {});
   }
 
@@ -6002,7 +6406,7 @@ async function applyWatermark(frame, role, reference) {
     method: clicked.method,
     matched_by: clicked.matched_by,
     verified: {
-      menu_closed: !(await watermarkMenuOpen(frame).catch(() => null)),
+      menu_closed: !(await watermarkMenuOpen(frame, TEXT.addWatermark, trigger).catch(() => null)),
       checkbox_selection: selection.selected,
       saw_progress: applied.saw_progress,
       saw_done: applied.saw_done,
@@ -6022,6 +6426,13 @@ const MABANG_API = 'https://api.mabangerp.com/kandeng/api/v2';
 // 视频库里「搜索 → 找行 → 点选择」的重试次数：每次约 1.2~1.5s（DOM click，不等 actionability），
 // 所以 4 次足够覆盖列表刷新的抖动；原来 12 次 × 30s 的默认超时是纯浪费。
 const VIDEO_SEARCH_ATTEMPTS = 4;
+// 点完「搜索」后等结果的预算。现场 2026-11-24（HN0491）：库里明明 1 行、行文本带 videoId、
+// 按钮带「选择」，却回报 row_not_found —— 因为原来是固定 sleep 1.2~1.5s 就读表，搜索走
+// 服务端还没回来就读到空表，下一轮重试又点一次「搜索」把在途请求重置，4 轮全打在加载空窗上。
+// 改成「读到搜索真正结束（分页总数/加载态/结果稳定）」为止，搜索在途绝不重复点搜索。
+const VIDEO_ROW_WAIT_MS = 9000; // 单次搜索最多等这么久
+const VIDEO_ROW_SETTLE_MS = 700; // 结果连续两拍一致才算「这一轮搜完了」
+const VIDEO_ROW_MIN_WAIT_MS = 2500; // 至少等这么久才允许判「确实没有这一行」
 
 // True when the \u89c6\u9891\u7ba1\u7406 (video library) dialog is on screen and visible.
 async function videoAdminOpen(frame) {
@@ -6149,37 +6560,95 @@ async function clickVideoAdminSearch(frame) {
   }, VIDEO_TEXT_TITLE).catch(() => false);
 }
 
+// 读一次视频库表格：有目标行就直接点「选择」并回报 ok；同时带回行数 / 分页总数 / 是否在加载，
+// 让等待循环能区分「搜索还没回来」和「搜完了、确实没有这一行」。
+async function probeVideoLibraryRow(frame, wanted) {
+  return frame.evaluate(({ title, wantedId, wantedName, chooseLabel, requireUploaded, acceptSingleRow }) => {
+    const norm = (value) => String(value || '').replace(/\s+/g, '');
+    const dialog = Array.from(document.querySelectorAll('.el-dialog'))
+      .find((node) => norm((node.querySelector('.el-dialog__title') || {}).textContent) === norm(title));
+    if (!dialog) return { ok: false, why: 'no_dialog', rows: 0, total: '', loading: false };
+    const loading = Array.from(dialog.querySelectorAll('.vxe-loading, .vxe-table--loading, .el-loading-mask'))
+      .some((node) => (node.offsetWidth || node.offsetHeight) && getComputedStyle(node).display !== 'none');
+    const pager = Array.from(dialog.querySelectorAll('.el-pagination, .vxe-pager'))
+      .map((node) => String(node.textContent || '').replace(/\s+/g, ' ')).join(' ');
+    const total = (pager.match(/\u5171\s*(\d+)\s*\u6761/) || [])[1] || '';
+    const rows = Array.from(dialog.querySelectorAll('table.vxe-table--body tbody tr'));
+    for (const row of rows) {
+      const text = norm(row.textContent);
+      if (wantedId && !text.includes(norm(wantedId))) continue;
+      if (!wantedId && requireUploaded && !text.includes('\u4e0a\u4f20\u6210\u529f')) continue;
+      if (wantedName && !wantedId && !text.includes(norm(wantedName))) continue;
+      const button = Array.from(row.querySelectorAll('button,a,.el-button')).find((node) => norm(node.textContent) === norm(chooseLabel));
+      if (button) { button.click(); return { ok: true, rows: rows.length, total, loading }; }
+    }
+    // 3PF（CNSC 页）的视频库表格不把 videoId 渲染进行文本：搜索已按「视频ID」过滤，
+    // 结果只剩 1 行时就是这条视频。此时直接点该行「选择」，由调用方回读表单视频
+    // 校验（URL 里必须带这个 ID 的尾段），认错也不会写错视频。
+    if (acceptSingleRow && wantedId && rows.length === 1) {
+      const button = Array.from(rows[0].querySelectorAll('button,a,.el-button')).find((node) => norm(node.textContent) === norm(chooseLabel));
+      if (button) { button.click(); return { ok: true, via: 'only_row', rows: 1, total: total || '1', loading }; }
+      return { ok: false, why: 'choose_button_not_found', rows: 1, total: total || '1', loading, settled: true };
+    }
+    return { ok: false, why: 'row_not_found', rows: rows.length, total, loading };
+  }, wanted).catch(() => ({ ok: false, why: 'evaluate_failed', rows: 0, total: '', loading: false }));
+}
+
+// 点完「搜索」后就这一次搜索结果等落地：目标行出现 → 点它；表格还在转圈 / 分页已经报出
+// 条目但行还没渲染 → 继续等；连续两拍结果一致且不在加载 → 判「这一轮确实没有」。
+async function waitForVideoLibraryRow(frame, wanted, budgetMs = VIDEO_ROW_WAIT_MS) {
+  const startedAt = Date.now();
+  const deadline = startedAt + budgetMs;
+  let last = { ok: false, why: 'never_ran', rows: 0, total: '', loading: false };
+  let prevKey = '';
+  let stableSince = 0;
+  while (Date.now() < deadline) {
+    last = await probeVideoLibraryRow(frame, wanted);
+    if (last.ok) return last;
+    if (last.why === 'no_dialog' || last.why === 'evaluate_failed') return last;
+    // 只有「页面上真的出现了搜索结果」才算读到了真相：分页报出了条目数、或者表格里已经有行。
+    // 两者都没有 = 搜索还没落地 / 列表还没挂载，继续等，绝不能判「没有这一行」。
+    // （现场 HN0491 就是在这个空窗里被判死的。）
+    // 分页已报条目、行却还是空：前 4 秒当「行还在渲染」继续等；再久就说明这个页面的
+    // 分页不会跟着搜索变（客户端过滤），别拿它当证据一直等下去。
+    const pagerAhead = last.rows === 0 && Number(last.total) > 0;
+    const conclusive = !last.loading
+      && (last.rows > 0 || last.total !== '')
+      && !(pagerAhead && Date.now() - startedAt < 4000);
+    const key = `${last.total}|${last.rows}|${last.loading ? 1 : 0}`;
+    if (!conclusive) {
+      prevKey = '';
+      stableSince = 0;
+    } else if (key === prevKey) {
+      if (!stableSince) stableSince = Date.now();
+      if (Date.now() - stableSince >= VIDEO_ROW_SETTLE_MS && Date.now() - startedAt >= VIDEO_ROW_MIN_WAIT_MS) {
+        return { ...last, settled: true };
+      }
+    } else {
+      prevKey = key;
+      stableSince = 0;
+    }
+    await sleep(250);
+  }
+  return { ...last, settled: false };
+}
+
 // 视频管理里「搜索 → 找到这一行 → 点选择」的公共循环：有界、快速失败，不再空等 30s。
 async function pickVideoLibraryRow(frame, wanted) {
   let clicked = { ok: false, why: 'never_ran' };
+  let emptySearches = 0;
   for (let i = 0; i < VIDEO_SEARCH_ATTEMPTS && !clicked.ok; i += 1) {
     const searched = await clickVideoAdminSearch(frame);
     if (!searched) return { ok: false, why: 'search_button_not_found' };
-    await sleep(i === 0 ? 1500 : 1200);
-    clicked = await frame.evaluate(({ title, wantedId, wantedName, chooseLabel, requireUploaded, acceptSingleRow }) => {
-      const norm = (value) => String(value || '').replace(/\s+/g, '');
-      const dialog = Array.from(document.querySelectorAll('.el-dialog'))
-        .find((node) => norm((node.querySelector('.el-dialog__title') || {}).textContent) === norm(title));
-      if (!dialog) return { ok: false, why: 'no_dialog' };
-      const rows = Array.from(dialog.querySelectorAll('table.vxe-table--body tbody tr'));
-      for (const row of rows) {
-        const text = norm(row.textContent);
-        if (wantedId && !text.includes(norm(wantedId))) continue;
-        if (!wantedId && requireUploaded && !text.includes('\u4e0a\u4f20\u6210\u529f')) continue;
-        if (wantedName && !wantedId && !text.includes(norm(wantedName))) continue;
-        const button = Array.from(row.querySelectorAll('button,a,.el-button')).find((node) => norm(node.textContent) === norm(chooseLabel));
-        if (button) { button.click(); return { ok: true }; }
-      }
-      // 3PF（CNSC 页）的视频库表格不把 videoId 渲染进行文本：搜索已按「视频ID」过滤，
-      // 结果只剩 1 行时就是这条视频。此时直接点该行「选择」，由调用方回读表单视频
-      // 校验（URL 里必须带这个 ID 的尾段），认错也不会写错视频。
-      if (acceptSingleRow && wantedId && rows.length === 1) {
-        const button = Array.from(rows[0].querySelectorAll('button,a,.el-button')).find((node) => norm(node.textContent) === norm(chooseLabel));
-        if (button) { button.click(); return { ok: true, via: 'only_row' }; }
-        return { ok: false, why: 'choose_button_not_found', rows: rows.length };
-      }
-      return { ok: false, why: 'row_not_found', rows: rows.length };
-    }, wanted);
+    clicked = await waitForVideoLibraryRow(frame, wanted);
+    if (clicked.ok) return clicked;
+    if (clicked.why === 'no_dialog' || clicked.why === 'evaluate_failed') return clicked;
+    // 表格里有行、只是没有目标行 → 这一轮搜索是完整跑完的，再点「搜索」结果不会变。
+    if (clicked.settled && clicked.rows > 0) return clicked;
+    // 空表（搜索没生效、或者一直没等到结果）：再给一次机会；两次都是空就认，
+    // 别拿 4 次重试去空转。
+    emptySearches += 1;
+    if (emptySearches >= 2) break;
   }
   return clicked;
 }
@@ -6277,6 +6746,36 @@ async function videoLibrarySummary(frame, videoId, videoTitle) {
   }, { title: VIDEO_TEXT_TITLE, wantedId: videoId, wantedTitle: videoTitle }).catch(() => ({ error: 'evaluate_failed' }));
 }
 
+// 回读视频库搜索框里的当前值（和 typeVideoSearchValue 挑的是同一个输入框）。
+// 切换「搜索类型」时页面可能把搜索框清空 —— 写空等于「搜全部」，会白搜一轮，
+// 所以写完要回读确认，丢了就再写一次。
+async function readVideoSearchValue(frame) {
+  return frame.evaluate(({ title }) => {
+    const compact = (value) => String(value || '').replace(/\s+/g, '').trim();
+    const dialog = Array.from(document.querySelectorAll('.el-dialog'))
+      .find((node) => compact((node.querySelector('.el-dialog__title') || {}).textContent) === compact(title));
+    if (!dialog) return '';
+    const usable = Array.from(dialog.querySelectorAll('input')).filter((input) => !input.hasAttribute('readonly')
+      && !['checkbox', 'radio', 'file', 'hidden'].includes(input.type)
+      && !/\u4e0a\u4f20(\u5f00\u59cb|\u7ed3\u675f)\u65e5\u671f/.test(input.placeholder || '')
+      && !/\u6761\/\u9875/.test(input.value || ''));
+    const input = usable.find((node) => compact(node.placeholder) === '\u8bf7\u8f93\u5165') || usable[0];
+    return input ? compact(input.value) : '';
+  }, { title: VIDEO_TEXT_TITLE }).catch(() => '');
+}
+
+// 选完「选择」后回读表单视频：点完那一拍 Vue 可能还没写进 videoInfo，固定 sleep 1.5s
+// 偶发读到空就报 video_attach_not_verified，所以改成短轮询。
+async function waitForAttachedFormVideo(frame, budgetMs = 6000) {
+  const deadline = Date.now() + budgetMs;
+  let attached = await attachedFormVideo(frame).catch(() => ({ url: '', name: '' }));
+  while (!attached.url && Date.now() < deadline) {
+    await sleep(300);
+    attached = await attachedFormVideo(frame).catch(() => ({ url: '', name: '' }));
+  }
+  return attached;
+}
+
 // 模板默认视频（本土）：在 视频管理 库里按 videoId 精确选择，不碰上传。
 // 操作员手工路径即自动化路径：打开 视频管理 → 搜索类型下拉（默认 视频标题）改选
 // 「视频ID」→ 搜索框键入 videoId → 搜索 → 点该行「选择」。element-ui 的选中值存在
@@ -6288,16 +6787,26 @@ async function selectTemplateVideoById(frame, videoId, videoTitle = '', options 
     // 1) 搜索类型切到「视频ID」（DOM 点击 + 回读确认；Playwright 的 actionability 会被整屏 overlay 挡住）。
     const switched = await switchVideoSearchType(frame, VIDEO_TEXT.idSearchType);
     let clicked = { ok: false, why: switched ? 'never_ran' : 'search_type_switch_failed' };
+    let idSearch = null;
     if (switched) {
       // 2) 搜索词写进真正的搜索框（placeholder=请输入），再搜索并点该行的「选择」。
-      const typed = await typeVideoSearchValue(frame, videoId);
+      let typed = await typeVideoSearchValue(frame, videoId);
       attrPickDebug({ phase: 'video_search', field: 'video_id', typed, value: videoId });
       if (String(typed).startsWith('typed')) {
+        const readBack = await readVideoSearchValue(frame);
+        if (compactText(readBack) !== compactText(videoId)) {
+          const retyped = await typeVideoSearchValue(frame, videoId);
+          attrPickDebug({ phase: 'video_search', field: 'video_id_retype', typed: retyped, value: videoId });
+          typed = retyped;
+        }
         clicked = await pickVideoLibraryRow(frame, {
           title: VIDEO_TEXT_TITLE, wantedId: videoId, wantedName: '', chooseLabel: VIDEO_TEXT.choose, requireUploaded: false,
           acceptSingleRow: allowUniqueRow,
         });
       }
+      // 记下「按 ID 搜」这一趟的现场：下面的标题兜底会把列表换成另一批结果，失败信息里
+      // 不能只剩兜底的 0 条（现场 HN0608 就被这个误导成「库里没有这条视频」）。
+      idSearch = { typed, why: clicked.why || '', rows: clicked.rows == null ? null : clicked.rows, total: clicked.total || '' };
     }
     // 3) 按 ID 找不到时退回按「视频标题」= 主 SKU 搜一次（模板默认视频的标题就是主 SKU）：
     //    库是 3400+ 条的大库，ID 可能已失效/被删，标题搜索往往还能命中。
@@ -6314,10 +6823,11 @@ async function selectTemplateVideoById(frame, videoId, videoTitle = '', options 
     if (!clicked.ok) {
       // 把现场一次带出去：搜了什么、库里共多少条 —— 操作员据此判断是"库里根本没有这条视频"。
       const summary = await videoLibrarySummary(frame, videoId, videoTitle);
+      if (idSearch) summary.id_search = idSearch;
       throw new Error(`video_select_failed:${clicked.why}:${JSON.stringify(summary)}`);
     }
-    await sleep(1500);
-    const attached = await attachedFormVideo(frame);
+    await sleep(600);
+    const attached = await waitForAttachedFormVideo(frame);
     if (!attached.url) throw new Error('video_attach_not_verified');
     // 「只剩一行就直接选」这条兜底必须回读确认选中的就是目标视频：马帮的 Shopee
     // 视频 URL 里带 videoId 本身，认错/选错都会在这里暴露，不会写进草稿。
@@ -6451,10 +6961,10 @@ async function uploadProductVideo(frame, task, page) {
       chooseLabel: VIDEO_TEXT.choose, requireUploaded: true,
     });
     if (!clicked.ok) throw new Error(`video_select_failed:${clicked.why}`);
-    await sleep(1500);
+    await sleep(600);
 
     // 7) Verify the form now carries the video (url populated, dialog auto-closed).
-    const attached = await attachedFormVideo(frame);
+    const attached = await waitForAttachedFormVideo(frame);
     if (!attached.url) throw new Error('video_attach_not_verified');
     return {
       status: 'attached',
@@ -6467,6 +6977,28 @@ async function uploadProductVideo(frame, task, page) {
     authCapture.detach();
     if (dialogOpened) await closeVideoAdminDialog(frame);
   }
+}
+
+// 视频阶段失败后自动「整段重来一次」的边界。
+// 现场类错误（搜索没落地、视频管理弹窗没打开、点了「选择」但表单没回填、选错视频）重开一次
+// 弹窗几乎都能好；配置类错误（没有视频文件、店铺找不到）重试没有意义；第一遍已经跑到
+// 字节上传 + 转码超时（>2 分钟）的也不再重来 —— 第二遍可能把整单预算烧穿，宁可留 warning
+// 给人工补。重试前会先回读表单：上一次其实已经附上了就直接认成功，不重复折腾。
+const VIDEO_STAGE_RETRY_MAX_MS = 120000;
+const VIDEO_STAGE_RETRY_CODES = new Set([
+  'video_select_failed',
+  'video_attach_not_verified',
+  'video_attach_mismatch',
+  'video_admin_dialog_not_open',
+  'video_bytes_upload_failed',
+  'video_upload_timeout',
+  'video_register_failed',
+  'video_api_auth_not_captured',
+]);
+
+function videoStageRetryable(code, elapsedMs) {
+  if (elapsedMs > VIDEO_STAGE_RETRY_MAX_MS) return false;
+  return VIDEO_STAGE_RETRY_CODES.has(String(code || '').split(':')[0]);
 }
 
 async function runOptionalMediaStages(frame, task, operations = {}) {
@@ -6492,7 +7024,8 @@ async function runOptionalMediaStages(frame, task, operations = {}) {
     // 这里把 status 折算成 ok 一并发出（skipped 保持 null，让界面按「已跳过」渲染）。
     const mediaStatus = cleanText(stages[stage] && stages[stage].status);
     if (stages[stage] && stages[stage].ok === undefined) {
-      if (['attached', 'uploaded', 'already_attached', 'already', 'fixed', 'ok', 'done'].includes(mediaStatus)) {
+      // applied = 水印真的加上去了（页面图片地址已换、勾选已复原）。
+      if (['applied', 'attached', 'uploaded', 'already_attached', 'already', 'fixed', 'ok', 'done'].includes(mediaStatus)) {
         stages[stage].ok = true;
       } else if (mediaStatus === 'skipped') {
         stages[stage].ok = null;
@@ -6508,7 +7041,41 @@ async function runOptionalMediaStages(frame, task, operations = {}) {
   await runRecoverable('apply_main_image_watermark', () => apply(frame, 'main_image', (task.watermarks || {}).main_image || {}));
   await runRecoverable('apply_product_image_watermark', () => apply(frame, 'product_images', (task.watermarks || {}).product_images || {}));
   const videoContext = (task.video || {});
-  await runRecoverable('video_upload', () => upload(frame, task, page), {
+  // 视频阶段：失败后按 videoStageRetryable 的边界整段重来一次（见常量处的注释）。
+  // 重试前先关掉残留的「视频管理」弹窗并回读表单——上一次可能已经点上了、只是回读那一拍
+  // 没看到，直接认成功，既不重复上传也不让操作员白补一次。
+  await runRecoverable('video_upload', async () => {
+    const startedAt = Date.now();
+    try {
+      return await upload(frame, task, page);
+    } catch (firstError) {
+      const firstCode = cleanText(firstError && firstError.message) || 'video_stage_failed';
+      if (!videoStageRetryable(firstCode, Date.now() - startedAt)) throw firstError;
+      const alreadyAttached = await attachedFormVideo(frame).catch(() => ({ url: '', name: '' }));
+      // 「选错视频」不能当成已附上：那种情况下表单里确实有 URL，但挂的是别的视频。
+      if (alreadyAttached.url && !firstCode.startsWith('video_attach_mismatch')) {
+        // video_id 照旧回传（模板默认视频回写要用），URL 以表单里真实挂着的为准。
+        const attachedId = cleanText(videoContext.default_video_id);
+        return {
+          status: 'attached',
+          ...(attachedId ? { video_id: attachedId } : {}),
+          video_url: alreadyAttached.url,
+          retried: true,
+          first_attempt_code: firstCode,
+          retry: 'attached_after_failure',
+        };
+      }
+      await closeVideoAdminDialog(frame).catch(() => false);
+      await sleep(600);
+      try {
+        const retried = await upload(frame, task, page);
+        return { ...retried, retried: true, first_attempt_code: firstCode };
+      } catch (secondError) {
+        const secondCode = cleanText(secondError && secondError.message) || 'video_stage_failed';
+        return { status: 'warning', code: secondCode, first_attempt_code: firstCode, retried: true };
+      }
+    }
+  }, {
     file_name: cleanText(videoContext.file_name),
   });
   return { ...stages, warnings };
@@ -7585,10 +8152,39 @@ async function validateBeforeSave(frame, task, stages) {
       .filter(visible)
       .map((element) => String(element.innerText || '').trim())
       .filter((text) => /^\d+\s*\u5fc5\u586b\u9879\u672a\u586b$/.test(text));
-    const errors = [...document.querySelectorAll('.el-form-item__error,.is-error .el-form-item__label')]
+    // 行内错误分两类：真缺（这一格现在还是空值）和过期错误（这一格其实已经有值，
+    // 只是 Element 的 validateState 还停在上一轮「请输入…」上——fill() 不发 blur，
+    // 旧错误就永远挂着）。过期错误不能当失败：现场 2026-11-28 五单都是标题被页面
+    // 重渲染刷空、随后补回去，但旧错误没清，校验闸把整单拦成 pre_save_validation_failed，
+    // 运营点「再次尝试」换一次时序就好了。判据用"这一格当前的值"，不用文案猜。
+    const REQUIRED_ERROR_TEXT = /\u8bf7\u8f93\u5165|\u5fc5\u586b|\u4e0d\u80fd\u4e3a\u7a7a|\u8bf7\u9009\u62e9|\u8bf7\u586b\u5199/;
+    const errorItems = [...document.querySelectorAll('.el-form-item.is-error')]
       .filter(visible)
-      .map((element) => String(element.innerText || '').trim())
-      .filter(Boolean);
+      .map((item) => {
+        const labelNode = item.querySelector('.el-form-item__label');
+        const errorNode = item.querySelector('.el-form-item__error');
+        const inputs = [...item.querySelectorAll('input:not([type="hidden"]),textarea')];
+        return {
+          label: labelNode ? String(labelNode.innerText || '').trim() : '',
+          message: errorNode ? String(errorNode.innerText || '').trim() : '',
+          has_value: inputs.some((input) => String(input.value || '').trim() !== ''),
+        };
+      });
+    const staleErrors = errorItems.filter((item) => item.has_value && REQUIRED_ERROR_TEXT.test(item.message || ''));
+    const errorSet = new Set();
+    for (const item of errorItems) {
+      if (item.has_value && REQUIRED_ERROR_TEXT.test(item.message || '')) continue;
+      if (item.label) errorSet.add(item.label);
+      if (item.message) errorSet.add(item.message);
+    }
+    // 不在 .is-error 表单项里的错误（整表级提示等）照旧原样计入，不做过期豁免。
+    for (const node of [...document.querySelectorAll('.el-form-item__error')].filter(visible)) {
+      const owner = node.closest('.el-form-item');
+      if (owner && owner.classList.contains('is-error')) continue;
+      const text = String(node.innerText || '').trim();
+      if (text) errorSet.add(text);
+    }
+    const errors = [...errorSet];
     const tables = [...document.querySelectorAll('.vxe-table')].map((element) => element.__vue__).filter(Boolean);
     const table = tables.find((vm) => (vm.tableColumn || []).some((column) => ['sku', 'sellerSku', 'variationSku'].includes(column.field)));
     // VXE 的 tableData 在虚拟滚动/重渲染时会短暂出现空洞或 undefined 行，后面每处都按
@@ -7692,6 +8288,9 @@ async function validateBeforeSave(frame, task, stages) {
       missing_required_details: missingRequiredLabels.slice(0, 6),
       variant_blocks: variantBlocks.slice(0, 6),
       form_errors: [...new Set(errors)].slice(0, 20),
+      // 已经有值、却还挂着「请输入…」的过期错误：不拦保存，但要留在详情里，
+      // 下次页面行为再变时能看出到底清掉了什么。
+      stale_form_errors: staleErrors.slice(0, 10).map((item) => ({ label: item.label, message: item.message })),
       rows: rows.length,
       expected_rows: expectedRows,
       empty_skus: rows.filter((row) => !String(row.sku || row.sellerSku || row.variationSku || '').trim()).length,
@@ -7710,6 +8309,9 @@ async function validateBeforeSave(frame, task, stages) {
       skus: task.sku_grid?.skus || [],
     },
   });
+  if (audit.stale_form_errors && audit.stale_form_errors.length) {
+    attrPickDebug({ phase: 'stale_form_errors_ignored', fields: audit.stale_form_errors, nav_missing: audit.nav_missing });
+  }
   if (isCnscPageMode((task.store || {}).listing_mode)) {
     const snapshot = await readCNSCDomGridSnapshot(frame);
     if (snapshot.table_count !== 1) {
@@ -8403,6 +9005,9 @@ const PRE_SAVE_STAGES = [
   // 之后才齐，所以这一步放在保存前、校验前，用马帮自己的「编辑图片」把宽度修成 1000，
   // 免得点了一次保存被拒（save 按设计只点一次，不会重试）。
   ['fix_description_image_widths', async (d) => ensureDescriptionImageWidths(d.frame)],
+  // 标题是整单最早写的一格，页面在属性面板异步回来时会重渲染基础信息卡片，把它刷回空；
+  // 保存闸随后报「请输入商品标题」= pre_save_validation_failed。保存前再确认一次。
+  ['reassert_basic_info', async (d, task) => reassertBasicInfo(d.frame, task)],
   ['validate_before_save', async (d, task, stages) => validateBeforeSave(d.frame, task, stages)],
 ];
 
@@ -8827,6 +9432,7 @@ module.exports = {
   insertDescriptionImageByFile,
   uploadDescriptionSizeChartFile,
   undoDescriptionInserts,
+  removeDescriptionImages,
       insertDescriptionProductImages,
   readDescriptionImageSizes,
   waitForDescriptionImageSizes,
@@ -8848,6 +9454,14 @@ module.exports = {
   applyWatermark,
   runOptionalMediaStages,
   uploadProductVideo,
+  videoStageRetryable,
+  VIDEO_STAGE_RETRY_MAX_MS,
+  // 视频库搜索/等待的离线验收：.scratch/verify_video_library_wait.cjs
+  pickVideoLibraryRow,
+  probeVideoLibraryRow,
+  waitForVideoLibraryRow,
+  waitForAttachedFormVideo,
+  readVideoSearchValue,
   uploadProductImages,
   countProductImageCards,
   cleanFilePath,
@@ -8864,4 +9478,7 @@ module.exports = {
   WORKSPACE_RESET_ERRORS,
   resolvePreSaveStartIndex,
   detailPageMatchesTask,
+  // 保存前复核 / 校验：回归用例见 scripts/verify_pre_save_validation_stale_errors.cjs
+  reassertBasicInfo,
+  validateBeforeSave,
 };

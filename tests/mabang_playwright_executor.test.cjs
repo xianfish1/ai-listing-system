@@ -1022,6 +1022,70 @@ test('视频库查找有界：不再每次 30s 默认超时拖满 12 分钟', ()
   assert.doesNotMatch(pickFn, /\.click\(\)\.catch\(\(\) => \{\}\);\s*\n\s*await sleep\(3000\)/, '不再 3s �?�?���?');
 });
 
+test('视频库等结果落地：搜索在途不重复点搜索，慢搜索也不会被误判 row_not_found', async () => {
+  // 现场 2026-11-24 HN0491：库里 1 行、行文本带 videoId、按钮带「选择」，却回报 row_not_found。
+  // 真因是搜索还没回来就读表（固定 sleep 1.2~1.5s），下一轮重试又点一次「搜索」把在途请求
+  // 重置。这里用假 frame 复现：搜索 800ms 才出结果、期间表格空且分页没有条目数。
+  const VIDEO_ID = 'sg-11110106-6vce5-mtj6id4j4i6ef7';
+  const state = { clicks: 0, start: Date.now() };
+  const frame = {
+    async evaluate(fn) {
+      const src = String(fn);
+      if (src.includes('vxe-table--body')) {
+        const elapsed = Date.now() - state.start;
+        return elapsed >= 800
+          ? { ok: true, rows: 1, total: '1', loading: false }
+          : { ok: false, why: 'row_not_found', rows: 0, total: '', loading: false };
+      }
+      if (src.includes('el-dialog__title') && src.includes('button, .el-button')) {
+        state.clicks += 1;
+        state.start = Date.now();
+        return true;
+      }
+      return '';
+    },
+  };
+  const clicked = await executor.pickVideoLibraryRow(frame, {
+    title: '视频管理', wantedId: VIDEO_ID, wantedName: '', chooseLabel: '选择', requireUploaded: false, acceptSingleRow: false,
+  });
+  assert.equal(clicked.ok, true, '慢搜索也要等出那一行再选');
+  assert.equal(state.clicks, 1, '搜索在途不能重复点「搜索」（每次点都会重置在途请求）');
+});
+
+test('视频库等结果落地：有行但没匹配、或一直在加载，都不空转到 4 轮', async () => {
+  const VIDEO_ID = 'sg-11110106-6vce5-mtj6id4j4i6ef7';
+  const wanted = { title: '视频管理', wantedId: VIDEO_ID, wantedName: '', chooseLabel: '选择', requireUploaded: false, acceptSingleRow: false };
+
+  // 一直转圈、永远没有条目数 → 预算耗尽返回 settled:false，交给上层再试一次。
+  const stuck = { clicks: 0 };
+  const stuckFrame = {
+    async evaluate(fn) {
+      const src = String(fn);
+      if (src.includes('vxe-table--body')) return { ok: false, why: 'row_not_found', rows: 0, total: '', loading: true };
+      if (src.includes('el-dialog__title') && src.includes('button, .el-button')) { stuck.clicks += 1; return true; }
+      return '';
+    },
+  };
+  const result = await executor.waitForVideoLibraryRow(stuckFrame, wanted, 600);
+  assert.equal(result.ok, false);
+  assert.equal(result.settled, false, '一直加载中不算「搜完了」');
+
+  // 表格里有 3 行、没有目标行 → 搜完就收手，只搜一次。
+  const rowsFrame = {
+    async evaluate(fn) {
+      const src = String(fn);
+      if (src.includes('vxe-table--body')) return { ok: false, why: 'row_not_found', rows: 3, total: '3', loading: false };
+      if (src.includes('el-dialog__title') && src.includes('button, .el-button')) { rowsFrame.clicks += 1; return true; }
+      return '';
+    },
+    clicks: 0,
+  };
+  const miss = await executor.pickVideoLibraryRow(rowsFrame, wanted);
+  assert.equal(miss.ok, false);
+  assert.equal(miss.rows, 3, '失败现场要带出表格里的行数');
+  assert.equal(rowsFrame.clicks, 1, '有行无匹配时不再重复搜索');
+});
+
 test('执�?器把进度实时回报给本�?API（面板实时�?骤），无 runtime 时完全不发�?�?', () => {
   const source = fs.readFileSync(path.join(__dirname, '../scripts/mabang_playwright_executor.cjs'), 'utf8');
   assert.match(source, /let progressRuntime = null;/, '默�?没有上报上下�?');
@@ -1331,12 +1395,65 @@ test('media stage results carry ok so the step list stops painting the video as 
   });
   assert.equal(skipped.video_upload.ok, null);
   assert.equal(skipped.video_upload.status, 'skipped');
+  // 水印真的加上去了（status=applied）必须算完成，执行步骤不能画成未完成。
+  assert.equal(skipped.apply_main_image_watermark.ok, true);
 
   const warned = await executor.runOptionalMediaStages({}, { video: {} }, {
     applyWatermark: async () => ({ status: 'applied' }),
     uploadVideo: async () => ({ status: 'warning', code: 'video_store_not_found' }),
   });
   assert.equal(warned.video_upload.ok, false);
+});
+
+test('视频阶段失败自动整段重来一次（含边界：配置类不重试、已附上直接认）', async () => {
+  // 用户要求：视频阶段失败要自动再来一次；但「没有视频文件/店铺找不到」重试没意义，
+  // 第一遍已经跑到转码超时（>2 分钟）也不再烧预算。
+  assert.equal(executor.videoStageRetryable('video_select_failed:row_not_found:{"rows":0}', 20000), true);
+  assert.equal(executor.videoStageRetryable('video_attach_not_verified', 20000), true);
+  assert.equal(executor.videoStageRetryable('video_admin_dialog_not_open', 20000), true);
+  assert.equal(executor.videoStageRetryable('video_store_not_found', 20000), false);
+  assert.equal(executor.videoStageRetryable('video_file_missing', 20000), false);
+  assert.equal(executor.videoStageRetryable('video_select_failed:row_not_found:{}', executor.VIDEO_STAGE_RETRY_MAX_MS + 1), false);
+
+  // ① 第一次 row_not_found、第二次成功 → 结果带 retried 与首轮错误码。
+  let calls = 0;
+  const retried = await executor.runOptionalMediaStages({}, { video: { default_video_id: 'v1', select_by_id: true } }, {
+    applyWatermark: async () => ({ status: 'applied' }),
+    uploadVideo: async () => {
+      calls += 1;
+      if (calls === 1) throw new Error('video_select_failed:row_not_found:{"library_total":"0"}');
+      return { status: 'attached', video_id: 'v1', source: 'template_default' };
+    },
+  });
+  assert.equal(calls, 2, '失败后要整段重来一次');
+  assert.equal(retried.video_upload.status, 'attached');
+  assert.equal(retried.video_upload.ok, true);
+  assert.equal(retried.video_upload.retried, true);
+  assert.match(retried.video_upload.first_attempt_code, /^video_select_failed/);
+  assert.equal(retried.warnings.length, 0, '重试成功就不该留 warning');
+
+  // ② 两次都失败 → warning 带第二轮错误码 + 首轮现场，且只重试一次（共 2 次调用）。
+  let twice = 0;
+  const warn = await executor.runOptionalMediaStages({}, { video: { default_video_id: 'v1', select_by_id: true } }, {
+    applyWatermark: async () => ({ status: 'applied' }),
+    uploadVideo: async () => {
+      twice += 1;
+      throw new Error(twice === 1 ? 'video_select_failed:row_not_found:{"a":1}' : 'video_attach_not_verified');
+    },
+  });
+  assert.equal(twice, 2, '最多重试一次');
+  assert.equal(warn.video_upload.status, 'warning');
+  assert.equal(warn.video_upload.code, 'video_attach_not_verified');
+  assert.match(warn.video_upload.first_attempt_code, /^video_select_failed/);
+
+  // ③ 配置类错误不重试。
+  let onceOnly = 0;
+  const config = await executor.runOptionalMediaStages({}, { video: {} }, {
+    applyWatermark: async () => ({ status: 'applied' }),
+    uploadVideo: async () => { onceOnly += 1; throw new Error('video_store_not_found'); },
+  });
+  assert.equal(onceOnly, 1, '配置类错误重试没意义');
+  assert.equal(config.video_upload.code, 'video_store_not_found');
 });
 
 // ---------------------------------------------------------------------------
@@ -1572,7 +1689,13 @@ test('watermark menu interaction never opens a publish/刊登 click path', () =>
   // 而且会把 finally 里的勾�?��?原一起带崩）。注释里会提到这�?��，所以只查代码�??
   const watermarkCode = watermark.replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, '');
   assert.equal(/frame\.keyboard/.test(watermarkCode), false);
-  assert.match(watermark, /frame\.page\?\.\(\)\?\.keyboard\?\.press\('Escape'\)/);
+  assert.match(watermark, /async function closeWatermarkMenu/);
+  assert.match(watermark, /page\?\.keyboard\?\.press\('Escape'\)/);
+  // 真实页面是 hover 型下拉：关完要把鼠标挪开（否则又悬停打开，浮层挡住后面的点击）。
+  assert.match(watermark, /mouse\?\.move\(/);
+  // 模板列表是第一次打开下拉才加载的：必须等真模板行出现，别把「暂无水印」当候选。
+  assert.match(watermark, /async function waitForWatermarkMenuLoaded/);
+  assert.match(watermark, /watermark_menu_empty/);
 });
 
 const ACTION_SELECTOR = 'button,[role="button"],a,.el-button,input[type="button"],input[type="submit"]';
@@ -2051,7 +2174,9 @@ test('site attributes tolerate the （Size） suffix, expand 显示所有属性 
   //   3) 容错按流程分档：本土（site）loose、3PF anchorLabels，cnsc_global 走原来的匹配参数。
   assert.match(source, /const siteMode = normalizeListingMode\(task\.store\?\.listing_mode\) === LISTING_MODE_SITE;/);
   assert.match(source, /const matchOptions = siteMode\s*\n\s*\? \{ loose: true, siteMultiSelectHandling: true \}\s*\n\s*: \(threePfMode \? \{ anchorLabels: true \} : \{\}\);/);
-  assert.match(source, /if \(!present && \(siteMode \|\| threePfMode\) && !hiddenExpanded\) \{/);
+  // 2026-11-28：deferredToUi（有枚举但值不在快照枚举里的单选）要再展开一次——
+  // 页面没渲染完时那次批量展开会返回 false，否则可选属性会被当「页面没有」跳过。
+  assert.match(source, /if \(!present && \(siteMode \|\| threePfMode\) && \(!hiddenExpanded \|\| deferredToUi\)\) \{/);
 });
 
 // ---------------------------------------------------------------------------
@@ -3230,12 +3355,13 @@ test('描述图片宽度：没有图或都够宽时直接跳过，不打开「�
   const noImages = { evaluate: async () => [] };
   assert.deepEqual(
     await executor.ensureDescriptionImageWidths(noImages),
-    { status: 'skipped', reason: 'no_description_images' },
+    { status: 'skipped', code: 'description_images_absent', reason: 'no_description_images' },
   );
 
   const wide = { evaluate: async () => [{ src: 'a', width: 1000, height: 1000, loaded: true }] };
   const result = await executor.ensureDescriptionImageWidths(wide);
   assert.equal(result.status, 'skipped');
+  assert.equal(result.code, 'description_image_widths_ok');
   assert.equal(result.reason, 'widths_ok');
 });
 
@@ -3740,5 +3866,36 @@ test('站点价格/折扣错误码有中文映射（不再是英文码）', () =
     assert.match(app, new RegExp(`\\b${code}:\\s*"`), `${code} 需要中文文案`);
   }
   const html = fs.readFileSync(path.join(__dirname, '../apps/web/index.html'), 'utf8');
-  assert.match(html, /app\.js\?v=cnsc-discount-recover-v1/, '改前端要 bump 缓存版本');
+  // 缓存版本跟最近一次 app.js 改动同步；2026-11-28 那次是「描述图片宽度」跳过原因的中文文案。
+  assert.match(html, /app\.js\?v=desc-image-width-labels-v1/, '改前端要 bump 缓存版本');
+});
+
+test('描述图片宽度兜底：skipped 要说清原因，真有修复也要留痕', () => {
+  // 现场：任务行上只显示「正在修复描述图片尺寸：skipped」，操作员分不清是没事还是失败。
+  // 根因=执行器 skip 时只回 status（reason 被存储层白名单丢掉），界面回退打印原始英文状态。
+  const source = fs.readFileSync(path.join(__dirname, '../scripts/mabang_playwright_executor.cjs'), 'utf8');
+  const fn = source.slice(
+    source.indexOf('async function ensureDescriptionImageWidths('),
+    source.indexOf('const WATERMARK_NON_TEMPLATE_ROWS = ['),
+  );
+  assert.match(fn, /status: 'skipped', code: 'description_images_absent'/, '描述里没图要带 code');
+  assert.match(fn, /status: 'skipped', code: 'description_image_widths_ok'/, '宽度都够要带 code');
+  assert.match(fn, /status: 'fixed',[\s\S]*?code: 'description_image_widths_fixed'/, '真修了也要带 code');
+
+  const app = fs.readFileSync(path.join(__dirname, '../apps/web/app.js'), 'utf8');
+  for (const code of [
+    'description_image_widths_ok',
+    'description_images_absent',
+    'description_image_widths_fixed',
+  ]) {
+    assert.match(app, new RegExp(`\\b${code}:\\s*"`), `${code} 需要中文文案`);
+  }
+
+  // 存储层白名单不认 fixed 时，这条阶段会被整条丢掉（修了也看不到）。
+  const storage = fs.readFileSync(path.join(__dirname, '../services/api/storage.py'), 'utf8');
+  const normalize = storage.slice(
+    storage.indexOf('def _normalize_execution_stages('),
+    storage.indexOf('def _sanitize_execution_stage_value('),
+  );
+  assert.match(normalize, /"fixed",/, 'allowed_statuses 要放过 fixed');
 });

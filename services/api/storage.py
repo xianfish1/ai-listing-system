@@ -2459,14 +2459,40 @@ def delete_all_hot_words() -> dict[str, Any]:
         return {"deleted": removed}
 
 
+def _promotion_status_for(data: dict[str, Any], item: dict[str, Any], *, now: str | None = None) -> str:
+    """模板/副本引用的促销活动状态：available / expired / unresolved / unconfigured。
+
+    跨境（CNSC / 3PF）的折扣活动是按目标站点配的，这里不做单店活动校验，返回 ""。
+    店铺模板卡片和副本列表都用它显示「活动已过期」提醒（2026-11-29 用户要求）。
+    """
+    if is_cnsc_page(item.get("listing_mode")):
+        return ""
+    activity_id = str(
+        item.get("promotion_activity_id") or item.get("mabang_discount_id") or item.get("discount_id") or ""
+    ).strip()
+    store_id = str(item.get("mabang_store_id") or "").strip()
+    activity = next(
+        (
+            row
+            for row in data.get("store_promotion_activities") or []
+            if str(row.get("activity_id") or row.get("id") or "") == activity_id
+            and str(row.get("store_id") or "") == store_id
+        ),
+        None,
+    )
+    return promotion_state(activity_id, activity, now=now or utc_now())
+
+
 def list_store_templates(account_id: str = "") -> list[dict[str, Any]]:
     wanted_account = str(account_id or "").strip()
     with _LOCK:
+        data = load_store()
         templates = [
             dict(item)
-            for item in load_store().get("store_templates", [])
+            for item in data.get("store_templates", [])
             if str(item.get("status") or "active").strip().lower() != "archived"
         ]
+        now = utc_now()
     if wanted_account:
         # 模板按马帮账号隔离：切账号只看得到该账号的模板。
         templates = [
@@ -2475,6 +2501,8 @@ def list_store_templates(account_id: str = "") -> list[dict[str, Any]]:
     for template in templates:
         template["variation_rule"] = str(template.get("variation_rule") or "color_size").strip()
         template["sku_template"] = str(template.get("sku_template") or "{main_sku}_{color}||{size}").strip()
+        # 活动过期/未解析要能在模板卡片上直接看到（原来只在副本就绪度里报）。
+        template["promotion_status"] = _promotion_status_for(data, template, now=now)
     return sorted(templates, key=lambda item: (item.get("store_name") or "", item.get("template_name") or "", item.get("created_at") or ""))
 
 
@@ -2521,34 +2549,84 @@ def list_store_promotions(store_id: str, *, available_only: bool = False) -> lis
     return sorted(items, key=lambda item: (item.get("status") != "available", item.get("name") or ""))
 
 
-def list_store_watermarks(store_id: str) -> list[dict[str, Any]]:
+def resolve_store_account_id(store_id: str) -> str:
+    """店铺 → 马帮账号。水印目录按账号存（公司级、全站通用），读目录前要把账号解析出来。"""
+    wanted = str(store_id or "").strip()
+    if not wanted:
+        return ""
     with _LOCK:
-        return list_watermarks(load_store(), store_id)
+        data = load_store()
+    for option in data.get("mabang_store_options") or []:
+        option_store = str(option.get("mabang_store_id") or option.get("store_id") or "").strip()
+        account_id = str(option.get("account_id") or "").strip()
+        if option_store == wanted and account_id:
+            return account_id
+    for template in data.get("store_templates") or []:
+        if str(template.get("mabang_store_id") or "").strip() == wanted:
+            account_id = str(template.get("account_id") or "").strip()
+            if account_id:
+                return account_id
+    return ""
 
 
-def get_store_watermark_catalog_status(store_id: str) -> dict[str, Any] | None:
-    """店铺水印目录的采集状态（未采集过 → None）。"""
+def resolve_store_name(store_id: str) -> str:
+    """店铺 id → 马帮店铺名（活动重采要用它在页面「店铺名称」下拉里选店）。"""
+    wanted = str(store_id or "").strip()
+    if not wanted:
+        return ""
+    with _LOCK:
+        data = load_store()
+    for option in data.get("mabang_store_options") or []:
+        option_store = str(option.get("mabang_store_id") or option.get("store_id") or "").strip()
+        name = str(option.get("store_name") or "").strip()
+        if option_store == wanted and name:
+            return name
+    for template in data.get("store_templates") or []:
+        if str(template.get("mabang_store_id") or "").strip() == wanted:
+            name = str(template.get("store_name") or "").strip()
+            if name:
+                return name
+    return ""
+
+
+def list_store_watermarks(store_id: str, *, account_id: str = "") -> list[dict[str, Any]]:
+    """该店铺所属账号的水印目录（全站通用，不区分本土/跨境）。"""
+    wanted_account = str(account_id or "").strip() or resolve_store_account_id(store_id)
+    with _LOCK:
+        return list_watermarks(load_store(), store_id, account_id=wanted_account)
+
+
+def get_store_watermark_catalog_status(store_id: str, *, account_id: str = "") -> dict[str, Any] | None:
+    """水印目录的采集状态（未采集过 → None）。"""
     from services.api.store_watermarks import catalog_status as _status
+    wanted_account = str(account_id or "").strip() or resolve_store_account_id(store_id)
     with _LOCK:
-        return _status(load_store(), store_id)
+        return _status(load_store(), store_id, account_id=wanted_account)
 
 
-def record_store_watermark_collect_failure(store_id: str, message: str) -> dict[str, Any] | None:
+def record_store_watermark_collect_failure(
+    store_id: str,
+    message: str,
+    *,
+    account_id: str = "",
+) -> dict[str, Any] | None:
     """采集水印失败时留痕（不动目录本身）。目录为空/未采集时返回 None。"""
     from services.api.store_watermarks import record_catalog_run as _record
     wanted_store = str(store_id or "").strip()
     if not wanted_store:
         return None
+    wanted_account = str(account_id or "").strip() or resolve_store_account_id(store_id)
     now = utc_now()
     with locked_store() as (data, save):
         run = _record(
             data,
             store_id=wanted_store,
             status="failed",
-            count=len(list_watermarks(data, wanted_store)),
+            count=len(list_watermarks(data, wanted_store, account_id=wanted_account)),
             error=message,
             catalog_loaded=False,
             now=now,
+            account_id=wanted_account,
         )
         save(data)
     return run
@@ -2559,9 +2637,12 @@ def replace_store_watermark_catalog(
     raw_items: list[dict[str, Any]],
     *,
     catalog_loaded: bool = True,
+    account_id: str = "",
 ) -> list[dict[str, Any]]:
+    """用一次采集结果刷新该账号的水印目录（全站通用，从哪个店铺采的都算数）。"""
     from services.api.store_watermarks import record_catalog_run as _record
     from services.api.store_watermarks import replace_watermark_catalog as _replace
+    wanted_account = str(account_id or "").strip() or resolve_store_account_id(store_id)
     now = utc_now()
     with locked_store() as (data, save):
         normalized = _replace(
@@ -2570,6 +2651,7 @@ def replace_store_watermark_catalog(
             raw_items=raw_items or [],
             now=now,
             catalog_loaded=catalog_loaded,
+            account_id=wanted_account,
         )
         # 采集成功也要记一笔状态：界面要显示「目录 N 条 · 采集于 …」。
         _record(
@@ -2577,6 +2659,7 @@ def replace_store_watermark_catalog(
             store_id=store_id,
             status="ok",
             count=len(normalized),
+            account_id=wanted_account,
             error="",
             catalog_loaded=True,
             now=now,
@@ -5689,7 +5772,9 @@ def list_store_listing_copies() -> list[dict[str, Any]]:
         copies = [dict(item) for item in data.get("store_listing_copies", [])]
         sku_counts = Counter(sku.get("listing_copy_id") for sku in data.get("listing_skus", []))
         price_counts = Counter(price.get("listing_copy_id") for price in data.get("listing_prices", []))
+        now = utc_now()
     for copy in copies:
+        copy["promotion_status"] = _promotion_status_for(data, copy, now=now)
         copy["sku_count"] = int(sku_counts.get(copy.get("id") or "", 0))
         copy["price_count"] = int(price_counts.get(copy.get("id") or "", 0))
         # 标题长度提醒用：多站点取最严上限（PH 实测 100，其余 120）。页面最终仍以
@@ -7602,6 +7687,9 @@ def _normalize_execution_stages(value: Any) -> dict[str, dict[str, Any]]:
     allowed_statuses = {
         "succeeded", "skipped", "warning", "failed", "needs_confirmation", "applied", "uploaded",
         "attached",
+        # 「描述图片宽度」自动改尺寸成功（ensureDescriptionImageWidths）：不认这个状态时
+        # 整条阶段会被丢掉，操作员就看不到描述图被自动改过（2026-11-28）。
+        "fixed",
     }
     allowed_fields = {
         "status", "started_at", "finished_at", "code", "message", "details", "evidence",
@@ -7611,7 +7699,9 @@ def _normalize_execution_stages(value: Any) -> dict[str, dict[str, Any]]:
         "image_range", "verified",
         # 视频阶段回传：video_id 是「首次上传后记录到模板 default_video_id」的数据来源，
         # 丢了就永远记不上；video_url/source/upload_url 供排查与展示。
-        "video_id", "video_url", "source", "upload_url",
+        # retried/first_attempt_code：视频阶段失败后自动整段重来一次的痕迹——第二次成功时
+        # 看不出异常，第二次也失败时能知道第一轮是因为什么挂的（2026-11-28）。
+        "video_id", "video_url", "source", "upload_url", "retried", "first_attempt_code",
     }
     normalized: dict[str, dict[str, Any]] = {}
     for raw_name, raw_stage in value.items():

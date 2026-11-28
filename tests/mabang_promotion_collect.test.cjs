@@ -10,12 +10,16 @@ const collector = require('../scripts/mabang_promotion_collect.cjs');
 const SOURCE = fs.readFileSync(path.join(__dirname, '../scripts/mabang_promotion_collect.cjs'), 'utf8');
 
 test('店铺活动重采：--cdp-url / --store-id / --plan 解析', () => {
-  assert.deepEqual(collector.parseArgs([]), { cdpUrl: 'http://127.0.0.1:18223', storeId: '', plan: {} });
+  assert.deepEqual(collector.parseArgs([]), { cdpUrl: 'http://127.0.0.1:18223', storeId: '', storeName: '', plan: {} });
   assert.deepEqual(
     collector.parseArgs(['--cdp-url', 'http://127.0.0.1:9333', '--store-id', ' 2022749877 ', '--plan', '{"platform":"shopee"}']),
-    { cdpUrl: 'http://127.0.0.1:9333', storeId: '2022749877', plan: { platform: 'shopee' } },
+    { cdpUrl: 'http://127.0.0.1:9333', storeId: '2022749877', storeName: '', plan: { platform: 'shopee' } },
   );
-  assert.deepEqual(collector.parseArgs(['--plan', '{oops']), { cdpUrl: 'http://127.0.0.1:18223', storeId: '', plan: {} });
+  assert.deepEqual(
+    collector.parseArgs(['--store-id', '2022625115', '--store-name', ' HN_POD ']),
+    { cdpUrl: 'http://127.0.0.1:18223', storeId: '2022625115', storeName: 'HN_POD', plan: {} },
+  );
+  assert.deepEqual(collector.parseArgs(['--plan', '{oops']), { cdpUrl: 'http://127.0.0.1:18223', storeId: '', storeName: '', plan: {} });
 });
 
 test('店铺活动重采：复用同一份页面采集器与弹窗模块', () => {
@@ -38,6 +42,20 @@ test('店铺活动重采：浏览器连不上时返回中文指引', async () =>
   assert.equal(result.ok, false);
   assert.equal(result.status, 'browser_unreachable');
   assert.match(result.error, /连不上马帮采集浏览器/);
+});
+
+test('店铺活动重采：浏览器不在目标店铺时会自动打开该店铺的商品页', () => {
+  // 现场（2026-11-28）：点「重新采集活动」时浏览器停在别的店铺，直接报
+  // 「当前马帮页面是店铺「HN_POD」，不是要采集的店铺」。现在改走工作区 →
+  // 新增刊登 → 在「店铺名称」下拉里选目标店铺，再读活动；用完把自动打开的页面关掉。
+  assert.match(SOURCE, /async function ensureStoreEditPage/);
+  assert.match(SOURCE, /findWorkspaceTarget/);
+  assert.match(SOURCE, /clickNewListing/);
+  assert.match(SOURCE, /selectStoreOnPage/);
+  assert.match(SOURCE, /store_select_failed/);
+  assert.match(SOURCE, /opened_by/);
+  // 自动打开的页面必须关掉，别在操作员浏览器里留标签。
+  assert.match(SOURCE, /createdPage\.close/);
 });
 
 test('店铺活动重采是只读的：不保存、不选活动', () => {

@@ -766,6 +766,8 @@
     // Browsers always expose at least one signal above; keep plain mocks readable.
     return true;
   };
+  // 菜单里不是模板的行（管理入口 / 空态）永远不算模板。
+  const WATERMARK_NON_TEMPLATE_ROWS = [/^暂无水印/, /水印模板管理/];
   const readWatermarkTemplatesFromDom = () => {
     const itemSelector = [
       '[data-watermark-id]',
@@ -775,6 +777,9 @@
       '.watermark-template',
       '.watermark-item',
       '.watermark-list-item',
+      // 真实页面（publish-ui）的菜单行就是 Element UI 的 .el-dropdown-menu__item：
+      // 行文本是模板名、DOM 里没有 id。旧选择器漏了它 → 菜单开着也读不到行。
+      '.el-dropdown-menu__item',
     ].join(',');
     const menuSelector = '.el-dropdown-menu,.el-select-dropdown,.el-popper,[role="menu"]';
     const seen = new Set();
@@ -796,10 +801,13 @@
         node.querySelector('[data-watermark-name],.watermark-name,.template-name')?.textContent,
         node.textContent,
       ));
-      if (templateId && name && !seen.has(templateId)) {
-        seen.add(templateId);
-        items.push({ template_id: templateId, name, preview_url: clean(image?.src) });
-      }
+      if (!name || WATERMARK_NON_TEMPLATE_ROWS.some((pattern) => pattern.test(name))) return;
+      if (templateId && seen.has(templateId)) return;
+      if (templateId) seen.add(templateId);
+      // 允许 template_id 为空：真实页面上行文本是唯一线索，靠名称回查 Vue 列表拿 id
+      // （见 readWatermarkTemplates）。这里绝不自己编 id。
+      if (!templateId && items.some((item) => item.name === name)) return;
+      items.push({ template_id: templateId, name, preview_url: clean(image?.src) });
     };
     // The collector opens 添加水印 before capture, so a VISIBLE menu is the
     // authoritative DOM source. Hidden menus can keep stale rows in the DOM; only
@@ -821,6 +829,14 @@
         containers.push(vm, vm?.$data);
       }
     }
+    // 2026-10-01 实测：真实详情页把水印模板挂在「添加水印」按钮往上第 2 层组件的
+    // data.watermarkTemplate（单数）上，Vuex 里没有。这里显式把触发器祖先链也扫一遍。
+    const triggerNode = [...document.querySelectorAll('button,.el-button,span')]
+      .find((node) => clean(node.textContent) === '\u6dfb\u52a0\u6c34\u5370');
+    let triggerVm = triggerNode?.__vue__ || triggerNode?.__vueParentComponent?.proxy || null;
+    for (let depth = 0; triggerVm && depth < 12; triggerVm = triggerVm.$parent, depth += 1) {
+      containers.push(triggerVm, triggerVm?.$data);
+    }
     const keys = [
       // 2026-10-01 实测：真实详情页把水印模板挂在组件 data 上的字段就叫 watermarkTemplate（单数）。
       // 旧别名表只有复数/带 List 的写法 → 怎么扫都是 0 条。
@@ -837,7 +853,11 @@
       'imageWatermarkList',
       'addWatermarkList',
     ];
-    let loadedList = null;
+    // 关键：**不要碰到第一个数组就停**。Element UI 上到处是叫 options 的数组
+    // （下拉/表格都有），一停就被它们劫持。所有容器/所有候选键都扫一遍，
+    // 逐条按别名归一化，坏数据自然丢掉，再按 id 去重。
+    const vueItems = [];
+    const seen = new Set();
     for (const container of containers) {
       if (!container || typeof container !== 'object') continue;
       const sources = [
@@ -850,44 +870,40 @@
       for (const source of sources) {
         if (!source || typeof source !== 'object') continue;
         for (const key of keys) {
-          if (Array.isArray(source[key])) {
-            loadedList = source[key];
-            break;
+          if (!Array.isArray(source[key])) continue;
+          for (const item of source[key]) {
+            const templateId = clean(item?.template_id ?? item?.templateId ?? item?.watermark_id ?? item?.watermarkId ?? item?.id);
+            const name = clean(item?.name ?? item?.template_name ?? item?.templateName ?? item?.watermark_name ?? item?.watermarkName ?? item?.label);
+            if (!templateId || !name || seen.has(templateId)) continue;
+            seen.add(templateId);
+            vueItems.push({
+              template_id: templateId,
+              name,
+              preview_url: clean(item?.preview_url ?? item?.previewUrl ?? item?.image_url ?? item?.imageUrl ?? item?.img_url ?? item?.imgUrl ?? item?.url),
+            });
           }
         }
-        if (loadedList !== null) break;
       }
-      if (loadedList !== null) break;
     }
-    if (loadedList === null) {
-      const items = readWatermarkTemplatesFromDom();
-      return { loaded: items.length > 0, items };
-    }
-    // Merge the Vue option list with any rows the VISIBLE open menu renders now.
-    // The collector expanded 添加水印 right before capture, so the open menu can
-    // expose options the Vue model has not flushed yet; stale HIDDEN menus never
-    // contribute. Dedupe by template_id across the two sources.
-    const seen = new Set();
-    const vueItems = loadedList.map((item) => {
-      const templateId = clean(item?.template_id ?? item?.templateId ?? item?.watermark_id ?? item?.watermarkId ?? item?.id);
-      return {
-        template_id: templateId,
-        name: clean(item?.name ?? item?.template_name ?? item?.templateName ?? item?.watermark_name ?? item?.watermarkName ?? item?.label),
-        preview_url: clean(item?.preview_url ?? item?.previewUrl ?? item?.image_url ?? item?.imageUrl ?? item?.img_url ?? item?.imgUrl ?? item?.url),
-      };
-    }).filter((item) => item.template_id && item.name && !seen.has(item.template_id) && seen.add(item.template_id));
+    // 真实菜单行没有 id：只能按**名称精确相等**回查 Vue 列表拿 id，对不上的不猜。
+    const vueByName = new Map();
+    for (const item of vueItems) if (!vueByName.has(item.name)) vueByName.set(item.name, item);
     const merged = [...vueItems];
     for (const domItem of readWatermarkTemplatesFromDom()) {
-      if (!seen.has(domItem.template_id)) {
-        seen.add(domItem.template_id);
-        merged.push(domItem);
+      if (domItem.template_id) {
+        if (!seen.has(domItem.template_id)) {
+          seen.add(domItem.template_id);
+          merged.push(domItem);
+        }
+        continue;
       }
+      const matched = vueByName.get(domItem.name);
+      if (!matched || seen.has(matched.template_id)) continue;
+      seen.add(matched.template_id);
+      merged.push({ ...matched, preview_url: matched.preview_url || domItem.preview_url });
     }
-    if (merged.length) return { loaded: true, items: merged };
-    const domItems = readWatermarkTemplatesFromDom();
-    return { loaded: domItems.length > 0, items: domItems };
+    return { loaded: merged.length > 0, items: merged };
   };
-
   const detailVm = findDetailVm();
   const storeCategory = detailVm?.$refs?.storeCategory;
   const storeInfo = storeCategory?.storeCategoryInfo || storeCategory?.storeInfo || {};

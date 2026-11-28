@@ -246,6 +246,19 @@ def test_store_template_has_explicit_size_chart_sources_and_two_watermark_roles(
     assert "模板已导入，但页面刷新失败" in confirm_import
 
 
+def test_expired_promotion_is_flagged_on_template_cards_and_copy_rows() -> None:
+    """活动过期要在「店铺模板卡片」和「副本行」都看得见（2026-11-29 用户要求）。"""
+    script = (ROOT / "apps/web/app.js").read_text(encoding="utf-8")
+    assert "promotion_status" in script
+    assert "活动已过期" in script
+    assert "promotion-chip" in script
+    # 模板卡片徽标用已有样式 + 过期高亮；副本行用 chip。
+    assert 'template-readiness-badge promotion-badge' in script
+    styles = (ROOT / "apps/web/styles.css").read_text(encoding="utf-8")
+    assert ".promotion-chip" in styles
+    assert ".template-readiness-badge.is-expired" in styles
+
+
 def test_store_template_editor_groups_workflow_fields_and_shows_watermark_thumbnails():
     html = INDEX.read_text(encoding="utf-8")
     script = APP.read_text(encoding="utf-8")
@@ -429,7 +442,7 @@ def test_listing_copy_warnings_do_not_disable_automation_creation():
 def test_promotion_warning_labels_distinguish_expired_unresolved_and_unconfigured():
     script = APP.read_text(encoding="utf-8")
     assert 'promotion_expired: "促销活动已过期，请重新选择"' in script
-    assert 'promotion_unresolved: "促销活动未解析（促销目录中未找到该活动），执行时可能失败"' in script
+    assert 'promotion_unresolved: "促销活动未解析（本店活动目录里没采到这条；执行时会在马帮页面按 ID/名称再找一次）"' in script
     assert 'promotion_unconfigured: "活动未配置"' in script
     for code in ["promotion_expired", "promotion_unresolved", "promotion_unconfigured"]:
         assert f'{code}: "listing-copy-basic-section"' in script
@@ -441,7 +454,7 @@ def test_readiness_labels_preserve_required_category_attribute_ids():
     assert '必填类目属性未填写：${String(field).split(".").slice(1).join(".")}' in script
     # 枚举外的自选值（原产地=Philippines）另给一条提醒文案，不再显示成「未填写」。
     assert 'key.startsWith("category_custom_option.")' in script
-    assert "使用了枚举外的自选值" in script
+    assert "的值不在本类目枚举里" in script
 
 
 def test_listing_copy_table_only_requires_size_chart_for_local_copies():

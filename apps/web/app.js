@@ -87,6 +87,8 @@ const state = {
   watermarkCatalogStatus: null,
   watermarkCatalogStoreId: "",
   watermarkOpenRole: "",
+  // 菜单是不是被 hover 打开的：这种情况下紧接着的 click 不应该把它关掉（否则鼠标用户点一下就像没反应）。
+  watermarkOpenedByHover: false,
   watermarkHoverCloseTimer: 0,
   storeSizeChartTemplates: [],
   cnscPricePreview: null,
@@ -224,6 +226,7 @@ const AUTOMATION_STAGE_LABELS = {
   select_discount_activity: "正在选择折扣活动",
   upload_variant_thumbnails: "正在上传颜色图",
   fix_description_image_widths: "正在修复描述图片尺寸",
+  reassert_basic_info: "保存前复核标题与 Parent SKU",
   validate_before_save: "正在校验保存前内容",
   save_draft: "正在保存草稿",
   save_draft_rejected: "保存被马帮拒绝",
@@ -271,7 +274,9 @@ const LISTING_COPY_READINESS_LABELS = {
   mabang_category_id: "平台类目未关联马帮",
   mabang_discount_id: "店铺促销活动未配置",
   promotion_expired: "促销活动已过期，请重新选择",
-  promotion_unresolved: "促销活动未解析（促销目录中未找到该活动），执行时可能失败",
+  // 本地目录没采到 ≠ 页面上没有：执行器是去马帮「选择折扣活动」弹窗里按 ID/名称找的，
+  // 历史 29 单（2026-10-26 Oct.3H）同样提醒但活动都选中了，所以文案别再写「可能失败」。
+  promotion_unresolved: "促销活动未解析（本店活动目录里没采到这条；执行时会在马帮页面按 ID/名称再找一次）",
   promotion_unconfigured: "活动未配置",
   main_image: "缺少商品主图",
   asset_root: "缺少商品素材目录",
@@ -2498,7 +2503,7 @@ async function recollectStorePromotions() {
     button.disabled = true;
     button.textContent = "采集中…";
   }
-  if (status) status.textContent = "正在读取马帮「选择折扣活动」列表…";
+  if (status) status.textContent = "正在打开该店铺的商品页并读取「选择折扣活动」列表…";
   try {
     let result;
     try {
@@ -2616,6 +2621,8 @@ function renderWatermarkCatalogStatus() {
 
 async function loadStoreWatermarks() {
   const storeId = $("store-template-store")?.value || "";
+  // 水印目录按「马帮账号」存（公司级、全站通用）：同一账号下换店铺/换本土跨境模式都是同一份。
+  const accountId = currentStoreTemplateAccountId();
   if (!storeId) {
     state.storeWatermarks = [];
     state.watermarkCatalogStatus = null;
@@ -2632,7 +2639,8 @@ async function loadStoreWatermarks() {
     closeWatermarkMenu();
   }
   state.watermarkCatalogStoreId = storeId;
-  const data = await api(`/api/store-watermarks?store_id=${encodeURIComponent(storeId)}`);
+  const accountQuery = accountId ? `&account_id=${encodeURIComponent(accountId)}` : "";
+  const data = await api(`/api/store-watermarks?store_id=${encodeURIComponent(storeId)}${accountQuery}`);
   state.storeWatermarks = data.items || [];
   state.watermarkCatalogStatus = data.status || null;
   // 目录里没有这个 ID 时**保留**已配置的水印（可能只是还没采集/换过浏览器）：
@@ -2644,6 +2652,7 @@ async function loadStoreWatermarks() {
 
 async function collectStoreWatermarks() {
   const storeId = $("store-template-store")?.value || "";
+  const accountId = currentStoreTemplateAccountId();
   const btn = $("store-template-watermark-collect-btn");
   const status = $("store-template-watermark-catalog-status");
   if (!storeId) {
@@ -2653,13 +2662,27 @@ async function collectStoreWatermarks() {
   if (btn) btn.disabled = true;
   if (status) {
     status.className = "watermark-catalog-status muted";
-    status.textContent = "正在采集，请让马帮 Chrome 停在商品编辑页…";
+    status.textContent = "正在采集，请让马帮 Chrome 停在任意一个店铺的商品编辑页…";
   }
+  // 采集浏览器是按需启动的（空闲会自动关）：连不上就先把该账号的浏览器拉起来再试一次，
+  // 拉起来后如果没开商品编辑页，会得到一句更可执行的提示。
+  const collect = () => api("/api/store-watermarks/collect", {
+    method: "POST",
+    body: JSON.stringify({ store_id: storeId, account_id: accountId || undefined }),
+  });
   try {
-    const result = await api("/api/store-watermarks/collect", {
-      method: "POST",
-      body: JSON.stringify({ store_id: storeId }),
-    });
+    let result;
+    try {
+      result = await collect();
+    } catch (error) {
+      if (!/连不上马帮采集浏览器|ECONNREFUSED|connect/i.test(String(error?.message || error))) throw error;
+      if (status) status.textContent = "采集浏览器没在运行，正在启动后再试…";
+      await api("/api/mabang-browser/start", {
+        method: "POST",
+        body: JSON.stringify({ account_id: accountId || undefined }),
+      }).catch(() => null);
+      result = await collect();
+    }
     await loadStoreWatermarks();
     if (status && result?.count === 0) {
       status.className = "watermark-catalog-status watermark-catalog-status--warn";
@@ -2860,15 +2883,17 @@ function closeWatermarkMenu(role) {
   if (menu) menu.hidden = true;
   if (trigger) trigger.setAttribute("aria-expanded", "false");
   state.watermarkOpenRole = "";
+  state.watermarkOpenedByHover = false;
   window.clearTimeout(state.watermarkHoverCloseTimer);
   state.watermarkHoverCloseTimer = 0;
 }
 
-function openWatermarkMenu(role) {
+function openWatermarkMenu(role, options = {}) {
   if (!state.storeWatermarks.length) return;
   const menu = watermarkRoleMenu(role);
   const trigger = watermarkRoleTrigger(role);
   if (!menu || !trigger) return;
+  state.watermarkOpenedByHover = Boolean(options && options.byHover);
   if (state.watermarkOpenRole === role) return;
   closeWatermarkMenu();
   window.clearTimeout(state.watermarkHoverCloseTimer);
@@ -2971,7 +2996,7 @@ function initWatermarkPickers() {
     picker.addEventListener("mouseenter", () => {
       window.clearTimeout(state.watermarkHoverCloseTimer);
       state.watermarkHoverCloseTimer = 0;
-      openWatermarkMenu(role);
+      openWatermarkMenu(role, { byHover: true });
     });
     picker.addEventListener("mouseleave", () => scheduleWatermarkMenuClose(role));
     const trigger = watermarkRoleTrigger(role);
@@ -7537,6 +7562,10 @@ function renderStoreTemplateCards() {
         : (template.price_tiers || []).map((tier) => `${tier.id} ¥${tier.global_price_cny || "-"}`).join(" · "))
       : [template.normal_price, template.sale_price].filter((item) => item !== "").join(" → ");
     const promotion = template.discount_label || (template.promotion_activity_id ? "已配置活动" : "无活动");
+    const promoStatus = String(template.promotion_status || "");
+    const promoProblem = promoStatus === "expired"
+      ? "活动已过期"
+      : (promoStatus === "unresolved" ? "活动未解析" : (promoStatus === "unconfigured" ? "未配活动" : ""));
     const accountLabel = storeTemplateAccountLabel(template.account_id);
     const card = document.createElement("article");
     card.className = "template-card";
@@ -7547,7 +7576,7 @@ function renderStoreTemplateCards() {
           <div class="template-card-name">${escapeHtml(template.template_name || "未命名模板")}</div>
           ${accountLabel ? `<div class="template-card-account">账号 · ${escapeHtml(accountLabel)}</div>` : ""}
         </div>
-        <div class="template-card-badges">${templateSiteBadge(template)}${cnsc ? `<span class="template-mode-badge${isPureCnscMode(template) ? "" : " is-3pf"}">${escapeHtml(listingModeBadgeLabel(template))}</span>` : ""}${String(template.status || "").toLowerCase() === "needs_mabang_import" ? '<span class="template-readiness-badge" title="该类目在这个记录站点还没有必填项规则：可先保存，采集后自动补齐">待采集类目规则</span>' : ""}${cnscMissing.length ? '<span class="template-readiness-badge">待补全配置</span>' : ""}</div>
+        <div class="template-card-badges">${templateSiteBadge(template)}${cnsc ? `<span class="template-mode-badge${isPureCnscMode(template) ? "" : " is-3pf"}">${escapeHtml(listingModeBadgeLabel(template))}</span>` : ""}${String(template.status || "").toLowerCase() === "needs_mabang_import" ? '<span class="template-readiness-badge" title="该类目在这个记录站点还没有必填项规则：可先保存，采集后自动补齐">待采集类目规则</span>' : ""}${promoProblem ? `<span class="template-readiness-badge promotion-badge${promoStatus === "expired" ? " is-expired" : ""}" title="模板上的店铺促销活动需要重新选择：执行时按马帮页面重新匹配，找不到会跳过">${escapeHtml(promoProblem)}</span>` : ""}${cnscMissing.length ? '<span class="template-readiness-badge">待补全配置</span>' : ""}</div>
       </div>
       <div class="template-card-meta">
         <span>类目 · <code>${escapeHtml(template.marketplace_category_path || "未选择")}</code></span>
@@ -7556,7 +7585,7 @@ function renderStoreTemplateCards() {
           : ""}
         <span>价格 · <code>${escapeHtml(price || "未设置")}</code></span>
         <span>尺码 · <code>${escapeHtml(sizes)}</code></span>
-        <span>${cnsc ? "站点" : "活动"} · ${escapeHtml(cnsc ? `${(template.target_site_stores || []).length} 个目标店铺` : promotion)}</span>
+        <span>${cnsc ? "站点" : "活动"} · ${escapeHtml(cnsc ? `${(template.target_site_stores || []).length} 个目标店铺` : `${promotion}${promoProblem ? `（${promoProblem}）` : ""}`)}</span>
         ${templateDescriptionLimitLabel(template) ? `<span>描述配图 · ${escapeHtml(templateDescriptionLimitLabel(template))}</span>` : ""}
         ${cnscMissing.length ? `<span>待补全 · ${escapeHtml(cnscMissing.map(cnscConfigurationLabel).join("、"))}</span>` : ""}
       </div>
@@ -7714,6 +7743,13 @@ function appendListingCopyRow(tbody, copy, jobs) {
     && !copy.size_chart_asset_id
     && !copy.mabang_size_chart_template_id
   )) gaps.push("尺码图");
+  const promoStatusRaw = String(copy.promotion_status || "");
+  const promoHint = promoStatusRaw === "expired"
+    ? "活动已过期"
+    : (promoStatusRaw === "unresolved" ? "活动未解析" : (promoStatusRaw === "unconfigured" ? "未配活动" : ""));
+  const promoChip = promoHint
+    ? `<span class="promotion-chip${promoStatusRaw === "expired" ? " is-expired" : ""}" title="促销活动需要重新选择：模板/副本上的活动已不在可用目录里，执行时会在马帮页面按 ID/名称再找一次">${escapeHtml(promoHint)}</span>`
+    : "";
   const copyStatusLabel = gaps.length
     ? `缺少 ${gaps.join(", ")}`
     : copy.description_status === "pending"
@@ -7747,7 +7783,7 @@ function appendListingCopyRow(tbody, copy, jobs) {
       <td class="listing-copy-title-cell${titleOverBy ? " is-over-limit" : ""}" title="${escapeHtml(titleOverBy ? `${titleText}（超出 ${titleOverBy} 字符）` : titleText)}">${titleOverBy ? `<span class="listing-copy-title-over">超 ${titleOverBy}</span>` : ""}${escapeHtml(titleText)}</td>
       <td class="listing-copy-num-cell">${escapeHtml(copy.sku_count || 0)}</td>
       <td class="listing-copy-num-cell">${escapeHtml(copy.price_count || 0)}</td>
-      <td><span class="status ${escapeHtml(copy.status || "")}">${escapeHtml(copyStatusLabel)}</span></td>
+      <td><span class="status ${escapeHtml(copy.status || "")}">${escapeHtml(copyStatusLabel)}</span>${promoChip}</td>
       <td><span class="row-status"><span class="row-glyph row-glyph--${autoTone}" aria-hidden="true"></span><span class="row-status-label">${escapeHtml(autoLabel)}</span></span></td>
       <td class="table-actions">${actionButtons.join("")}</td>
   `;
@@ -10739,6 +10775,17 @@ async function openStoreTemplateEditor(templateId) {
   $("store-template-sale-price").value = saleIsAutomatic ? (derivedSale || templateSale) : String(templateSale);
   $("store-template-sale-price").dataset.manual = saleIsAutomatic ? "" : "1";
   $("store-template-promotion").value = template.promotion_activity_id || template.mabang_discount_id || "";
+  {
+    // 活动过期/未解析：下拉里可能只剩「当前不可用，仅保留原值」这条禁用项，
+    // 这里把原因说清楚，免得操作员以为还能直接用。
+    const promoStatus = String(template.promotion_status || "");
+    const statusEl = $("store-template-promotion-status");
+    if (statusEl && (promoStatus === "expired" || promoStatus === "unresolved")) {
+      statusEl.textContent = promoStatus === "expired"
+        ? "当前促销活动已过期：请重新选择一个可用活动（或点「重新采集活动」刷新目录）"
+        : "当前促销活动未解析：本店活动目录里没有这条，请重新选择";
+    }
+  }
   if ($("store-template-cnsc-store")) $("store-template-cnsc-store").value = template.cnsc_store?.id || template.mabang_store_id || "";
   if ($("store-template-default-site-discount-percent")) $("store-template-default-site-discount-percent").value = template.default_site_discount_percent ?? 40;
   state.cnscTargetStoreConfigs = new Map((template.target_site_stores || []).map((item) => [item.store_id || item.store_name || item.site_code, { ...item }]));
@@ -12538,7 +12585,7 @@ function listingCopyReadinessLabel(field, copy) {
   const categoryFieldName = categoryAttributeName(copy, key);
   if (key.startsWith("category_custom_option.")) {
     const fieldId = key.split(".").slice(1).join(".");
-    return `类目属性「${categoryFieldName || fieldId}」使用了枚举外的自选值，执行时按马帮「自填选项」写入`;
+    return `类目属性「${categoryFieldName || fieldId}」的值不在本类目枚举里：执行时会先试页面真实选项、再试「添加自填选项」，都失败就留空并提醒——建议改成枚举里的值`;
   }
   if (key.startsWith("category_attributes.")) {
     return `必填类目属性未填写：${String(field).split(".").slice(1).join(".")}${categoryFieldName ? `（${categoryFieldName}）` : ""}`;
@@ -13706,6 +13753,11 @@ const AUTOMATION_ERROR_LABELS = {
   watermark_position_out_of_role: "水印范围越界：主图水印只能第 1 张，产品图水印从第 2 张起",
   video_store_not_found: "未找到店铺视频",
   video_missing: "缺少商品视频",
+  // 保存前「描述图片宽度」兜底（马帮拒存条件：描述图宽 <700）。原来 skip 时只回
+  // status，存储层把 reason 丢掉，任务行上只剩英文「skipped」，看不出是没事还是失败。
+  description_image_widths_ok: "描述图片宽度都 ≥700，无需修复",
+  description_images_absent: "描述里没有图片，跳过宽度修复",
+  description_image_widths_fixed: "已把描述图片宽度改成 1000（低于 700 会被保存拒绝）",
   parent_sku_not_found: "未找到父 SKU",
   save_click_failed: "点击保存失败",
   publish_clicked_unexpectedly: "意外触发了发布",
@@ -14270,7 +14322,14 @@ document.addEventListener("click", async (event) => {
   const watermarkTrigger = target.closest("[data-watermark-trigger]");
   if (watermarkTrigger instanceof HTMLElement) {
     const role = watermarkTrigger.dataset.watermarkTrigger || "";
-    if (state.storeWatermarks.length) toggleWatermarkMenu(role);
+    if (!state.storeWatermarks.length) return;
+    // 鼠标进入触发器时菜单已经被 hover 打开；紧接着的 click 若按 toggle 处理会立刻关掉
+    // （真实用户「点一下」看起来像没反应）。这一次点击只当作「确认打开」。
+    if (state.watermarkOpenRole === role && state.watermarkOpenedByHover) {
+      state.watermarkOpenedByHover = false;
+      return;
+    }
+    toggleWatermarkMenu(role);
     return;
   }
   const watermarkOption = target.closest(".watermark-menu-item");

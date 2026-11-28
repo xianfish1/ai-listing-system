@@ -264,12 +264,14 @@ def confirm_page_import(
         )
     watermarks = None
     if snapshot.get("watermark_catalog_loaded") is True:
+        # 水印模板是马帮公司级的：目录按账号存一份（本土/跨境通用），这里带上导入用的账号。
         watermarks = replace_watermark_catalog(
             staged,
             store_id=store["id"],
             raw_items=snapshot.get("watermark_catalog") or [],
             now=now,
             catalog_loaded=True,
+            account_id=account_id,
         )
     size_chart_templates = None
     if snapshot.get("size_chart_template_catalog_loaded") is True:

@@ -3605,12 +3605,15 @@ class ApiHandler(BaseHTTPRequestHandler):
 
         if path == "/api/store-watermarks":
             store_id = str(query.get("store_id", [""])[0]).strip()
+            account_id = str(query.get("account_id", [""])[0]).strip()
             if not store_id:
                 raise ApiRequestError("store_id is required", 400)
             self._json({
-                "items": storage.list_store_watermarks(store_id),
+                # 水印模板是马帮公司级的：目录按账号存一份，全站通用（本土/跨境/3PF 共用）。
+                "items": storage.list_store_watermarks(store_id, account_id=account_id),
                 # 界面要能显示「目录 N 条 · 采集于 …」/「上次采集失败：…」，没有记录时为 null。
-                "status": storage.get_store_watermark_catalog_status(store_id),
+                "status": storage.get_store_watermark_catalog_status(store_id, account_id=account_id),
+                "scope": "account",
             })
             return
 
@@ -4705,37 +4708,66 @@ class ApiHandler(BaseHTTPRequestHandler):
             # 走 Playwright/CDP 采集（browser-harness 的 daemon 在本机 Python 3.14 下起不来，
             # 过去这条路由必然 422）。采集器只读：打开「添加水印」读目录 + 图片范围结构，
             # 绝不点任何水印选项，读完把菜单收回去。
-            collect_result = run_store_watermark_collect(
-                cdp_url=str(payload.get("cdp_url") or "").strip() or "http://127.0.0.1:18223",
-            )
+            #
+            # 浏览器端口按「模板所属马帮账号」解析：多账号各自一只 Chrome（18223/18224…），
+            # 只写死 18223 会在采集非默认账号的店铺时读到别的账号的页面。
+            account_id = str(payload.get("account_id") or "").strip() or None
+            cdp_url = str(payload.get("cdp_url") or "").strip()
+            if not cdp_url:
+                cdp_url = str(
+                    storage.resolve_mabang_account_runtime(account_id).get("cdp_url")
+                    or "http://127.0.0.1:18223"
+                )
+            collect_result = run_store_watermark_collect(cdp_url=cdp_url)
             if not collect_result.get("ok"):
                 message = str(collect_result.get("error") or "读取马帮水印目录失败")
-                storage.record_store_watermark_collect_failure(store_id, message)
+                if "ECONNREFUSED" in message or "TIMEOUT" in message.upper():
+                    message = (
+                        f"连不上马帮采集浏览器（{cdp_url}）：请先在该账号上启动浏览器，"
+                        "并停在任意一个店铺的商品编辑页，再点「采集/更新水印」"
+                    )
+                storage.record_store_watermark_collect_failure(store_id, message, account_id=account_id or "")
                 raise ApiRequestError(message, 422)
             captured_store_id = str((collect_result.get("store") or {}).get("id") or "").strip()
             captured_store_name = str((collect_result.get("store") or {}).get("name") or "").strip()
+            # 水印模板是马帮公司级的：页面停在同账号的**任意**店铺编辑页都能采（本土/跨境通用），
+            # 只拦「页面属于另一个马帮账号」——那会把别人公司的模板写进这个账号的目录。
             if captured_store_id and captured_store_id != store_id:
-                message = (
-                    f"当前马帮页面是店铺「{captured_store_name or captured_store_id}」，"
-                    f"不是要采集的店铺；水印目录未写入"
-                )
-                storage.record_store_watermark_collect_failure(store_id, message)
-                raise ApiRequestError(message, 422)
+                requested_account = str(account_id or "").strip() or storage.resolve_store_account_id(store_id)
+                page_account = storage.resolve_store_account_id(captured_store_id)
+                if page_account and requested_account and page_account != requested_account:
+                    message = (
+                        f"当前马帮页面是店铺「{captured_store_name or captured_store_id}」"
+                        f"（属于另一个马帮账号）；水印目录未写入"
+                    )
+                    storage.record_store_watermark_collect_failure(
+                        store_id, message, account_id=account_id or ""
+                    )
+                    raise ApiRequestError(message, 422)
             raw_items = collect_result.get("templates")
             if not isinstance(raw_items, list):
                 message = "水印采集结果里没有模板列表，未写入（原目录保持不变）"
-                storage.record_store_watermark_collect_failure(store_id, message)
+                storage.record_store_watermark_collect_failure(store_id, message, account_id=account_id or "")
                 raise ApiRequestError(message, 422)
             try:
-                items = storage.replace_store_watermark_catalog(store_id, raw_items)
+                items = storage.replace_store_watermark_catalog(
+                    store_id, raw_items, account_id=account_id or ""
+                )
             except ValueError as exc:
                 raise ApiRequestError(str(exc), 422) from exc
             self._json({
                 "ok": True,
                 "store_id": store_id,
+                "account_id": storage.resolve_store_account_id(store_id) if not account_id else account_id,
+                "page_store": {
+                    "id": captured_store_id,
+                    "name": captured_store_name,
+                    "same_store": captured_store_id == store_id,
+                },
+                "scope": "account",
                 "count": len(items),
                 "items": items,
-                "status": storage.get_store_watermark_catalog_status(store_id),
+                "status": storage.get_store_watermark_catalog_status(store_id, account_id=account_id or ""),
                 # 「选完水印模板之后要选的图片范围」控件的真实结构：采集时顺手读出来，
                 # 执行器那一段要按它接（不写库，只在响应里回给界面/排查用）。
                 "range_probe": collect_result.get("range_probe") or {},
@@ -4756,7 +4788,11 @@ class ApiHandler(BaseHTTPRequestHandler):
                     storage.resolve_mabang_account_runtime(account_id).get("cdp_url")
                     or "http://127.0.0.1:18223"
                 )
-            collect_result = run_store_promotion_collect(store_id, cdp_url=cdp_url)
+            collect_result = run_store_promotion_collect(
+                store_id,
+                store_name=storage.resolve_store_name(store_id),
+                cdp_url=cdp_url,
+            )
             if not collect_result.get("ok"):
                 message = str(collect_result.get("error") or "读取马帮店铺活动失败")
                 storage.record_store_promotion_collect_failure(store_id, message)
@@ -5551,7 +5587,7 @@ class ApiHandler(BaseHTTPRequestHandler):
                 return
             raw_items = capture.get("watermark_templates")
             if isinstance(raw_items, list) and capture.get("watermark_catalog_loaded") is True:
-                storage.replace_store_watermark_catalog(store_id, raw_items)
+                storage.replace_store_watermark_catalog(store_id, raw_items, account_id=account_id or "")
                 return
             # 补采水印也要走同一个账号的浏览器：读错端口会读到别的账号的页面。
             account_cdp_url = str(
@@ -5571,7 +5607,7 @@ class ApiHandler(BaseHTTPRequestHandler):
                 return
             templates = collect_result.get("templates")
             if isinstance(templates, list):
-                storage.replace_store_watermark_catalog(store_id, templates)
+                storage.replace_store_watermark_catalog(store_id, templates, account_id=account_id or "")
         except Exception:  # noqa: BLE001 - 水印目录只是附带产物，不能影响页面采集
             return
 

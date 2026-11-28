@@ -102,7 +102,7 @@ def validate_attribute_values(version: dict[str, Any], values: dict[str, Any] | 
                     # 枚举外的值是马帮支持的「自填选项」（原产地=Philippines 这类自选值）：
                     # 采集端会把页面上的自填值并入 options，执行器会走 select_custom
                     # 写进下拉，故不阻塞，只提醒操作员该值不在枚举里。
-                    f"{label} 使用枚举外的自选值「{unknown}」，自动化将按马帮「自填选项」写入",
+                    f"{label} 的值「{unknown}」不在本类目枚举里：自动化会先试页面真实选项、再试「添加自填选项」，都失败就留空并提醒；建议改成枚举里的值",
                 )
             )
     return ValidationResult(valid=not errors, errors=errors, warnings=warnings, required_field_ids=required)

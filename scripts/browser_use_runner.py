@@ -1848,15 +1848,25 @@ def prepare_mabang_page_import_catalogs():
     }}
     if (state.watermarkMenuMethod) {{
       state.watermarkOpenedByCollector = true;
+      // Real page (publish-ui) loads the watermark templates only on the FIRST open of this
+      // dropdown: the menu shows a single "no watermark" placeholder row first and swaps in
+      // the real template rows after 1-3s. Wait for a REAL template row, otherwise the capture
+      // step right after reads an empty list (that is why the catalog always looked empty).
+      // Keep this block ASCII-only: it is shipped to the browser as source text.
       await waitUntil(() => {{
         if (!watermarkMenuVisible()) return true;
-        const menu = [...document.querySelectorAll('.el-dropdown-menu,.el-select-dropdown,.el-popper,[role="menu"]')]
-          .filter((node) => isVisible(node))
-          .find((node) => clean(node.textContent).includes('\u6dfb\u52a0\u6c34\u5370') || !clean(node.textContent).includes('\u9009\u62e9\u5c3a\u7801\u56fe'));
+        const menus = [...document.querySelectorAll('.el-dropdown-menu,.el-select-dropdown,.el-popper,[role="menu"]')]
+          .filter((node) => isVisible(node));
+        const menu = menus.find((node) => clean(node.textContent).includes('\u6dfb\u52a0\u6c34\u5370') || !clean(node.textContent).includes('\u9009\u62e9\u5c3a\u7801\u56fe')) || menus[0];
+        if (!menu) return false;
         const loadingMasks = [...document.querySelectorAll('.el-loading-mask')];
         if (loadingMasks.some((node) => isVisible(node))) return false;
-        return Boolean(menu) && (menu.querySelector('.el-dropdown-menu__item,.el-select-dropdown__item,[role="menuitem"],li') || clean(menu.textContent).includes('\u6682\u65e0'));
-      }}, 6000);
+        const rows = [...menu.querySelectorAll('.el-dropdown-menu__item,li,[role="menuitem"]')]
+          .filter((node) => isVisible(node))
+          .map((node) => clean(node.textContent))
+          .filter((text) => text && !/^\u6682\u65e0\u6c34\u5370/.test(text) && !/\u6c34\u5370\u6a21\u677f\u7ba1\u7406/.test(text));
+        return rows.length > 0;
+      }}, 12000);
     }}
   }};
   await openWatermarkMenu();
@@ -2613,15 +2623,20 @@ def collect_store_watermarks_via_playwright(
 def collect_store_promotions_via_playwright(
     store_id: str,
     *,
+    store_name: str = "",
     node_executable: str = "node",
     cdp_url: str = "http://127.0.0.1:18223",
-    timeout_seconds: int = 180,
+    timeout_seconds: int = 240,
 ) -> dict[str, Any]:
     """定向重采一个本土店铺的促销活动目录（走 Playwright/CDP，只读）。
 
     页面导入没读到活动列表时，模板里的活动只剩名称、没有有效期，后端随之判成
     unresolved（模板下拉看不到它）。这里单独展开一次「选择折扣活动」弹窗，把活动行
     （start_time / end_time / flag）读出来，供调用方写回店铺活动目录。
+
+    浏览器没停在目标店铺时采集脚本会**自动打开**该店铺的商品页（工作区 → 新增刊登 →
+    在「店铺名称」里选目标店铺），所以不需要操作员先手动切店铺；``store_name`` 用在
+    店铺下拉里按名字选择（页面里拿不到 id→name 映射时的兜底）。
 
     返回 ``scripts/mabang_promotion_collect.cjs`` 的 payload：
     ``{ok, status, store, items, catalog_loaded, diagnostics, error}``。
@@ -2656,6 +2671,8 @@ def collect_store_promotions_via_playwright(
         "--store-id",
         str(store_id or "").strip(),
     ]
+    if str(store_name or "").strip():
+        command.extend(["--store-name", str(store_name).strip()])
     try:
         completed = subprocess.run(
             command,

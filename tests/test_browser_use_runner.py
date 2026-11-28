@@ -112,7 +112,9 @@ if (config.watermarkMenu) {
   const menu = {
     textContent: '\u6dfb\u52a0\u6c34\u5370 ' + (config.watermarkMenu.options || []).map((item) => item.name).join(' '),
     querySelectorAll: (selector) => {
-      if (selector === '[data-watermark-id],[data-template-id],[data-templateid],[data-watermarkid],.watermark-template,.watermark-item,.watermark-list-item') {
+      // 夹具按「选择器里带 data-watermark-id」认水印行：真实页面后来又补了
+      // .el-dropdown-menu__item，这里别把选择器钉死，免得采集侧一改夹具就假红。
+      if (selector.includes('[data-watermark-id]')) {
         return (config.watermarkMenu.options || []).map(menuNode);
       }
       return [];

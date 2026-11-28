@@ -52,6 +52,9 @@ const DOM_ROW_SELECTOR = [
   '.watermark-template',
   '.watermark-item',
   '.watermark-list-item',
+  // 真实页面（publish-ui）的菜单行是 Element UI 的 .el-dropdown-menu__item，
+  // 行文本就是模板名、DOM 里没有 id（旧选择器漏了它 → 菜单开着也读不出行）。
+  '.el-dropdown-menu__item',
 ].join(',');
 const MENU_SELECTOR = '.el-dropdown-menu,.el-select-dropdown,.el-popper,[role="menu"]';
 const ADD_WATERMARK_TEXT = '\u6dfb\u52a0\u6c34\u5370';
@@ -139,6 +142,9 @@ async function readWatermarkCatalog(frame) {
         const rect = node.getBoundingClientRect();
         return style.display !== 'none' && style.visibility !== 'hidden' && Number(style.opacity) !== 0 && rect.width > 0 && rect.height > 0;
       };
+      // 菜单里不是模板的两行（管理入口 / 空态），永远不算模板。
+      // 空态有两版文案（「暂无水印」/「暂无水印模板」），都算占位、都不触发「等到有内容」。
+      const NON_TEMPLATE_ROWS = [/水印模板管理/, /^暂无水印/];
       const out = {
         store: { id: '', name: '' },
         catalog_loaded: false,
@@ -150,7 +156,7 @@ async function readWatermarkCatalog(frame) {
         errors: [],
       };
 
-      // ---- 店铺身份（用于「采集页面的店铺 == 请求的店铺」校验）----
+      // ---- 1) 店铺身份（用于「采集页面的店铺 == 请求的店铺」校验）----
       try {
         const rootVm = document.querySelector('#box1')?.__vue__ || document.querySelector('[id^="box"]')?.__vue__;
         const storeState = rootVm?.$store?.state?.shopee?.storeCategoryModule || {};
@@ -166,73 +172,7 @@ async function readWatermarkCatalog(frame) {
         out.errors.push(`store identity: ${String((error && error.message) || error)}`);
       }
 
-      // ---- Vue 状态里的水印模板（capture 脚本用的同一份别名表）----
-      const vueItems = [];
-      try {
-        const rootVm = document.querySelector('#box1')?.__vue__ || document.querySelector('[id^="box"]')?.__vue__;
-        const containers = [
-          rootVm?.$refs?.productMaterialModuleRef,
-          rootVm?.$refs?.productMaterialModuleRef?.$data,
-          rootVm?.$store?.state?.shopee?.productMaterialModule,
-        ];
-        for (const element of document.querySelectorAll('.el-dialog,.el-dialog__wrapper,[role="dialog"],.el-popper,.el-dropdown-menu,.el-select-dropdown')) {
-          for (let vm = element.__vue__ || element.__vueParentComponent?.proxy, depth = 0; vm && depth < 8; vm = vm.$parent, depth += 1) {
-            containers.push(vm, vm?.$data);
-          }
-        }
-        // 2026-10-01 实测：这个版本的详情页把水印模板挂在**组件实例**上（data.watermarkTemplate，
-        // 从「添加水印」按钮的 Vue 祖先链往上 2 层就能拿到），Vuex 里根本没有。
-        // 只扫 Vuex 会采到 0 条 —— 这正是"目录一直是空的"的另一半原因。
-        const buttons = [...document.querySelectorAll('button,[role="button"],a,label,.el-button,.el-link,.el-radio,span')]
-          .filter((node) => isVisible(node) && clean(node.textContent) === addText)
-          .map((node) => node.closest('button') || node);
-        const triggerNode = buttons[0] || null;
-        let triggerVm = triggerNode?.__vue__ || triggerNode?.__vueParentComponent?.proxy || null;
-        const ancestryKeys = [];
-        for (let depth = 0; triggerVm && depth < 12; triggerVm = triggerVm.$parent, depth += 1) {
-          containers.push(triggerVm, triggerVm?.$data);
-          const data = triggerVm?.$data || {};
-          ancestryKeys.push({
-            depth,
-            name: String(triggerVm?.$options?.name || triggerVm?.$options?._componentTag || '?'),
-            arrays: Object.keys(data).filter((key) => Array.isArray(data[key])).slice(0, 12),
-            hasWatermarkTemplate: Array.isArray(data.watermarkTemplate),
-          });
-        }
-        out.range_probe.vue_ancestry = ancestryKeys;
-        out.range_probe.had_trigger_node = Boolean(triggerNode);
-        // 关键：**不要碰到第一个数组就停**。Vue 组件上有大量叫 options 的数组
-        // （Element UI 的下拉/表格都有），一停就被它们劫持，真正的水印模板反而读不到。
-        // 做法：所有容器/所有候选键都扫一遍，逐条按别名归一化，坏数据自然被丢掉，再按 id 去重。
-        const seen = new Set();
-        for (const container of containers) {
-          if (!container || typeof container !== 'object') continue;
-          const sources = [container, container?.watermarkMenu, container?.watermarkConfig, container?.$data];
-          for (const source of sources) {
-            if (!source || typeof source !== 'object') continue;
-            for (const key of listKeys) {
-              if (!Array.isArray(source[key])) continue;
-              for (const item of source[key]) {
-                const id = clean(item?.template_id ?? item?.templateId ?? item?.watermark_id ?? item?.watermarkId ?? item?.id);
-                const name = clean(item?.name ?? item?.template_name ?? item?.templateName ?? item?.watermark_name ?? item?.watermarkName ?? item?.label);
-                if (id && name && !seen.has(id)) {
-                  seen.add(id);
-                  vueItems.push({
-                    template_id: id,
-                    name,
-                    preview_url: clean(item?.preview_url ?? item?.previewUrl ?? item?.image_url ?? item?.imageUrl ?? item?.img_url ?? item?.imgUrl ?? item?.url),
-                  });
-                }
-              }
-            }
-          }
-        }
-        if (vueItems.length) out.catalog_source = 'vue';
-      } catch (error) {
-        out.errors.push(`vue watermark list: ${String((error && error.message) || error)}`);
-      }
-
-      // ---- 打开「添加水印」菜单（hover 优先，click 兜底），只为读 DOM 行 ----
+      // ---- 2) 找「添加水印」触发器（真实页面是 <button><span>添加水印</span></button>）----
       const triggerCandidates = [...document.querySelectorAll('button,[role="button"],a,label,.el-button,.el-link,.el-radio,span')]
         .filter((node) => isVisible(node) && clean(node.textContent) === addText);
       // 真实页面是 <button><span> 添加水印 …</span></button>：同一个按钮会被数两次
@@ -251,11 +191,14 @@ async function readWatermarkCatalog(frame) {
         cls: trigger ? clean(trigger.className).slice(0, 80) : '',
         aria_controls: trigger ? clean(trigger.getAttribute('aria-controls')) : '',
       };
+
+      // ---- 3) 先打开菜单。真实页面（publish-ui）的水印模板是**第一次打开下拉时才加载**的，
+      //      打开前组件 data.watermarkTemplate 是空数组 —— 旧实现先扫 Vue 再开菜单，
+      //      所以永远读到 0 条（这就是「目录一直是空的」的真因）。----
       const menuVisible = () => {
         if (trigger?.getAttribute('aria-expanded') === 'true') return true;
         return [...document.querySelectorAll(menuSelectorForTrigger())].some((node) => isVisible(node));
       };
-      const domItems = [];
       if (trigger) {
         if (!menuVisible()) {
           for (const eventName of ['mouseenter', 'mouseover']) {
@@ -278,54 +221,162 @@ async function readWatermarkCatalog(frame) {
         } else {
           out.menu_method = 'already_open';
         }
-        if (menuVisible()) {
-          for (const menu of [...document.querySelectorAll(menuSelectorForTrigger())].filter(isVisible)) {
-            for (const node of menu.querySelectorAll(rowSelector)) {
-              if (!isVisible(node)) continue;
-              const id = clean(
-                node.getAttribute('data-watermark-id')
-                || node.getAttribute('data-template-id')
-                || node.getAttribute('data-templateid')
-                || node.getAttribute('data-watermarkid')
-                || node.getAttribute('data-id')
-                || node.getAttribute('data-value'),
-              );
-              const name = clean(
-                node.getAttribute('data-watermark-name')
-                || node.getAttribute('data-template-name')
-                || node.getAttribute('title')
-                || node.querySelector('[data-watermark-name],.watermark-name,.template-name')?.textContent
-                || node.textContent,
-              );
-              const image = node.querySelector('img');
-              if (id && name) domItems.push({ template_id: id, name, preview_url: clean(image?.src) });
-            }
-          }
-          if (domItems.length) out.catalog_source = out.catalog_source ? 'vue+dom' : 'dom';
+      }
 
-          // ---- 图片范围控件 probe：水印模板选完之后要选「第 1 张 / 第 2 张以后 / 指定」，
-          //      先把候选控件连同上下文一起读出来（不点）。----
-          const rangePattern = /^(第\s*\d+\s*张|首图|主图|全部图片|所有图片|指定图片|自定义范围|图片范围|应用范围|范围)/;
-          for (const node of document.querySelectorAll('button,[role="button"],label,span,div,li')) {
-            const text = clean(node.textContent);
-            if (!text || text.length > 20 || !rangePattern.test(text)) continue;
-            if (!isVisible(node)) continue;
-            out.range_probe.candidates.push({
-              tag: node.tagName.toLowerCase(),
-              cls: clean(node.className).slice(0, 90),
-              text,
-              parentCls: clean(node.parentElement?.className).slice(0, 90),
-              checked: Boolean(node.querySelector?.('input:checked')),
-            });
-            if (out.range_probe.candidates.length >= 25) break;
+      // ---- 4) 收集可扫的 Vue 容器（Vuex / 弹层组件 / 触发器祖先链）----
+      const containers = [];
+      try {
+        const rootVm = document.querySelector('#box1')?.__vue__ || document.querySelector('[id^="box"]')?.__vue__;
+        containers.push(
+          rootVm?.$refs?.productMaterialModuleRef,
+          rootVm?.$refs?.productMaterialModuleRef?.$data,
+          rootVm?.$store?.state?.shopee?.productMaterialModule,
+        );
+        for (const element of document.querySelectorAll('.el-dialog,.el-dialog__wrapper,[role="dialog"],.el-popper,.el-dropdown-menu,.el-select-dropdown')) {
+          for (let vm = element.__vue__ || element.__vueParentComponent?.proxy, depth = 0; vm && depth < 8; vm = vm.$parent, depth += 1) {
+            containers.push(vm, vm?.$data);
           }
         }
+        // 2026-10-01 实测：这个版本的详情页把水印模板挂在**组件实例**上（data.watermarkTemplate，
+        // 从「添加水印」按钮的 Vue 祖先链往上 2 层就能拿到），Vuex 里根本没有。
+        // 只扫 Vuex 会采到 0 条 —— 这正是「目录一直是空的」的另一半原因。
+        let triggerVm = trigger?.__vue__ || trigger?.__vueParentComponent?.proxy || null;
+        const ancestryKeys = [];
+        for (let depth = 0; triggerVm && depth < 12; triggerVm = triggerVm.$parent, depth += 1) {
+          containers.push(triggerVm, triggerVm?.$data);
+          const data = triggerVm?.$data || {};
+          ancestryKeys.push({
+            depth,
+            name: String(triggerVm?.$options?.name || triggerVm?.$options?._componentTag || '?'),
+            arrays: Object.keys(data).filter((key) => Array.isArray(data[key])).slice(0, 12),
+            hasWatermarkTemplate: Array.isArray(data.watermarkTemplate),
+            watermarkTemplateLength: Array.isArray(data.watermarkTemplate) ? data.watermarkTemplate.length : null,
+          });
+        }
+        out.range_probe.vue_ancestry = ancestryKeys;
+        out.range_probe.had_trigger_node = Boolean(trigger);
+        out.range_probe.container_count = containers.length;
+      } catch (error) {
+        out.errors.push(`vue containers: ${String((error && error.message) || error)}`);
       }
-      // 把菜单收回去（只收我们自己打开的；已打开的保持原样）
+
+      const readVueItems = () => {
+        // 关键：**不要碰到第一个数组就停**。Vue 组件上有大量叫 options 的数组
+        // （Element UI 的下拉/表格都有），一停就被它们劫持，真正的水印模板反而读不到。
+        // 做法：所有容器/所有候选键都扫一遍，逐条按别名归一化，坏数据自然被丢掉，再按 id 去重。
+        const items = [];
+        const seen = new Set();
+        for (const container of containers) {
+          if (!container || typeof container !== 'object') continue;
+          const sources = [container, container?.watermarkMenu, container?.watermarkConfig, container?.$data];
+          for (const source of sources) {
+            if (!source || typeof source !== 'object') continue;
+            for (const key of listKeys) {
+              if (!Array.isArray(source[key])) continue;
+              for (const item of source[key]) {
+                const id = clean(item?.template_id ?? item?.templateId ?? item?.watermark_id ?? item?.watermarkId ?? item?.id);
+                const name = clean(item?.name ?? item?.template_name ?? item?.templateName ?? item?.watermark_name ?? item?.watermarkName ?? item?.label);
+                if (id && name && !seen.has(id)) {
+                  seen.add(id);
+                  items.push({
+                    template_id: id,
+                    name,
+                    preview_url: clean(item?.preview_url ?? item?.previewUrl ?? item?.image_url ?? item?.imageUrl ?? item?.img_url ?? item?.imgUrl ?? item?.url),
+                  });
+                }
+              }
+            }
+          }
+        }
+        return items;
+      };
+
+      const readDomRows = () => {
+        const rows = [];
+        for (const menu of [...document.querySelectorAll(menuSelectorForTrigger())].filter(isVisible)) {
+          for (const node of menu.querySelectorAll(rowSelector)) {
+            if (!isVisible(node)) continue;
+            const id = clean(
+              node.getAttribute('data-watermark-id')
+              || node.getAttribute('data-template-id')
+              || node.getAttribute('data-templateid')
+              || node.getAttribute('data-watermarkid')
+              || node.getAttribute('data-id')
+              || node.getAttribute('data-value'),
+            );
+            const name = clean(
+              node.getAttribute('data-watermark-name')
+              || node.getAttribute('data-template-name')
+              || node.getAttribute('title')
+              || node.querySelector('[data-watermark-name],.watermark-name,.template-name')?.textContent
+              || node.textContent,
+            );
+            if (!name || NON_TEMPLATE_ROWS.some((pattern) => pattern.test(name))) continue;
+            const image = node.querySelector('img');
+            rows.push({ template_id: id, name, preview_url: clean(image?.src) });
+          }
+        }
+        return rows;
+      };
+
+      // ---- 5) 等懒加载：列表可能比菜单晚 1~3 秒才回来，轮询到有内容或超时为止 ----
+      let vueItems = readVueItems();
+      let domRows = readDomRows();
+      let waitedMs = 0;
+      const loadDeadlineMs = Math.max(6000, Number(menuTimeoutMs) || 6000) + 6000;
+      while (!vueItems.length && !domRows.length && waitedMs < loadDeadlineMs) {
+        await sleep(250);
+        waitedMs += 250;
+        vueItems = readVueItems();
+        domRows = readDomRows();
+      }
+      out.range_probe.load_wait_ms = waitedMs;
+      if (vueItems.length) out.catalog_source = 'vue';
+      out.range_probe.vue_item_count = vueItems.length;
+      out.range_probe.dom_row_count = domRows.length;
+
+      // ---- 6) DOM 行：真实页面的 <li class="el-dropdown-menu__item"> 里**没有 id**
+      //      （Vue 的 key 不落 DOM），只能按**名称精确相等**回查 Vue 列表拿 id。
+      //      对不上的行只记诊断，绝不猜 id（执行器按 ID + 名称双匹配点菜单）。----
+      const vueByName = new Map();
+      for (const item of vueItems) if (!vueByName.has(item.name)) vueByName.set(item.name, item);
+      const domItems = [];
+      for (const row of domRows) {
+        if (row.template_id) {
+          domItems.push(row);
+          continue;
+        }
+        const matched = vueByName.get(row.name);
+        if (!matched) {
+          out.range_probe.unmatched_dom_names = [...(out.range_probe.unmatched_dom_names || []), row.name].slice(0, 10);
+          continue;
+        }
+        domItems.push({ ...matched, preview_url: matched.preview_url || row.preview_url });
+      }
+      if (domItems.length && out.catalog_source === 'dom') out.catalog_source = 'dom';
+      if (domItems.length && out.catalog_source === 'vue') out.catalog_source = 'vue+dom';
+
+      // ---- 7) 把菜单收回去（只收我们自己打开的；已打开的保持原样）----
+      // 真实页面是 hover 型下拉：Element UI 靠 mouseleave 收菜单，Escape 对 hover 型不一定
+      // 买账，click 只对 click 型皮肤有效。三步依次兜底，最后如实回报菜单有没有真的关上
+      // （采集完把浮层留在页面上会挡住操作员后面的点击）。
       if (out.menu_opened_by_collector) {
-        document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+        const rect = trigger ? trigger.getBoundingClientRect() : null;
+        for (const eventName of ['mouseleave', 'mouseout']) {
+          trigger?.dispatchEvent(new MouseEvent(eventName, {
+            bubbles: true, cancelable: true, view: window,
+            clientX: rect ? rect.left + 1 : 0, clientY: rect ? rect.top + 1 : 0,
+          }));
+        }
+        await sleep(200);
+        if (menuVisible()) {
+          document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+          await sleep(150);
+        }
+        if (menuVisible() && trigger) trigger.click();
         await sleep(150);
       }
+      out.menu_closed = !menuVisible();
 
       out.templates = (() => {
         const seen = new Set();
